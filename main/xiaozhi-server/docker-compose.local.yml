@@ -1,10 +1,10 @@
 # 本地部署：仅 xiaozhi-server + manager-web/manager-api
 # 使用宿主机或已有 Docker 容器中的 MySQL / Redis（不包含 db/redis 服务）
 #
-# 使用前：
-#   1. cp .env.local.example .env 并按本机 MySQL/Redis 修改
-#   2. 在项目根目录执行 ./docker-build-local.sh 构建镜像
-#   3. docker compose -f docker-compose.local.yml up -d
+# 使用前（推荐）：
+#   ./check-install-local.sh            # 检查/安装 Docker、目录、.env、model.pt
+#   ./check-install-local.sh --build    # 同上并构建镜像
+#   docker compose -f docker-compose.local.yml up -d
 
 services:
   xiaozhi-esp32-server:
@@ -22,7 +22,9 @@ services:
       TZ: ${TZ:-Asia/Shanghai}
     volumes:
       - ./data:/opt/xiaozhi-esp32-server/data
-      - ./models/SenseVoiceSmall/model.pt:/opt/xiaozhi-esp32-server/models/SenseVoiceSmall/model.pt
+      # 挂目录而非单文件：宿主机缺少 model.pt 时，Docker 不会把 model.pt 建成空目录
+      # 使用本地 FunASR 前请先下载：https://modelscope.cn/models/iic/SenseVoiceSmall/resolve/master/model.pt
+      - ./models/SenseVoiceSmall:/opt/xiaozhi-esp32-server/models/SenseVoiceSmall
 
   xiaozhi-esp32-server-web:
     image: ${DOCKER_IMAGE_WEB:-xiaozhi-local/xiaozhi-esp32-server-web:latest}

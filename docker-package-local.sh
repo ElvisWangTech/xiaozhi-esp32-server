@@ -103,7 +103,8 @@ services:
       TZ: ${TZ:-Asia/Shanghai}
     volumes:
       - ./data:/opt/xiaozhi-esp32-server/data
-      - ./models/SenseVoiceSmall/model.pt:/opt/xiaozhi-esp32-server/models/SenseVoiceSmall/model.pt
+      # 挂目录而非单文件，避免宿主机缺少 model.pt 时被 Docker 建成空目录
+      - ./models/SenseVoiceSmall:/opt/xiaozhi-esp32-server/models/SenseVoiceSmall
 
   xiaozhi-esp32-server-web:
     image: ${DOCKER_IMAGE_WEB}
