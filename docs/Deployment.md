@@ -269,7 +269,8 @@ LLM:
 5、[如何提高小智对话响应速度？](./FAQ.md)<br/>
 6、[我说话很慢，停顿时小智老是抢话](./FAQ.md)<br/>
 ## 部署相关教程
-1、[如何自动拉取本项目最新代码自动编译和启动](./dev-ops-integration.md)<br/>
+1、[服务器上拉源码、启动 Docker、重启与升级](./ops-server-docker.md)<br/>
+2、[如何自动拉取本项目最新代码自动编译和启动](./dev-ops-integration.md)<br/>
 2、[如何部署MQTT网关开启MQTT+UDP协议](./mqtt-gateway-integration.md)<br/>
 3、[如何与Nginx集成](https://github.com/xinnan-tech/xiaozhi-esp32-server/issues/791)<br/>
 ## 拓展相关教程
@@ -281,6 +282,7 @@ LLM:
 6、[如何开启声纹识别](./voiceprint-integration.md)<br/>
 7、[新闻插件源配置指南](./newsnow_plugin_config.md)<br/>
 8、[天气插件使用指南](./weather-integration.md)<br/>
+9、[如何对接小米MiMo语音识别和语音合成](./mimo-asr-tts-integration.md)<br/>
 ## 语音克隆、本地语音部署相关教程
 1、[如何在智控台克隆音色](./huoshan-streamTTS-voice-cloning.md)<br/>
 2、[如何部署集成index-tts本地语音](./index-stream-integration.md)<br/>

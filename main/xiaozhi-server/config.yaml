@@ -522,6 +522,17 @@ ASR:
     base_url: https://api.groq.com/openai/v1/audio/transcriptions
     model_name: whisper-large-v3-turbo
     output_dir: tmp/
+  MimoASR:
+    # 小米 MiMo 语音识别（Chat Completions + input_audio，不能复用 OpenaiASR）
+    # 文档：https://mimo.mi.com/docs/zh-CN/quick-start/usage-guide/audio/Speech-Recognition
+    # 申请 Key：https://mimo.mi.com/
+    # 注意：base_url 填 API 根地址 /v1，不要填 /v1/audio/transcriptions
+    type: mimo
+    api_key: 你的小米MiMo API密钥
+    base_url: https://api.xiaomimimo.com/v1
+    model_name: mimo-v2.5-asr
+    language: zh  # auto / zh / en
+    output_dir: tmp/
   VoskASR:
     # 官方网站：https://alphacephei.com/vosk/
     # 配置说明：
@@ -610,6 +621,12 @@ VAD:
 LLM:
   # 所有openai类型均可以修改超参，以AliLLM为例
   # 当前支持的type为openai、dify、ollama，可自行适配
+  MimoLLM:
+    # 小米 MiMo 大模型，OpenAI 兼容接口（ASR/TTS 请用 MimoASR / MimoTTS，不要套 OpenaiASR）
+    type: openai
+    base_url: https://api.xiaomimimo.com/v1
+    model_name: mimo-v2.5
+    api_key: 你的小米MiMo API密钥
   AliLLM:
     # 定义LLM API类型
     type: openai
@@ -1084,6 +1101,18 @@ TTS:
     speed: 1
     output_dir: tmp/
     # language: "中文"  # 指定输出语种,如:中文、英语、日语、韩语等,请根据所选音色支持的语言进行设置,不填则默认为中文
+  MimoTTS:
+    # 小米 MiMo 语音合成（Chat Completions + audio，不能复用 OpenAITTS）
+    # 文档：https://mimo.mi.com/docs/zh-CN/quick-start/usage-guide/audio/speech-synthesis-v2.5
+    # 预置音色：mimo_default、冰糖、茉莉、苏打、白桦、Mia、Chloe、Milo、Dean
+    type: mimo
+    api_key: 你的小米MiMo API密钥
+    base_url: https://api.xiaomimimo.com/v1
+    model: mimo-v2.5-tts
+    voice: 冰糖
+    format: wav
+    # style_prompt: 用温柔自然的女声说话，语速适中。
+    output_dir: tmp/
   CustomTTS:
     # 自定义的TTS接口服务，请求参数可自定义，可接入众多TTS服务
     # 以本地部署的KokoroTTS为例

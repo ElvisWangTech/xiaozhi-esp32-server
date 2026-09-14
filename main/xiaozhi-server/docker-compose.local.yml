@@ -13,6 +13,10 @@ services:
     restart: unless-stopped
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    # 容器内解析不了 api.xiaomimimo.com 时可取消下面注释后 recreate
+    # dns:
+    #   - 223.5.5.5
+    #   - 114.114.114.114
     ports:
       - "${SERVER_WS_PORT:-8000}:8000"
       - "${SERVER_HTTP_PORT:-8003}:8003"
