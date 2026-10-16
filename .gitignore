@@ -179,6 +179,7 @@ uploadfile
 *.json
 .vscode
 .cursor
+.workbuddy
  
 !package.json
 !**/package.json

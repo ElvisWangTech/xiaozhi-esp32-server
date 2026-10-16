@@ -341,6 +341,21 @@ Websocket接口地址: wss://2662r3426b.vicp.fun/xiaozhi/v1/
 
 ---
 
+### 本地开发启动脚本
+```shell
+# 首次启动redis
+docker run -d --name xiaozhi-redis -p 6379:6379 --restart unless-stopped redis:8.0
+# manager-web
+cd main/manager-web && npm run serve
+
+# manager-api（端口必须显式指定）
+cd main/manager-api && SERVER_PORT=8002 mvn spring-boot:run -DskipTests -Dspring-boot.run.arguments=--server.port=8002
+
+# xiaozhi-server
+cd main/xiaozhi-server && DYLD_LIBRARY_PATH=$HOME/.local/lib NO_PROXY=127.0.0.1,localhost .venv/bin/python app.py
+
+```
+
 ## 鸣谢 🙏
 
 | Logo | 项目/公司 | 说明 |
