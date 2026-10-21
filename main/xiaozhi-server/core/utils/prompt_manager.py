@@ -145,6 +145,9 @@ class PromptManager:
             # 先从缓存获取
             cached_location = self.cache_manager.get(self.CacheType.LOCATION, client_ip)
             if cached_location is not None:
+                self.logger.bind(tag=TAG).info(
+                    f"位置信息命中缓存: ip={client_ip}, location={cached_location}"
+                )
                 return cached_location
 
             # 缓存未命中，调用API获取
@@ -153,6 +156,9 @@ class PromptManager:
             ip_info = get_ip_info(client_ip, self.logger)
             city = ip_info.get("city", "未知位置")
             location = f"{city}"
+            self.logger.bind(tag=TAG).info(
+                f"位置信息解析完成: ip={client_ip}, city={city}"
+            )
 
             # 存入缓存
             self.cache_manager.set(self.CacheType.LOCATION, client_ip, location)

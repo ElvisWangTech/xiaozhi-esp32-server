@@ -78,20 +78,40 @@ def get_ip_info(ip_addr, logger):
         # 导入全局缓存管理器
         from core.utils.cache.manager import cache_manager, CacheType
 
+        original_ip = ip_addr
         # 先从缓存获取
-        cached_ip_info = cache_manager.get(CacheType.IP_INFO, ip_addr)
+        cached_ip_info = cache_manager.get(CacheType.IP_INFO, original_ip)
         if cached_ip_info is not None:
+            logger.bind(tag=TAG).info(
+                f"IP定位命中缓存: ip={original_ip}, city={cached_ip_info.get('city')}"
+            )
             return cached_ip_info
 
-        # 缓存未命中，调用API
-        if is_private_ip(ip_addr):
-            ip_addr = ""
-        url = f"https://whois.pconline.com.cn/ipJson.jsp?json=true&ip={ip_addr}"
+        # 缓存未命中，调用API。内网地址会被清空，接口按请求来源归属，查不到时常回落合肥
+        query_ip = original_ip
+        private_ip = is_private_ip(original_ip)
+        if private_ip:
+            query_ip = ""
+            logger.bind(tag=TAG).info(
+                f"IP定位: {original_ip} 判定为内网地址，查询参数改为空IP"
+            )
+        url = f"https://whois.pconline.com.cn/ipJson.jsp?json=true&ip={query_ip}"
         resp = requests.get(url).json()
         ip_info = {"city": resp.get("city")}
+        logger.bind(tag=TAG).info(
+            "IP定位接口返回: "
+            f"original_ip={original_ip}, private={private_ip}, query_ip={query_ip!r}, "
+            f"resp_ip={resp.get('ip')}, pro={resp.get('pro')}, city={resp.get('city')}, "
+            f"addr={resp.get('addr')}"
+        )
 
-        # 存入缓存
-        cache_manager.set(CacheType.IP_INFO, ip_addr, ip_info)
+        # 存入缓存。内网IP写入的键是空字符串，与上面的查找键不一致
+        cache_manager.set(CacheType.IP_INFO, query_ip, ip_info)
+        if query_ip != original_ip:
+            logger.bind(tag=TAG).info(
+                f"IP定位缓存键不一致: 查找键={original_ip!r}, 写入键={query_ip!r}, "
+                f"city={ip_info.get('city')}"
+            )
         return ip_info
     except Exception as e:
         logger.bind(tag=TAG).error(f"Error getting client ip info: {e}")

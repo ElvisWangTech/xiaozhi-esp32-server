@@ -167,6 +167,8 @@ def get_weather(conn: "ConnectionHandler", location: str = None, lang: str = "zh
     api_key = weather_config.get("api_key", "a861d0d5e7bf4ee1a83d9a9e4f96d4da")
     default_location = weather_config.get("default_location", "广州")
     client_ip = conn.client_ip
+    requested_location = location
+    location_source = "调用方传入"
 
     # 优先使用用户提供的location参数
     if not location:
@@ -176,18 +178,27 @@ def get_weather(conn: "ConnectionHandler", location: str = None, lang: str = "zh
             cached_ip_info = cache_manager.get(CacheType.IP_INFO, client_ip)
             if cached_ip_info:
                 location = cached_ip_info.get("city")
+                location_source = "IP缓存"
             else:
                 # 缓存未命中，调用API获取
                 ip_info = get_ip_info(client_ip, logger)
                 if ip_info:
                     cache_manager.set(CacheType.IP_INFO, client_ip, ip_info)
                     location = ip_info.get("city")
+                    location_source = "IP解析"
 
             if not location:
                 location = default_location
+                location_source = "默认城市（IP未解析出城市）"
         else:
             # 若无IP，使用默认位置
             location = default_location
+            location_source = "默认城市（无客户端IP）"
+    logger.bind(tag=TAG).info(
+        "天气定位: "
+        f"client_ip={client_ip}, requested={requested_location}, resolved={location}, "
+        f"source={location_source}, default={default_location}"
+    )
     # 尝试从缓存获取完整天气报告
     weather_cache_key = f"full_weather_{location}_{lang}"
     cached_weather_report = cache_manager.get(CacheType.WEATHER, weather_cache_key)

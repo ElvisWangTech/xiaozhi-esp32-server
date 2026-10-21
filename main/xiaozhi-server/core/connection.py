@@ -216,10 +216,16 @@ class ConnectionHandler:
             )
             if real_ip:
                 self.client_ip = real_ip.split(",")[0].strip()
+                ip_source = (
+                    "x-real-ip"
+                    if self.headers.get("x-real-ip")
+                    else "x-forwarded-for"
+                )
             else:
                 self.client_ip = ws.remote_address[0]
+                ip_source = "remote_address"
             self.logger.bind(tag=TAG).info(
-                f"{self.client_ip} conn - Headers: {self.headers}"
+                f"{self.client_ip} conn - ip_source={ip_source} - Headers: {self.headers}"
             )
 
             self.device_id = self.headers.get("device-id", None)
