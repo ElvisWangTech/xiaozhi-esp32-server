@@ -38,7 +38,13 @@ from core.auth import AuthenticationError
 from config.config_loader import get_private_config_from_api
 from core.providers.tts.dto.dto import ContentType, TTSMessageDTO, SentenceType
 from config.logger import setup_logging, build_module_string, create_connection_logger
-from config.manage_api_client import DeviceNotFoundException, DeviceBindException, generate_and_save_chat_title
+from config.manage_api_client import (
+    DeviceNotFoundException,
+    DeviceBindException,
+    generate_and_save_chat_title,
+    get_agent_models,
+    get_voice_activation_session,
+)
 from core.utils.prompt_manager import PromptManager
 from core.utils.voiceprint_provider import VoiceprintProvider
 from core.utils.util import get_system_error_response
@@ -92,6 +98,9 @@ class ConnectionHandler:
         self.server = server  # 保存server实例的引用
 
         self.need_bind = False  # 是否需要绑定设备
+        self.voice_activation = False  # 未绑定且激活方式为语音
+        self.voice_onboarding = None  # nickname 表示绑定后还要设置昵称
+        self.voice_activation_handler = None
         self.bind_completed_event = asyncio.Event()
         self.bind_code = None  # 绑定设备的验证码
         self.last_bind_prompt_time = 0  # 上次播放绑定提示的时间戳(秒)
@@ -347,8 +356,8 @@ class ConnectionHandler:
                 return
 
         # 已经获取到真实状态，检查是否需要绑定
-        if self.need_bind:
-            # 需要绑定，丢弃消息
+        if self.need_bind and not self.voice_activation:
+            # 控制面板激活码路径才丢弃语音，语音激活要继续听
             await self._discard_message_with_bind_prompt()
             return
 
@@ -489,8 +498,21 @@ class ConnectionHandler:
             asyncio.run_coroutine_threadsafe(
                 self.tts.open_audio_channels(self), self.loop
             )
-            if self.need_bind:
+            if self.need_bind and not self.voice_activation:
                 self.bind_completed_event.set()
+                return
+            if self.need_bind and self.voice_activation:
+                if self.vad is None:
+                    self.vad = self._vad
+                if self.asr is None:
+                    self.asr = self._initialize_asr()
+                asyncio.run_coroutine_threadsafe(
+                    self.asr.open_audio_channels(self), self.loop
+                )
+                self.bind_completed_event.set()
+                asyncio.run_coroutine_threadsafe(
+                    self._start_voice_activation_prompt(), self.loop
+                )
                 return
             self.selected_module_str = build_module_string(
                 self.config.get("selected_module", {})
@@ -530,9 +552,14 @@ class ConnectionHandler:
             self._init_prompt_enhancement()
             """注入工具调用few-shot示例（仅function_call模式）"""
             self._inject_tool_call_fewshot()
+            if self.voice_onboarding == "nickname" and self.voice_activation_handler is None:
+                asyncio.run_coroutine_threadsafe(
+                    self._start_nickname_onboarding(), self.loop
+                )
 
         except Exception as e:
             self.logger.bind(tag=TAG).error(f"实例化组件失败: {e}")
+            self.bind_completed_event.set()
 
     def _init_prompt_enhancement(self):
 
@@ -624,13 +651,86 @@ class ConnectionHandler:
     def _initialize_tts(self):
         """初始化TTS"""
         tts = None
-        if not self.need_bind:
-            tts = initialize_tts(self.config)
+        if not self.need_bind or self.voice_activation:
+            try:
+                tts = initialize_tts(self.config)
+            except Exception as e:
+                self.logger.bind(tag=TAG).error(f"初始化TTS失败: {e}")
 
         if tts is None:
             tts = DefaultTTS(self.config, delete_audio_file=True)
 
         return tts
+
+    async def _detect_voice_activation(self):
+        """未绑定设备再问一次激活方式，只有 voice 才进入对话绑定。"""
+        try:
+            session = await get_voice_activation_session(self.headers.get("device-id"))
+            if (
+                session
+                and session.get("activationType") == "voice"
+                and not session.get("bound")
+            ):
+                self.voice_activation = True
+        except Exception as e:
+            self.logger.bind(tag=TAG).warning(f"语音激活会话查询失败: {e}")
+
+    async def _start_voice_activation_prompt(self):
+        from core.handle.voice_activation import VoiceActivationSession
+
+        for _ in range(30):
+            if self.tts is not None and self.asr is not None:
+                break
+            await asyncio.sleep(0.1)
+        self.voice_activation_handler = VoiceActivationSession(self, stage="bind")
+        await self.voice_activation_handler.start()
+
+    async def _start_nickname_onboarding(self):
+        from core.handle.voice_activation import VoiceActivationSession
+
+        self.voice_activation_handler = VoiceActivationSession(self, stage="nickname")
+        await self.voice_activation_handler.start()
+
+    async def complete_voice_bind_setup(self):
+        """绑定成功后拉取私有配置，补齐对话组件，并保留当前语音通道。"""
+        await self._initialize_private_config_async()
+        if self.need_bind:
+            return False
+        await self.loop.run_in_executor(None, self._finish_bound_components)
+        return True
+
+    def _finish_bound_components(self):
+        if self.config.get("prompt") is not None and not self.prompt:
+            prompt = self.prompt_manager.get_quick_prompt(self.config["prompt"])
+            self.change_system_prompt(prompt)
+        self._initialize_memory()
+        self._initialize_intent()
+        self._init_report_threads()
+        if self.config.get("prompt"):
+            self._init_prompt_enhancement()
+        self._inject_tool_call_fewshot()
+
+    async def refresh_agent_prompt(self):
+        try:
+            private = await get_agent_models(
+                self.headers.get("device-id"),
+                self.headers.get("client-id", self.headers.get("device-id")),
+                self.config.get("selected_module", {}),
+            )
+        except Exception as e:
+            self.logger.bind(tag=TAG).warning(f"刷新助手提示词失败: {e}")
+            return
+        prompt = private.get("prompt") if private else None
+        if not prompt:
+            return
+        self.config["prompt"] = prompt
+        enhanced = self.prompt_manager.build_enhanced_prompt(
+            prompt,
+            self.device_id,
+            self.client_ip,
+            emoji_enabled=(self.features or {}).get("emoji", True),
+        )
+        self.change_system_prompt(enhanced or prompt)
 
     def _initialize_asr(self):
         """初始化ASR"""
@@ -692,6 +792,7 @@ class ConnectionHandler:
             self.logger.bind(tag=TAG).info(
                 f"{time.time() - begin_time} 秒，异步获取差异化配置成功: {json.dumps(filter_sensitive_info(private_config), ensure_ascii=False)}"
             )
+            self.voice_onboarding = private_config.get("voice_onboarding")
             self.need_bind = False
             self.bind_completed_event.set()
         except DeviceNotFoundException as e:
@@ -701,6 +802,7 @@ class ConnectionHandler:
             self.need_bind = True
             self.bind_code = e.bind_code
             private_config = {}
+            await self._detect_voice_activation()
         except Exception as e:
             self.need_bind = True
             self.logger.bind(tag=TAG).error(f"异步获取差异化配置失败: {e}")
@@ -785,6 +887,14 @@ class ConnectionHandler:
             self.config["TTS"][select_tts_module]["correct_words"] = private_config[
                 "correct_words"
             ]
+
+        if self.voice_activation:
+            if self.asr is not None:
+                init_asr = False
+            if self.tts is not None:
+                init_tts = False
+            if self.vad is not None:
+                init_vad = False
 
         # 使用 run_in_executor 在线程池中执行 initialize_modules，避免阻塞主循环
         try:
@@ -1553,7 +1663,7 @@ class ConnectionHandler:
         try:
             while not self.stop_event.is_set():
                 last_activity_time = self.last_activity_time
-                if self.need_bind:
+                if self.need_bind and not self.voice_activation:
                     last_activity_time = self.first_activity_time
 
                 # 检查是否超时（只有在时间戳已初始化的情况下）

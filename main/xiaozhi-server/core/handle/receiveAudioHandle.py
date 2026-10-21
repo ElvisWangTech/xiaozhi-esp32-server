@@ -64,6 +64,13 @@ async def startToChat(conn: "ConnectionHandler", text):
     else:
         conn.current_speaker = None
 
+    if getattr(conn, "voice_onboarding", None) == "nickname" and getattr(conn, "voice_activation_handler", None) is None:
+        return
+
+    if getattr(conn, "voice_activation_handler", None) is not None:
+        await conn.voice_activation_handler.handle_text(actual_text)
+        return
+
     if conn.need_bind:
         await check_bind_device(conn)
         return
@@ -106,6 +113,9 @@ async def no_voice_close_connect(conn: "ConnectionHandler", have_voice):
         close_connection_no_voice_time = int(
             conn.config.get("close_connection_no_voice_time", 120)
         )
+        handler = getattr(conn, "voice_activation_handler", None)
+        if handler is not None and getattr(handler, "state", None) == "ask_code":
+            close_connection_no_voice_time = max(close_connection_no_voice_time, 300)
         if (
             not conn.close_after_chat
             and no_voice_time > 1000 * close_connection_no_voice_time
@@ -115,6 +125,9 @@ async def no_voice_close_connect(conn: "ConnectionHandler", have_voice):
             end_prompt = conn.config.get("end_prompt", {})
             if end_prompt and end_prompt.get("enable", True) is False:
                 conn.logger.bind(tag=TAG).info("结束对话，无需发送结束提示语")
+                await conn.close()
+                return
+            if getattr(conn, "voice_activation_handler", None) is not None:
                 await conn.close()
                 return
             prompt = end_prompt.get("prompt")

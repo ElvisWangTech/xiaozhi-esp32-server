@@ -183,6 +183,15 @@ async def get_agent_models(
     )
 
 
+async def get_voice_activation_session(mac_address: str) -> Optional[Dict]:
+    """查询设备是语音激活，还是已经进入昵称引导。"""
+    return await ManageApiClient._instance._execute_async_request(
+        "POST",
+        "/device/voice-activation/session",
+        json={"macAddress": mac_address},
+    )
+
+
 async def get_correct_words(mac_address: str) -> Optional[Dict]:
     """获取智能体替换词"""
     try:

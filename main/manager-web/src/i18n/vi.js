@@ -26,7 +26,7 @@ export default {
   'header.featureManagement': 'Cấu hình chức năng hệ thống',
   'header.changePassword': 'Đổi mật khẩu',
   'header.logout': 'Đăng xuất',
-  'header.searchPlaceholder': 'Tên, thẻ hoặc tìm kiếm mac',
+  'header.searchPlaceholder': 'Tên, thẻ, MAC hoặc số điện thoại',
 
   // McpToolCallDialog component text
   'mcpToolCall.title': 'Gọi công cụ',
@@ -727,6 +727,8 @@ export default {
   'home.wish': 'Chúc bạn một ngày tuyệt vời!',
   'home.languageModel': 'LLM',
   'home.voiceModel': 'TTS',
+  'home.boundPhone': 'Số điện thoại đã liên kết',
+  'home.phoneNotRecorded': 'Chưa ghi',
   'home.configureRole': 'Vai trò',
   'home.voiceprintRecognition': 'Giọng nói',
   'home.deviceManagement': 'Thiết bị',

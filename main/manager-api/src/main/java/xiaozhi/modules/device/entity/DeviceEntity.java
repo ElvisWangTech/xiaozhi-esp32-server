@@ -28,6 +28,12 @@ public class DeviceEntity {
     @Schema(description = "MAC地址")
     private String macAddress;
 
+    @Schema(description = "绑定手机号")
+    private String phone;
+
+    @Schema(description = "语音激活引导状态：nickname待设置昵称，done已完成")
+    private String onboardingStatus;
+
     @Schema(description = "最后连接时间")
     private Date lastConnectedAt;
 

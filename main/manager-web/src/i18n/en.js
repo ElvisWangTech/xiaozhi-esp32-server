@@ -26,7 +26,7 @@ export default {
   'header.featureManagement': 'System Feature Management',
   'header.changePassword': 'Change Password',
   'header.logout': 'Logout',
-  'header.searchPlaceholder': 'Name, tag or MAC search',
+  'header.searchPlaceholder': 'Name, tag, MAC or phone',
 
   // McpToolCallDialog component text
   'mcpToolCall.title': 'Tool Call',
@@ -727,6 +727,8 @@ export default {
   'home.wish': "Let's have a wonderful day!",
   'home.languageModel': 'LLM',
   'home.voiceModel': 'TTS',
+  'home.boundPhone': 'Bound phone',
+  'home.phoneNotRecorded': 'Not recorded',
   'home.configureRole': 'Config Role',
   'home.voiceprintRecognition': 'Voiceprint',
   'home.deviceManagement': 'Devices',

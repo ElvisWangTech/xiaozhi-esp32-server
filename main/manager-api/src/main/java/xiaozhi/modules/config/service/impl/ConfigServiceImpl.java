@@ -84,6 +84,7 @@ public class ConfigServiceImpl implements ConfigService {
             throw new RenException(ErrorCode.AGENT_TEMPLATE_NOT_FOUND);
         }
 
+        // 未绑定设备没有智能体。语音激活播报固定用 MiMo，音色用模型自己的配置。
         // 构建模块配置
         buildModuleConfig(
                 null,
@@ -101,7 +102,7 @@ public class ConfigServiceImpl implements ConfigService {
                 null,
                 null,
                 null,
-                null,
+                "TTS_MimoTTS",
                 null,
                 null,
                 null,
@@ -170,6 +171,9 @@ public class ConfigServiceImpl implements ConfigService {
         // 获取单台设备每天最多输出字数
         String deviceMaxOutputSize = sysParamsService.getValue("device_max_output_size", true);
         result.put("device_max_output_size", deviceMaxOutputSize);
+        if ("nickname".equals(device.getOnboardingStatus())) {
+            result.put("voice_onboarding", "nickname");
+        }
 
         // 获取聊天记录配置
         Integer chatHistoryConf = agent.getChatHistoryConf();

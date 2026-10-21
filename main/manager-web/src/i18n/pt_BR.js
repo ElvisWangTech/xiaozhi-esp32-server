@@ -26,7 +26,7 @@ export default {
   'header.featureManagement': 'Gerenciamento de Funcionalidades do Sistema',
   'header.changePassword': 'Alterar Senha',
   'header.logout': 'Sair',
-  'header.searchPlaceholder': 'Nome, tag ou pesquisa no Mac',
+  'header.searchPlaceholder': 'Nome, tag, MAC ou telefone',
 
   // Texto do componente McpToolCallDialog
   'mcpToolCall.title': 'Chamada de Ferramenta',
@@ -727,6 +727,8 @@ export default {
   'home.wish': 'Vamos ter um dia maravilhoso!',
   'home.languageModel': 'LLM',
   'home.voiceModel': 'TTS',
+  'home.boundPhone': 'Telefone vinculado',
+  'home.phoneNotRecorded': 'Não registrado',
   'home.configureRole': 'ConfRoles',
   'home.voiceprintRecognition': 'RecVoz',
   'home.deviceManagement': 'Dispositivos',

@@ -140,6 +140,34 @@ public class RedisKeys {
     }
 
     /**
+     * 语音激活短信：本地模拟验证码摘要
+     */
+    public static String getVoiceSmsCodeKey(String phone) {
+        return "voice:sms:code:" + phone;
+    }
+
+    /**
+     * 语音激活短信：校验失败次数
+     */
+    public static String getVoiceSmsAttemptKey(String phone) {
+        return "voice:sms:attempt:" + phone;
+    }
+
+    /**
+     * 语音激活短信：上次发送时间（毫秒）
+     */
+    public static String getVoiceSmsLastSendKey(String phone) {
+        return "voice:sms:last:" + phone;
+    }
+
+    /**
+     * 语音激活短信：当日发送次数
+     */
+    public static String getVoiceSmsDailyKey(String phone, String day) {
+        return "voice:sms:daily:" + phone + ":" + day;
+    }
+
+    /**
      * 聊天记录UUID映射的Key
      */
     public static String getChatHistoryKey(String uuid) {

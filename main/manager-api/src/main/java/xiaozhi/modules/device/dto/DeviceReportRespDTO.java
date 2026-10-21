@@ -14,6 +14,9 @@ public class DeviceReportRespDTO {
     @Schema(description = "激活码")
     private Activation activation;
 
+    @Schema(description = "激活方式")
+    private String activation_type;
+
     @Schema(description = "错误信息")
     private String error;
 

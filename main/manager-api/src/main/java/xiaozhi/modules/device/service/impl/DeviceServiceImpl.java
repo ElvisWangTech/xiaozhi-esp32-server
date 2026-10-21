@@ -104,9 +104,24 @@ public class DeviceServiceImpl extends BaseServiceImpl<DeviceDao, DeviceEntity> 
 
     @Override
     public Boolean deviceActivation(String agentId, String activationCode) {
+        UserDetail user = SecurityUser.getUser();
+        if (user.getId() == null) {
+            throw new RenException(ErrorCode.USER_NOT_LOGIN);
+        }
+        activateDevice(agentId, activationCode, user.getId(), null, null);
+        return true;
+    }
+
+    @Override
+    public void activateDevice(String agentId, String activationCode, Long userId, String phone,
+            String onboardingStatus) {
         if (StringUtils.isBlank(activationCode)) {
             throw new RenException(ErrorCode.ACTIVATION_CODE_EMPTY);
         }
+        if (userId == null) {
+            throw new RenException(ErrorCode.USER_NOT_LOGIN);
+        }
+        assertAgentHasNoDevice(agentId);
         String deviceKey = RedisKeys.getOtaActivationCode(activationCode);
         Object cacheDeviceId = redisUtils.get(deviceKey);
         if (ToolUtil.isEmpty(cacheDeviceId)) {
@@ -131,10 +146,6 @@ public class DeviceServiceImpl extends BaseServiceImpl<DeviceDao, DeviceEntity> 
         String macAddress = (String) cacheMap.get("mac_address");
         String board = (String) cacheMap.get("board");
         String appVersion = (String) cacheMap.get("app_version");
-        UserDetail user = SecurityUser.getUser();
-        if (user.getId() == null) {
-            throw new RenException(ErrorCode.USER_NOT_LOGIN);
-        }
 
         Date currentTime = new Date();
         DeviceEntity deviceEntity = new DeviceEntity();
@@ -143,18 +154,19 @@ public class DeviceServiceImpl extends BaseServiceImpl<DeviceDao, DeviceEntity> 
         deviceEntity.setAgentId(agentId);
         deviceEntity.setAppVersion(appVersion);
         deviceEntity.setMacAddress(macAddress);
-        deviceEntity.setUserId(user.getId());
-        deviceEntity.setCreator(user.getId());
+        deviceEntity.setUserId(userId);
+        deviceEntity.setPhone(phone);
+        deviceEntity.setOnboardingStatus(onboardingStatus);
+        deviceEntity.setCreator(userId);
         deviceEntity.setAutoUpdate(1);
         deviceEntity.setCreateDate(currentTime);
-        deviceEntity.setUpdater(user.getId());
+        deviceEntity.setUpdater(userId);
         deviceEntity.setUpdateDate(currentTime);
         deviceEntity.setLastConnectedAt(currentTime);
         deviceDao.insert(deviceEntity);
 
         // 清理redis缓存、清除智能体设备数量缓存
         redisUtils.delete(List.of(cacheDeviceKey, deviceKey, RedisKeys.getAgentDeviceCountById(agentId)));
-        return true;
     }
 
     /**
@@ -288,6 +300,8 @@ public class DeviceServiceImpl extends BaseServiceImpl<DeviceDao, DeviceEntity> 
             // 如果设备不存在，则生成激活码
             DeviceReportRespDTO.Activation code = buildActivation(macAddress, deviceReport);
             response.setActivation(code);
+            // 默认为code激活，这里改为语音激活
+            response.setActivation_type("voice");
         }
 
         return response;
@@ -434,6 +448,16 @@ public class DeviceServiceImpl extends BaseServiceImpl<DeviceDao, DeviceEntity> 
     }
 
     @Override
+    public List<DeviceEntity> listByAgentId(String agentId) {
+        if (StringUtils.isBlank(agentId)) {
+            return List.of();
+        }
+        QueryWrapper<DeviceEntity> wrapper = new QueryWrapper<>();
+        wrapper.eq("agent_id", agentId);
+        return baseDao.selectList(wrapper);
+    }
+
+    @Override
     public Date getLatestLastConnectionTime(String agentId) {
         // 查询是否有缓存时间，有则返回
         Date cachedDate = (Date) redisUtils.get(RedisKeys.getAgentDeviceLastConnectedAtById(agentId));
@@ -445,6 +469,29 @@ public class DeviceServiceImpl extends BaseServiceImpl<DeviceDao, DeviceEntity> 
             redisUtils.set(RedisKeys.getAgentDeviceLastConnectedAtById(agentId), maxDate);
         }
         return maxDate;
+    }
+
+    private void assertAgentHasNoDevice(String agentId) {
+        if (StringUtils.isBlank(agentId)) {
+            throw new RenException(ErrorCode.AGENT_NOT_FOUND);
+        }
+        QueryWrapper<DeviceEntity> wrapper = new QueryWrapper<>();
+        wrapper.eq("agent_id", agentId);
+        Long count = baseDao.selectCount(wrapper);
+        if (count != null && count > 0) {
+            throw new RenException("该智能体已绑定设备，请新建智能体后再绑定");
+        }
+    }
+
+    @SuppressWarnings("unchecked")
+    private void rememberVoiceActivation(String deviceId) {
+        String dataKey = getDeviceCacheKey(deviceId);
+        Map<String, Object> cacheMap = (Map<String, Object>) redisUtils.get(dataKey);
+        if (cacheMap == null || "voice".equals(cacheMap.get("activation_type"))) {
+            return;
+        }
+        cacheMap.put("activation_type", "voice");
+        redisUtils.set(dataKey, cacheMap);
     }
 
     private String getDeviceCacheKey(String deviceId) {
@@ -462,6 +509,7 @@ public class DeviceServiceImpl extends BaseServiceImpl<DeviceDao, DeviceEntity> 
             String frontedUrl = sysParamsService.getValue(Constant.SERVER_FRONTED_URL, true);
             code.setMessage(frontedUrl + "\n" + cachedCode);
             code.setChallenge(deviceId);
+            rememberVoiceActivation(deviceId);
         } else {
             String newCode = RandomUtil.randomNumbers(6);
             code.setCode(newCode);
@@ -482,6 +530,7 @@ public class DeviceServiceImpl extends BaseServiceImpl<DeviceDao, DeviceEntity> 
 
             dataMap.put("deviceId", deviceId);
             dataMap.put("activation_code", newCode);
+            dataMap.put("activation_type", "voice");
 
             // 写入主数据 key
             String dataKey = getDeviceCacheKey(deviceId);
@@ -568,6 +617,7 @@ public class DeviceServiceImpl extends BaseServiceImpl<DeviceDao, DeviceEntity> 
         if (exist != null) {
             throw new RenException(ErrorCode.MAC_ADDRESS_ALREADY_EXISTS);
         }
+        assertAgentHasNoDevice(dto.getAgentId());
         Date now = new Date();
         DeviceEntity entity = new DeviceEntity();
         entity.setId(dto.getMacAddress());
@@ -592,6 +642,14 @@ public class DeviceServiceImpl extends BaseServiceImpl<DeviceDao, DeviceEntity> 
     public List<DeviceEntity> searchDevicesByMacAddress(String macAddress, Long userId) {
         QueryWrapper<DeviceEntity> wrapper = new QueryWrapper<>();
         wrapper.like("mac_address", macAddress);
+        wrapper.eq("user_id", userId);
+        return deviceDao.selectList(wrapper);
+    }
+
+    @Override
+    public List<DeviceEntity> searchDevicesByPhone(String phone, Long userId) {
+        QueryWrapper<DeviceEntity> wrapper = new QueryWrapper<>();
+        wrapper.like("phone", phone);
         wrapper.eq("user_id", userId);
         return deviceDao.selectList(wrapper);
     }

@@ -45,8 +45,11 @@ public class AgentDTO {
     @Schema(description = "最后连接时间", example = "2024-03-20 10:00:00")
     private Date lastConnectedAt;
 
-    @Schema(description = "设备数量", example = "10")
+    @Schema(description = "设备数量", example = "1")
     private Integer deviceCount;
+
+    @Schema(description = "绑定手机号。一个智能体只绑定一台设备", example = "13800138000")
+    private String phone;
 
     @Schema(description = "标签列表")
     private List<AgentTagDTO> tags;

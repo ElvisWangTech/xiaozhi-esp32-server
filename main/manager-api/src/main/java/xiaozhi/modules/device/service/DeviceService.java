@@ -46,6 +46,11 @@ public interface DeviceService extends BaseService<DeviceEntity> {
     Boolean deviceActivation(String agentId, String activationCode);
 
     /**
+     * 使用指定用户完成激活。phone、onboardingStatus 可空，供控制台绑定保持原行为。
+     */
+    void activateDevice(String agentId, String activationCode, Long userId, String phone, String onboardingStatus);
+
+    /**
      * 删除此用户的所有设备
      * 
      * @param userId 用户id
@@ -92,6 +97,11 @@ public interface DeviceService extends BaseService<DeviceEntity> {
     String geCodeByDeviceId(String deviceId);
 
     /**
+     * 按智能体列出已绑定设备。一个智能体只应有一台。
+     */
+    List<DeviceEntity> listByAgentId(String agentId);
+
+    /**
      * 获取这个智能体设备理的最近的最后连接时间
      * 
      * @param agentId 智能体id
@@ -127,6 +137,11 @@ public interface DeviceService extends BaseService<DeviceEntity> {
      * @return 设备列表
      */
     List<DeviceEntity> searchDevicesByMacAddress(String macAddress, Long userId);
+
+    /**
+     * 按绑定手机号搜索设备，支持片段匹配。
+     */
+    List<DeviceEntity> searchDevicesByPhone(String phone, Long userId);
 
     /**
      * 获取设备工具列表

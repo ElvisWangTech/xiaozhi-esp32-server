@@ -55,7 +55,7 @@ public interface AgentService extends BaseService<AgentEntity> {
      *
      * @param userId 用户ID
      * @param keyword 搜索关键词
-     * @param searchType 搜索类型（name - 按名称搜索，mac - 按MAC地址搜索）
+     * @param searchType 搜索类型。列表查询同时匹配名称、标签、MAC 和绑定手机号，此参数保留兼容
      * @return 智能体列表
      */
     List<AgentDTO> getUserAgents(Long userId, String keyword, String searchType);
@@ -100,6 +100,11 @@ public interface AgentService extends BaseService<AgentEntity> {
      * @return 创建的智能体ID
      */
     String createAgent(AgentCreateDTO dto);
+
+    /**
+     * 为指定用户创建智能体。语音激活使用超级管理员，不依赖登录态。
+     */
+    String createAgentForUser(AgentCreateDTO dto, Long userId);
 
 
 }

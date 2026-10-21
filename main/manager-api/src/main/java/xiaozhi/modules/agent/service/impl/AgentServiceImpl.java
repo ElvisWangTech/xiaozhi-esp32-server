@@ -151,12 +151,20 @@ public class AgentServiceImpl extends BaseServiceImpl<AgentDao, AgentEntity> imp
                 // 按名称搜索
                 w.like("agent_name", keyword);
 
-                // 按MAC地址搜索：先查设备，再获取对应的智能体ID
-                List<DeviceEntity> devices = Optional
+                // 按MAC地址、绑定手机号搜索：先查设备，再取对应的智能体
+                List<DeviceEntity> devices = new ArrayList<>();
+                devices.addAll(Optional
                         .ofNullable(deviceService.searchDevicesByMacAddress(keyword, userId))
-                        .orElseGet(ArrayList::new);
+                        .orElseGet(ArrayList::new));
+                String phoneKeyword = keyword.replaceAll("[\\s\\-]", "");
+                if (StringUtils.isNotBlank(phoneKeyword)) {
+                    devices.addAll(Optional
+                            .ofNullable(deviceService.searchDevicesByPhone(phoneKeyword, userId))
+                            .orElseGet(ArrayList::new));
+                }
                 List<String> agentIds = devices.stream()
                         .map(DeviceEntity::getAgentId)
+                        .filter(StringUtils::isNotBlank)
                         .distinct()
                         .collect(Collectors.toList());
                 if (ToolUtil.isNotEmpty(agentIds)) {
@@ -204,6 +212,7 @@ public class AgentServiceImpl extends BaseServiceImpl<AgentDao, AgentEntity> imp
 
         // 获取设备数量
         dto.setDeviceCount(getDeviceCountByAgentId(agent.getId()));
+        dto.setPhone(boundPhone(agent.getId()));
 
         // 获取标签列表
         List<AgentTagEntity> tags = agentTagDao.selectByAgentId(agent.getId());
@@ -212,6 +221,19 @@ public class AgentServiceImpl extends BaseServiceImpl<AgentDao, AgentEntity> imp
         }
 
         return dto;
+    }
+
+    private String boundPhone(String agentId) {
+        List<DeviceEntity> devices = deviceService.listByAgentId(agentId);
+        if (ToolUtil.isEmpty(devices)) {
+            return null;
+        }
+        String phone = devices.stream()
+                .map(DeviceEntity::getPhone)
+                .filter(StringUtils::isNotBlank)
+                .distinct()
+                .collect(Collectors.joining("、"));
+        return StringUtils.isBlank(phone) ? null : phone;
     }
 
     private AgentTagDTO convertTagToDTO(AgentTagEntity entity) {
@@ -461,6 +483,19 @@ public class AgentServiceImpl extends BaseServiceImpl<AgentDao, AgentEntity> imp
     @Override
     @Transactional(rollbackFor = Exception.class)
     public String createAgent(AgentCreateDTO dto) {
+        UserDetail user = SecurityUser.getUser();
+        if (user.getId() == null) {
+            throw new RenException(ErrorCode.USER_NOT_LOGIN);
+        }
+        return createAgentForUser(dto, user.getId());
+    }
+
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public String createAgentForUser(AgentCreateDTO dto, Long userId) {
+        if (userId == null) {
+            throw new RenException(ErrorCode.USER_NOT_LOGIN);
+        }
         // 转换为实体
         AgentEntity entity = ConvertUtils.sourceToTarget(dto, AgentEntity.class);
 
@@ -520,9 +555,8 @@ public class AgentServiceImpl extends BaseServiceImpl<AgentDao, AgentEntity> imp
         }
 
         // 设置用户ID和创建者信息
-        UserDetail user = SecurityUser.getUser();
-        entity.setUserId(user.getId());
-        entity.setCreator(user.getId());
+        entity.setUserId(userId);
+        entity.setCreator(userId);
         entity.setCreatedAt(new Date());
 
         // 保存智能体

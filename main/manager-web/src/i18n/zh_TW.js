@@ -26,7 +26,7 @@ export default {
   'header.featureManagement': '系統功能配置',
   'header.changePassword': '修改密碼',
   'header.logout': '退出登錄',
-  'header.searchPlaceholder': '名稱、標籤或mac搜索',
+  'header.searchPlaceholder': '名稱、標籤、mac或手機號',
 
   // McpToolCallDialog组件文本
   'mcpToolCall.title': '工具調用',
@@ -727,6 +727,8 @@ export default {
   'home.wish': '讓我們度過美好的一天！',
   'home.languageModel': '語言模型',
   'home.voiceModel': '音色模型',
+  'home.boundPhone': '綁定手機號',
+  'home.phoneNotRecorded': '未記錄',
   'home.configureRole': '配置角色',
   'home.voiceprintRecognition': '聲紋識別',
   'home.deviceManagement': '設備管理',

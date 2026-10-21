@@ -27,18 +27,21 @@ async def sendAudioMessage(conn: "ConnectionHandler", sentenceType, audios, text
         conn.tts.tts_audio_first_sentence = False
 
     if sentenceType == SentenceType.FIRST:
-        # 同一句子的后续消息加入流控队列，其他情况立即发送
-        if (
-            hasattr(conn, "audio_rate_controller")
-            and conn.audio_rate_controller
+        # 发送循环已停时不能再入队，否则 reset 会把 sentence_start 清掉，设备只收到后续音频。
+        rate_controller = getattr(conn, "audio_rate_controller", None)
+        send_task = getattr(rate_controller, "pending_send_task", None)
+        sender_alive = (
+            rate_controller is not None
+            and send_task is not None
+            and not send_task.done()
             and getattr(conn, "audio_flow_control", {}).get("sentence_id")
             == conn.sentence_id
-        ):
-            conn.audio_rate_controller.add_message(
+        )
+        if sender_alive:
+            rate_controller.add_message(
                 lambda: send_tts_message(conn, "sentence_start", text)
             )
         else:
-            # 新句子或流控器未初始化，立即发送
             await send_tts_message(conn, "sentence_start", text)
 
     await sendAudio(conn, audios)
