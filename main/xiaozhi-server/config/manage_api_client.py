@@ -183,6 +183,24 @@ async def get_agent_models(
     )
 
 
+async def get_device_public_ip(mac_address: str) -> Optional[str]:
+    """读取设备在 OTA 检查时上报的公网 IP。"""
+    if not mac_address or not ManageApiClient._instance:
+        return None
+    try:
+        data = await ManageApiClient._instance._execute_async_request(
+            "POST",
+            "/config/device-public-ip",
+            json={"macAddress": mac_address},
+        )
+        if isinstance(data, str) and data.strip():
+            return data.strip()
+        return None
+    except Exception as e:
+        print(f"获取设备公网IP失败: {e}")
+        return None
+
+
 async def get_voice_activation_session(mac_address: str) -> Optional[Dict]:
     """查询设备是语音激活，还是已经进入昵称引导。"""
     return await ManageApiClient._instance._execute_async_request(

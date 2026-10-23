@@ -214,6 +214,8 @@ public class DeviceServiceImpl extends BaseServiceImpl<DeviceDao, DeviceEntity> 
 
     @Override
     public DeviceReportRespDTO checkDeviceActive(String macAddress, String clientId, DeviceReportReqDTO deviceReport) {
+        saveDevicePublicIp(macAddress, deviceReport);
+
         DeviceReportRespDTO response = new DeviceReportRespDTO();
         response.setServer_time(buildServerTime());
 
@@ -305,6 +307,35 @@ public class DeviceServiceImpl extends BaseServiceImpl<DeviceDao, DeviceEntity> 
         }
 
         return response;
+    }
+
+    @Override
+    public String getDevicePublicIp(String macAddress) {
+        if (StringUtils.isBlank(macAddress)) {
+            return null;
+        }
+        Object value = redisUtils.get(RedisKeys.getDevicePublicIpKey(normalizeMac(macAddress)));
+        if (value == null) {
+            return null;
+        }
+        String publicIp = String.valueOf(value).trim();
+        return StringUtils.isBlank(publicIp) ? null : publicIp;
+    }
+
+    private void saveDevicePublicIp(String macAddress, DeviceReportReqDTO deviceReport) {
+        if (StringUtils.isBlank(macAddress) || deviceReport == null || deviceReport.getBoard() == null) {
+            return;
+        }
+        String publicIp = StringUtils.trimToEmpty(deviceReport.getBoard().getPublicIp());
+        if (StringUtils.isBlank(publicIp)) {
+            return;
+        }
+        redisUtils.set(RedisKeys.getDevicePublicIpKey(normalizeMac(macAddress)), publicIp, RedisUtils.NOT_EXPIRE);
+        log.info("保存设备公网IP: mac={}, publicIp={}", macAddress, publicIp);
+    }
+
+    private String normalizeMac(String macAddress) {
+        return macAddress.trim().toLowerCase();
     }
 
     @Override

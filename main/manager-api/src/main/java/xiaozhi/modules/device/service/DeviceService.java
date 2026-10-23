@@ -26,6 +26,11 @@ public interface DeviceService extends BaseService<DeviceEntity> {
             DeviceReportReqDTO deviceReport);
 
     /**
+     * 读取设备在 OTA 检查时上报的公网 IP
+     */
+    String getDevicePublicIp(String macAddress);
+
+    /**
      * 获取用户指定智能体的设备列表，
      */
     List<DeviceEntity> getUserDevices(Long userId, String agentId);

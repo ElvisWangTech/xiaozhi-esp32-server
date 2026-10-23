@@ -142,6 +142,10 @@ public class DeviceReportReqDTO implements Serializable {
         @Schema(description = "IP 地址")
         private String ip;
 
+        @Schema(description = "设备公网 IP，用于服务端定位")
+        @JsonProperty("public_ip")
+        private String publicIp;
+
         @Schema(description = "MAC 地址")
         private String mac;
     }

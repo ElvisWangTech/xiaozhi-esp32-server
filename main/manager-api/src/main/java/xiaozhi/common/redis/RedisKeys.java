@@ -223,4 +223,11 @@ public class RedisKeys {
         return "device:address_book:all";
     }
 
+    /**
+     * 设备在 OTA 检查时上报的公网 IP
+     */
+    public static String getDevicePublicIpKey(String macAddress) {
+        return "device:public_ip:" + macAddress;
+    }
+
 }

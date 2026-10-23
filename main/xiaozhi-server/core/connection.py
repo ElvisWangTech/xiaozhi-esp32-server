@@ -36,6 +36,7 @@ from plugins_func.loadplugins import auto_import_modules
 from plugins_func.register import Action, ActionResponse
 from core.auth import AuthenticationError
 from config.config_loader import get_private_config_from_api
+from config.manage_api_client import get_device_public_ip
 from core.providers.tts.dto.dto import ContentType, TTSMessageDTO, SentenceType
 from config.logger import setup_logging, build_module_string, create_connection_logger
 from config.manage_api_client import (
@@ -211,24 +212,19 @@ class ConnectionHandler:
 
             # 获取并验证headers
             self.headers = dict(ws.request.headers)
-            # real_ip = self.headers.get("x-real-ip") or self.headers.get(
-            #     "x-forwarded-for"
-            # )
-            # if real_ip:
-            #     self.client_ip = real_ip.split(",")[0].strip()
-            #     ip_source = (
-            #         "x-real-ip"
-            #         if self.headers.get("x-real-ip")
-            #         else "x-forwarded-for"
-            #     )
-            # else:
-            self.client_ip = ws.remote_address[0]
-            ip_source = "remote_address"
+            self.device_id = self.headers.get("device-id", None)
+            public_ip = None
+            if self.device_id and self.read_config_from_api:
+                public_ip = await get_device_public_ip(self.device_id)
+            if public_ip:
+                self.client_ip = public_ip
+                ip_source = "public_ip"
+            else:
+                self.client_ip = ws.remote_address[0] if ws.remote_address else None
+                ip_source = "remote_address"
             self.logger.bind(tag=TAG).info(
                 f"{self.client_ip} conn - ip_source={ip_source} - Headers: {self.headers}"
             )
-
-            self.device_id = self.headers.get("device-id", None)
 
             # 认证通过,继续处理
             self.websocket = ws

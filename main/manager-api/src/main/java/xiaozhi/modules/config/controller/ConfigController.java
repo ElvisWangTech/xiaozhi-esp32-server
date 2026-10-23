@@ -16,6 +16,8 @@ import xiaozhi.common.validator.ValidatorUtils;
 import xiaozhi.modules.config.dto.AgentModelsDTO;
 import xiaozhi.modules.config.dto.CorrectWordsDTO;
 import xiaozhi.modules.config.service.ConfigService;
+import xiaozhi.modules.device.dto.VoiceActivationMacDTO;
+import xiaozhi.modules.device.service.DeviceService;
 
 /**
  * xiaozhi-server 配置获取
@@ -28,6 +30,7 @@ import xiaozhi.modules.config.service.ConfigService;
 @AllArgsConstructor
 public class ConfigController {
     private final ConfigService configService;
+    private final DeviceService deviceService;
 
     @PostMapping("server-base")
     @Operation(summary = "服务端获取配置接口")
@@ -43,6 +46,13 @@ public class ConfigController {
         ValidatorUtils.validateEntity(dto);
         Object models = configService.getAgentModels(dto.getMacAddress(), dto.getSelectedModule());
         return new Result<Object>().ok(models);
+    }
+
+    @PostMapping("device-public-ip")
+    @Operation(summary = "获取设备在OTA检查时上报的公网IP")
+    public Result<String> getDevicePublicIp(@Valid @RequestBody VoiceActivationMacDTO dto) {
+        ValidatorUtils.validateEntity(dto);
+        return new Result<String>().ok(deviceService.getDevicePublicIp(dto.getMacAddress()));
     }
 
     @PostMapping("correct-words")
