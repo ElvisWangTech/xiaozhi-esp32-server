@@ -10,6 +10,7 @@ const BundleAnalyzerPlugin = require('webpack-bundle-analyzer').BundleAnalyzerPl
 const { InjectManifest } = require('workbox-webpack-plugin');
 // 引入 path 模块
 
+const fs = require('fs')
 const path = require('path')
 
 function resolve(dir) {
@@ -54,6 +55,14 @@ module.exports = defineConfig({
   },
   publicPath: process.env.VUE_APP_PUBLIC_PATH || "/",
   chainWebpack: config => {
+    // node_modules 无法写入时，把新增包装进 .vendor。目录不存在则仍走 node_modules。
+    const vendorModules = path.resolve(__dirname, '.vendor/node_modules')
+    for (const name of ['v-code-diff', '@vue/composition-api']) {
+      const vendorPath = path.join(vendorModules, name)
+      if (fs.existsSync(vendorPath)) {
+        config.resolve.alias.set(name, vendorPath)
+      }
+    }
 
     // 修改 HTML 插件配置，动态插入 CDN 链接
     config.plugin('html')
