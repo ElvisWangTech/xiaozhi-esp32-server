@@ -99,7 +99,7 @@ export default {
   },
   methods: {
     handleDelete() {
-      this.$emit('delete', this.device.agentId)
+      this.$emit('delete', this.device)
     },
     handleConfigure() {
       this.$router.push({ path: '/role-config', query: { agentId: this.device.agentId } });

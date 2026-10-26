@@ -255,7 +255,6 @@ export default {
       this.dialogVisible = true;
     },
     handleSubmit({ form, done }) {
-      this.loading = true;
       if (form.id) {
         Api.model.updateModelProvider(form, ({ data }) => {
           if (data.code === 0) {
@@ -264,7 +263,14 @@ export default {
               message: this.$t('common.updateSuccess'),
               showClose: true
             });
+            this.dialogVisible = false;
+          } else {
+            this.$message.error({
+              message: data.msg || this.$t('common.updateFailure'),
+              showClose: true
+            });
           }
+          done && done();
         });
       } else {
         Api.model.addModelProvider(form, ({ data }) => {
@@ -275,12 +281,16 @@ export default {
               showClose: true
             });
             this.total += 1;
+            this.dialogVisible = false;
+          } else {
+            this.$message.error({
+              message: data.msg || this.$t('common.addFailure'),
+              showClose: true
+            });
           }
+          done && done();
         });
       }
-      this.loading = false;
-      this.dialogVisible = false;
-      done && done();
     },
     deleteSelectedProviders() {
       const selectedRows = this.providersList.filter(row => row.selected);
@@ -376,7 +386,7 @@ export default {
   position: relative;
   flex-direction: column;
   background-size: cover;
-  background: linear-gradient(to bottom right, #dce8ff, #e4eeff, #e6cbfd) center;
+  background: #eff4ff;
   -webkit-background-size: cover;
   -o-background-size: cover;
   overflow: hidden;

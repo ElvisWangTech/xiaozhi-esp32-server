@@ -2,7 +2,8 @@
   <CustomDialog
     :visible.sync="dialogVisible"
     :title="$t('modelConfigDialog.addModel')"
-    width="57%"
+    width="960px"
+    size="large"
     class="add-model-dialog"
     :confirmLoading="saving"
     @close="handleClose"
@@ -76,7 +77,10 @@
       <el-form :model="formData.configJson" label-width="auto" label-position="left" class="custom-form">
         <div v-for="(row, rowIndex) in chunkedCallInfoFields" :key="rowIndex" class="form-row">
           <el-form-item v-for="field in row" :key="field.prop" :label="field.label" :prop="field.prop" style="flex: 1;">
-            <el-input v-model="formData.configJson[field.prop]" :placeholder="field.placeholder"
+            <el-input v-if="field.type === 'json-textarea'" v-model="formData.configJson[field.prop]" type="textarea"
+              :rows="3" :placeholder="field.placeholder" class="custom-input-bg">
+            </el-input>
+            <el-input v-else v-model="formData.configJson[field.prop]" :placeholder="field.placeholder"
               :type="field.type || 'text'" class="custom-input-bg" :show-password="field.type === 'password'">
             </el-input>
           </el-form-item>
@@ -160,7 +164,7 @@ export default {
           fields: JSON.parse(item.fields || '[]').map(f => ({
             label: f.label,
             prop: f.key,
-            type: f.type === 'password' ? 'password' : 'text',
+            type: f.type === 'dict' ? 'json-textarea' : f.type === 'password' ? 'password' : 'text',
             placeholder: `请输入${f.key}`
           }))
         }))
@@ -201,6 +205,24 @@ export default {
         this.$message.error(this.$t('addModelDialog.requiredSupplier'));
         this.saving = false;
         return;
+      }
+
+      // dict 字段必须解析为 JSON 对象再提交，否则会以字符串入库
+      for (const field of this.providerFields) {
+        if (field.type !== 'json-textarea') continue;
+        const raw = this.formData.configJson[field.prop];
+        if (!raw || typeof raw === 'object') continue;
+        try {
+          const parsed = JSON.parse(raw);
+          if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+            throw new Error('not object');
+          }
+          this.formData.configJson[field.prop] = parsed;
+        } catch (e) {
+          this.$message.error('必须输入字典格式（如 {"key":"value"}）');
+          this.saving = false;
+          return;
+        }
       }
 
       const submitData = {
@@ -288,23 +310,15 @@ export default {
 </script>
 
 <style lang="scss" scoped>
+@import '@/styles/global.scss';
+
 ::v-deep .el-dialog {
   margin-top: 6vh !important;
 }
 ::v-deep .el-dialog__body {
   max-height: 60vh;
   overflow-y: auto;
-  &::-webkit-scrollbar {
-      width: 6px;
-    }
-  &::-webkit-scrollbar-thumb {
-    background: #a1c9fd;
-    border-radius: 3px;
-  }
-  &::-webkit-scrollbar-track {
-    background: #f0f3fe;
-    border-radius: 3px;
-  }
+  @include scrollbar-style;
 }
 .add-model-dialog {
   .section-header {

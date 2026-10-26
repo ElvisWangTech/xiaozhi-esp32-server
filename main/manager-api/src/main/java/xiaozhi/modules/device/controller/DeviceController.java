@@ -125,7 +125,9 @@ public class DeviceController {
             return new Result<Void>().error("设备不存在");
         }
         BeanUtils.copyProperties(deviceUpdateDTO, entity);
-        deviceService.updateById(entity);
+        if (!deviceService.updateById(entity)) {
+            return new Result<Void>().error(ErrorCode.UPDATE_DATA_FAILED);
+        }
         return new Result<Void>();
     }
 
@@ -172,6 +174,9 @@ public class DeviceController {
     @Operation(summary = "获取设备通讯录")
     @RequiresPermissions("sys:role:normal")
     public Result<Object> getAddressBook(@PathVariable String macAddress) {
+        if (deviceService.getOwnedDeviceByMacAddress(macAddress) == null) {
+            return new Result<Object>().error(ErrorCode.DEVICE_NOT_EXIST);
+        }
         return new Result<Object>().ok(deviceAddressBookService.getAddressBookList(macAddress));
     }
 
@@ -190,9 +195,7 @@ public class DeviceController {
     @Operation(summary = "更新设备通讯录别名")
     @RequiresPermissions("sys:role:normal")
     public Result<Void> updateAlias(@Valid @RequestBody DeviceAddressBookAliasDTO dto) {
-        UserDetail user = SecurityUser.getUser();
-        DeviceEntity callerDevice = deviceService.getDeviceByMacAddress(dto.getMacAddress());
-        if (callerDevice == null || !callerDevice.getUserId().equals(user.getId())) {
+        if (deviceService.getOwnedDeviceByMacAddress(dto.getMacAddress()) == null) {
             return new Result<Void>().error("无权限操作该设备");
         }
         deviceAddressBookService.saveOrUpdate(dto.getMacAddress(), dto.getTargetMac(), dto.getAlias(), null);
@@ -203,9 +206,7 @@ public class DeviceController {
     @Operation(summary = "更新设备通讯录权限")
     @RequiresPermissions("sys:role:normal")
     public Result<Void> updatePermission(@Valid @RequestBody DeviceAddressBookPermissionDTO dto) {
-        UserDetail user = SecurityUser.getUser();
-        DeviceEntity callerDevice = deviceService.getDeviceByMacAddress(dto.getMacAddress());
-        if (callerDevice == null || !callerDevice.getUserId().equals(user.getId())) {
+        if (deviceService.getOwnedDeviceByMacAddress(dto.getMacAddress()) == null) {
             return new Result<Void>().error("无权限操作该设备");
         }
         deviceAddressBookService.saveOrUpdate(dto.getMacAddress(), dto.getTargetMac(), null, dto.getHasPermission());

@@ -22,6 +22,7 @@ Hỗ trợ giao thức MQTT+UDP, giao thức Websocket, điểm truy cập MCP, 
   <a href="./README_vi.md"><img alt="Tiếng Việt" src="https://img.shields.io/badge/Tiếng Việt-DBEDFA"></a>
   <a href="./README_de.md"><img alt="Deutsch" src="https://img.shields.io/badge/Deutsch-DFE0E5"></a>
   <a href="./README_pt_BR.md"><img alt="Português (Brasil)" src="https://img.shields.io/badge/Português (Brasil)-DFE0E5"></a>
+  <a href="./README_es.md"><img alt="Español" src="https://img.shields.io/badge/Español-DFE0E5"></a>
   <a href="https://github.com/xinnan-tech/xiaozhi-esp32-server/releases">
     <img alt="GitHub Contributors" src="https://img.shields.io/github/v/release/xinnan-tech/xiaozhi-esp32-server?logo=docker" />
   </a>
@@ -54,31 +55,31 @@ Muốn xem hiệu quả sử dụng? Hãy xem video 🎥
     <td>
       <a href="https://www.bilibili.com/video/BV1FMFyejExX" target="_blank">
         <picture>
-          <img alt="响应速度感受" src="docs/images/demo9.png" /></picture>
+          <img alt="响应速度感受" src="../images/demo9.png" /></picture>
       </a>
     </td>
     <td>
       <a href="https://www.bilibili.com/video/BV1vchQzaEse" target="_blank">
         <picture>
-          <img alt="速度优化秘诀" src="docs/images/demo6.png" /></picture>
+          <img alt="速度优化秘诀" src="../images/demo6.png" /></picture>
       </a>
     </td>
     <td>
       <a href="https://www.bilibili.com/video/BV1WEcxzFEAT" target="_blank">
         <picture>
-          <img alt="小智数字人 支持语音唤醒" src="docs/images/demo8.png" /></picture>
+          <img alt="小智数字人 支持语音唤醒" src="../images/demo8.png" /></picture>
       </a>
     </td>
     <td>
       <a href="https://www.bilibili.com/video/BV1CKVz6UEuB" target="_blank">
         <picture>
-          <img alt="设备呼叫设备，打电话" src="docs/images/demo0.png" /></picture>
+          <img alt="设备呼叫设备，打电话" src="../images/demo0.png" /></picture>
       </a>
     </td>
     <td>
       <a href="https://www.bilibili.com/video/BV1C1tCzUEZh" target="_blank">
         <picture>
-          <img alt="复杂医疗场景" src="docs/images/demo1.png" /></picture>
+          <img alt="复杂医疗场景" src="../images/demo1.png" /></picture>
       </a>
     </td>
   </tr>
@@ -86,31 +87,31 @@ Muốn xem hiệu quả sử dụng? Hãy xem video 🎥
     <td>
       <a href="https://www.bilibili.com/video/BV1VC96Y5EMH" target="_blank">
         <picture>
-          <img alt="播放音乐查询天气播报新闻" src="docs/images/demo7.png" /></picture>
+          <img alt="播放音乐查询天气播报新闻" src="../images/demo7.png" /></picture>
       </a>
     </td>
     <td>
       <a href="https://www.bilibili.com/video/BV12J7WzBEaH" target="_blank">
         <picture>
-          <img alt="实时打断" src="docs/images/demo10.png" /></picture>
+          <img alt="实时打断" src="../images/demo10.png" /></picture>
       </a>
     </td>
     <td>
       <a href="https://www.bilibili.com/video/BV1Co76z7EvK" target="_blank">
         <picture>
-          <img alt="拍照识物品" src="docs/images/demo12.png" /></picture>
+          <img alt="拍照识物品" src="../images/demo12.png" /></picture>
       </a>
     </td>
     <td>
       <a href="https://www.bilibili.com/video/BV1pNXWYGEx1" target="_blank">
         <picture>
-          <img alt="控制家电开关" src="docs/images/demo5.png" /></picture>
+          <img alt="控制家电开关" src="../images/demo5.png" /></picture>
       </a>
     </td>
     <td>
       <a href="https://www.bilibili.com/video/BV1TJ7WzzEo6" target="_blank">
         <picture>
-          <img alt="多指令任务" src="docs/images/demo11.png" /></picture>
+          <img alt="多指令任务" src="../images/demo11.png" /></picture>
       </a>
     </td>
   </tr>
@@ -118,31 +119,31 @@ Muốn xem hiệu quả sử dụng? Hãy xem video 🎥
     <td>
       <a href="https://www.bilibili.com/video/BV1ZQKUzYExM" target="_blank">
         <picture>
-          <img alt="MCP接入点" src="docs/images/demo13.png" /></picture>
+          <img alt="MCP接入点" src="../images/demo13.png" /></picture>
       </a>
     </td>
     <td>
       <a href="https://www.bilibili.com/video/BV1zUW5zJEkq" target="_blank">
         <picture>
-          <img alt="MQTT指令下发" src="docs/images/demo4.png" /></picture>
+          <img alt="MQTT指令下发" src="../images/demo4.png" /></picture>
       </a>
     </td>
     <td>
       <a href="https://www.bilibili.com/video/BV1Exu3zqEDe" target="_blank">
         <picture>
-          <img alt="声纹识别" src="docs/images/demo14.png" /></picture>
+          <img alt="声纹识别" src="../images/demo14.png" /></picture>
       </a>
     </td>
     <td>
       <a href="https://www.bilibili.com/video/BV1CDKWemEU6" target="_blank">
         <picture>
-          <img alt="自定义音色" src="docs/images/demo2.png" /></picture>
+          <img alt="自定义音色" src="../images/demo2.png" /></picture>
       </a>
     </td>
     <td>
       <a href="https://www.bilibili.com/video/BV12yA2egEaC" target="_blank">
         <picture>
-          <img alt="使用粤语交流" src="docs/images/demo3.png" /></picture>
+          <img alt="使用粤语交流" src="../images/demo3.png" /></picture>
       </a>
     </td>
   </tr>
@@ -168,8 +169,8 @@ Dự án này cung cấp hai phương pháp triển khai, vui lòng chọn theo 
 #### 🚀 Lựa chọn phương pháp triển khai
 | Phương pháp triển khai | Đặc điểm | Tình huống áp dụng | Tài liệu triển khai | Yêu cầu cấu hình | Video hướng dẫn |
 |---------|------|---------|---------|---------|---------|
-| **Cài đặt tối giản** | Đối thoại thông minh, quản lý đơn tác nhân | Môi trường cấu hình thấp, dữ liệu lưu trong tệp cấu hình, không cần cơ sở dữ liệu | [①Phiên bản Docker](../Deployment.md#%E6%96%B9%E5%BC%8F%E4%B8%80docker%E5%8F%AA%E8%BF%90%E8%A1%8Cserver) / [②Triển khai mã nguồn](../Deployment.md#%E6%96%B9%E5%BC%8F%E4%BA%8C%E6%9C%AC%E5%9C%B0%E6%BA%90%E7%A0%81%E5%8F%AA%E8%BF%90%E8%A1%8Cserver)| 2 nhân 4GB nếu dùng `FunASR`, 2 nhân 2GB nếu toàn API | - |
-| **Cài đặt toàn bộ module** | Đối thoại thông minh, quản lý đa người dùng, quản lý đa tác nhân, bảng điều khiển thông minh | Trải nghiệm đầy đủ tính năng, dữ liệu lưu trong cơ sở dữ liệu |[①Phiên bản Docker](../Deployment_all.md#%E6%96%B9%E5%BC%8F%E4%B8%80docker%E8%BF%90%E8%A1%8C%E5%85%A8%E6%A8%A1%E5%9D%97) / [②Triển khai mã nguồn](../Deployment_all.md#%E6%96%B9%E5%BC%8F%E4%BA%8C%E6%9C%AC%E5%9C%B0%E6%BA%90%E7%A0%81%E8%BF%90%E8%A1%8C%E5%85%A8%E6%A8%A1%E5%9D%97) / [③Hướng dẫn tự động cập nhật triển khai mã nguồn](../dev-ops-integration.md) | 4 nhân 8GB nếu dùng `FunASR`, 2 nhân 4GB nếu toàn API| [Video hướng dẫn khởi động mã nguồn cục bộ](https://www.bilibili.com/video/BV1wBJhz4Ewe) |
+| **Cài đặt tối giản** | Đối thoại thông minh, quản lý đơn tác nhân | Môi trường cấu hình thấp, dữ liệu lưu trong tệp cấu hình, không cần cơ sở dữ liệu | [①Phiên bản Docker](../Deployment.md#%E6%96%B9%E5%BC%8F%E4%B8%80docker%E5%8F%AA%E8%BF%90%E8%A1%8Cserver) / [②Triển khai mã nguồn](../Deployment.md#%E6%96%B9%E5%BC%8F%E4%BA%8C%E6%9C%AC%E5%9C%B0%E6%BA%90%E7%A0%81%E5%8F%AA%E8%BF%90%E8%A1%8Cserver)| `FunASR` cục bộ cần nhiều bộ nhớ; dùng toàn API thì mức dùng tài nguyên thấp | - |
+| **Cài đặt toàn bộ module** | Đối thoại thông minh, quản lý đa người dùng, quản lý đa tác nhân, bảng điều khiển thông minh | Trải nghiệm đầy đủ tính năng, dữ liệu lưu trong cơ sở dữ liệu |[①Phiên bản Docker](../Deployment_all.md#%E6%96%B9%E5%BC%8F%E4%B8%80docker%E8%BF%90%E8%A1%8C%E5%85%A8%E6%A8%A1%E5%9D%97) / [②Triển khai mã nguồn](../Deployment_all.md#%E6%96%B9%E5%BC%8F%E4%BA%8C%E6%9C%AC%E5%9C%B0%E6%BA%90%E7%A0%81%E8%BF%90%E8%A1%8C%E5%85%A8%E6%A8%A1%E5%9D%97) / [③Hướng dẫn tự động cập nhật triển khai mã nguồn](../dev-ops-integration.md) | `FunASR` cục bộ cần nhiều bộ nhớ, thêm tài nguyên cơ sở dữ liệu; dùng toàn API thì mức dùng tài nguyên thấp| [Video hướng dẫn khởi động mã nguồn cục bộ](https://www.bilibili.com/video/BV1wBJhz4Ewe) |
 
 Câu hỏi thường gặp và hướng dẫn liên quan, vui lòng tham khảo [liên kết này](../FAQ.md)
 
@@ -211,7 +212,7 @@ Dự án này cung cấp các công cụ kiểm tra sau để giúp bạn xác m
 | Tên công cụ | Vị trí | Phương pháp sử dụng | Mô tả chức năng |
 |:---:|:---|:---:|:---:|
 | Công cụ kiểm tra tương tác âm thanh | main》digital-human》index.html | Chạy `python start.py` trong `main/digital-human`, sau đó mở `http://127.0.0.1:8006/index.html` | Kiểm tra chức năng phát và nhận âm thanh, xác minh xử lý âm thanh phía Python có bình thường không |
-| Công cụ kiểm tra phản hồi mô hình | main》xiaozhi-server》performance_tester.py | Thực hiện `python performance_tester.py` | Kiểm tra tốc độ phản hồi của ba module cốt lõi ASR(Nhận dạng giọng nói), LLM(Mô hình lớn), VLLM(Mô hình thị giác), TTS(Tổng hợp giọng nói) |
+| Công cụ kiểm tra phản hồi mô hình | main》xiaozhi-server》performance_tester.py | Thực hiện `python performance_tester.py` | Kiểm tra tốc độ phản hồi của các module cốt lõi như ASR(Nhận dạng giọng nói), LLM(Mô hình lớn), VLLM(Mô hình thị giác), TTS(Tổng hợp giọng nói) |
 
 > 💡 Gợi ý: Khi kiểm tra tốc độ mô hình, chỉ kiểm tra các mô hình đã cấu hình khóa.
 
@@ -231,10 +232,10 @@ Dự án này cung cấp các công cụ kiểm tra sau để giúp bạn xác m
 | Kho tri thức | Hỗ trợ kho tri thức RAGFlow, cho phép mô hình lớn đánh giá cần gọi kho tri thức trước khi trả lời |
 | Gọi công cụ | Hỗ trợ giao thức IOT phía client, giao thức MCP phía client, giao thức MCP phía server, giao thức điểm truy cập MCP, hàm công cụ tùy chỉnh |
 | Gửi lệnh | Dựa vào giao thức MQTT, hỗ trợ gửi lệnh MCP từ bảng điều khiển thông minh xuống thiết bị ESP32 |
-| Backend quản lý | Cung cấp giao diện quản lý Web, hỗ trợ quản lý người dùng, cấu hình hệ thống và quản lý thiết bị; giao diện hỗ trợ hiển thị tiếng Trung giản thể, tiếng Trung phồn thể, tiếng Anh |
-| Công cụ kiểm tra | Cung cấp công cụ kiểm tra hiệu suất, công cụ kiểm tra mô hình thị giác và công cụ kiểm tra tương tác âm thanh |
+| Backend quản lý | Cung cấp giao diện quản lý Web, hỗ trợ quản lý người dùng, cấu hình hệ thống và quản lý thiết bị; giao diện hỗ trợ hiển thị tiếng Trung giản thể, tiếng Trung phồn thể, tiếng Anh, tiếng Đức, tiếng Việt và tiếng Bồ Đào Nha Brazil |
+| Công cụ kiểm tra | Cung cấp công cụ kiểm tra hiệu suất phản hồi mô hình và công cụ kiểm tra tương tác âm thanh |
 | Hỗ trợ triển khai | Hỗ trợ triển khai Docker và triển khai cục bộ, cung cấp quản lý tệp cấu hình hoàn chỉnh |
-| Hệ thống plugin | Hỗ trợ mở rộng plugin chức năng, phát triển plugin tùy chỉnh và hot loading plugin |
+| Hệ thống plugin | Hỗ trợ mở rộng plugin chức năng và phát triển plugin tùy chỉnh; file plugin mới được tải ở lần kết nối thiết bị tiếp theo, thay đổi mã của plugin đã tải cần khởi động lại dịch vụ |
 
 ### Đang phát triển 🚧
 
@@ -280,8 +281,8 @@ Trên thực tế, bất kỳ VLLM nào hỗ trợ gọi giao diện openai đ�
 
 | Phương pháp sử dụng | Nền tảng hỗ trợ | Nền tảng miễn phí |
 |:---:|:---:|:---:|
-| Gọi giao diện | EdgeTTS, iFlytek, Volcano Engine, Tencent Cloud, Alibaba Cloud và Bailian, CosyVoiceSiliconflow, TTS302AI, CozeCnTTS, GizwitsTTS, ACGNTTS, OpenAITTS, Lingxi streaming TTS, MinimaxTTS | Lingxi streaming TTS, EdgeTTS, CosyVoiceSiliconflow(một phần) |
-| Dịch vụ cục bộ | FishSpeech, GPT_SOVITS_V2, GPT_SOVITS_V3, Index-TTS, PaddleSpeech | Index-TTS, PaddleSpeech, FishSpeech, GPT_SOVITS_V2, GPT_SOVITS_V3 |
+| Gọi giao diện | EdgeTTS, iFlytek, Volcano Engine, Tencent Cloud, Alibaba Cloud và Bailian, CosyVoiceSiliconflow, TTS302AI, CozeCnTTS, CustomTTS, OpenAITTS, MinimaxTTS | EdgeTTS, CosyVoiceSiliconflow(một phần) |
+| Dịch vụ cục bộ | FishSpeech, GPT_SOVITS_V2, GPT_SOVITS_V3, IndexStreamTTS, PaddleSpeechTTS | IndexStreamTTS, PaddleSpeechTTS, FishSpeech, GPT_SOVITS_V2, GPT_SOVITS_V3 |
 
 ---
 
@@ -297,8 +298,8 @@ Trên thực tế, bất kỳ VLLM nào hỗ trợ gọi giao diện openai đ�
 
 | Phương pháp sử dụng | Nền tảng hỗ trợ | Nền tảng miễn phí |
 |:---:|:---:|:---:|
-| Sử dụng cục bộ | FunASR, SherpaASR | FunASR, SherpaASR |
-| Gọi giao diện | FunASRServer, Volcano Engine, iFlytek, Tencent Cloud, Alibaba Cloud, Baidu Cloud, OpenAI ASR | FunASRServer |
+| Sử dụng cục bộ | FunASR, SherpaASR, SherpaParaformerASR, VoskASR | FunASR, SherpaASR, SherpaParaformerASR, VoskASR |
+| Gọi giao diện | FunASRServer, Volcano Engine, iFlytek, Tencent Cloud, Alibaba Cloud, Baidu Cloud, OpenAI ASR, GroqASR, Qwen3ASRFlash | FunASRServer |
 
 ---
 
@@ -306,7 +307,9 @@ Trên thực tế, bất kỳ VLLM nào hỗ trợ gọi giao diện openai đ�
 
 | Phương pháp sử dụng | Nền tảng hỗ trợ | Nền tảng miễn phí |
 |:---:|:---:|:---:|
-| Sử dụng cục bộ | 3D-Speaker | 3D-Speaker |
+| Gọi giao diện | Dịch vụ nhận dạng giọng nói (voiceprint-api) | - |
+
+Nhận dạng giọng nói theo dấu vân tay cần dịch vụ [voiceprint-api](https://github.com/xinnan-tech/voiceprint-api) được triển khai riêng (dựa trên 3D-Speaker) và MySQL. Xem [hướng dẫn tích hợp voiceprint](../voiceprint-integration.md).
 
 ---
 

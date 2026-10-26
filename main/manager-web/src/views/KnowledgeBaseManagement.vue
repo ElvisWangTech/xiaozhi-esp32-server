@@ -114,6 +114,7 @@
       :title="`${$t('knowledgeFileUpload.viewSlices')} - ${currentDocumentName}`"
       :visible.sync="sliceDialogVisible"
       width="1200px"
+      size="large"
       :footer="false"
     >
       <div class="slice-management">
@@ -148,6 +149,8 @@
       :title="$t('knowledgeFileUpload.uploadDocument')"
       :visible.sync="uploadDialogVisible"
       width="800px"
+      :close-on-click-modal="false"
+      :confirmLoading="uploading"
       @close="handleUploadDialogClose"
       @confirm="handleBatchUploadSubmit"
     >
@@ -187,14 +190,15 @@
     <CustomDialog
       :title="$t('knowledgeFileUpload.retrievalTest')"
       :visible.sync="retrievalTestDialogVisible"
-      width="900px"
+      width="1200px"
+      size="large"
       :close-on-click-modal="false"
       :confirm-text="$t('knowledgeFileUpload.executeTest')"
       :confirmLoading="retrievalTestLoading"
       @confirm="runRetrievalTest"
     >
       <div class="retrieval-test-form">
-        <el-form :model="retrievalTestForm" label-width="100px">
+        <el-form :model="retrievalTestForm" label-width="100px" @submit.native.prevent>
           <el-form-item :label="$t('knowledgeFileUpload.testQuestion')" required>
             <el-input
               v-model="retrievalTestForm.question"
@@ -695,7 +699,7 @@ export default {
   display: flex;
   position: relative;
   flex-direction: column;
-  background: linear-gradient(to bottom right, #dce8ff, #e4eeff, #e6cbfd) center;
+  background: #eff4ff;
   background-size: cover;
   -webkit-background-size: cover;
   -o-background-size: cover;
@@ -709,6 +713,7 @@ export default {
   position: relative;
   display: flex;
   flex-direction: column;
+  overflow: hidden;
 }
 
 .operation-bar {
@@ -758,7 +763,6 @@ export default {
   background: #fff;
   border-radius: 10px;
   padding: 14px 20px;
-  box-shadow: 0 4px 16px rgba(31, 42, 68, 0.06);
   border: 1px solid #f0f3f9;
 }
 
@@ -1012,10 +1016,12 @@ export default {
 .slice-content-container {
   flex: 1;
   overflow: hidden;
+  display: flex;
+  flex-direction: column;
 }
 
 .slice-cards-container {
-  max-height: 60vh;
+  flex: 1;
   overflow-y: auto;
   padding-right: 4px;
 
@@ -1080,6 +1086,7 @@ export default {
 }
 
 .no-slice-data {
+  flex: 1;
   min-height: 200px;
   display: flex;
   align-items: center;
@@ -1169,8 +1176,20 @@ export default {
 
 /* ========== Retrieval Test Dialog ========== */
 .retrieval-test-form {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+
+  .retrieval-test-result {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+  }
+
   .result-chunks {
-    max-height: 400px;
+    flex: 1;
+    min-height: 0;
     overflow-y: auto;
   }
 

@@ -60,7 +60,7 @@ delete_audio: true
 # 没有语音输入多久后断开连接(秒)，默认2分钟，即120秒
 close_connection_no_voice_time: 120
 # TTS请求超时时间(秒)
-tts_timeout: 10
+tts_timeout: 15
 # 工具调用超时时间(秒)
 tool_call_timeout: 30
 # 开启唤醒词加速
@@ -172,17 +172,18 @@ plugins:
     # ragflow知识库id
     dataset_ids: ["123456789"]
   # 联网搜索插件配置
-  # 支持秘塔(metaso)和Tavily两个搜索源
+  # 支持秘塔(metaso)、Tavily和Serply三个搜索源
   # 秘塔API Key申请：https://metaso.cn/search-api/api-keys
   # Tavily API Key申请：https://app.tavily.com/home
+  # Serply API Key申请：https://serply.io
   web_search:
-    # 搜索源：metaso / tavily
+    # 搜索源：metaso / tavily / serply
     provider: "metaso"
     # 工具描述，用于告知LLM何时调用此工具，可根据需要自定义
     description: "联网搜索工具。当用户明确需要联网搜索问题时使用此工具。"
     # 返回结果数量（默认5）
     max_results: 5
-    # 秘塔API Key（mk-前缀） / Tavily API Key（tvly-前缀）
+    # 秘塔API Key（mk-前缀） / Tavily API Key（tvly-前缀） / Serply API Key
     api_key: "mk-xxx"
 # 声纹识别配置
 voiceprint:
@@ -246,7 +247,7 @@ selected_module:
   # 不想开通意图识别，就设置成：nointent
   # 意图识别可使用intent_llm。优点：通用性强，缺点：增加串行前置意图识别模块，会增加处理时间，支持控制音量大小等iot操作
   # 意图识别可使用function_call，缺点：需要所选择的LLM支持function_call，优点：按需调用工具、速度快，理论上能全部操作所有iot指令
-  # 默认免费的ChatGLMLLM就已经支持function_call，但是如果像追求稳定建议把LLM设置成：DoubaoLLM，使用的具体model_name是：doubao-1-5-pro-32k-250115
+  # 默认免费的ChatGLMLLM就已经支持function_call，但是如果像追求稳定建议把LLM设置成：DoubaoLLM，使用的具体model_name是：doubao-seed-2-0-lite-260215
   Intent: function_call
 
 # 意图识别，是用于理解用户意图的模块，例如：播放音乐
@@ -286,8 +287,7 @@ Intent:
       # play_music是服务器自带的音乐播放，hass_play_music是通过home assistant控制的独立外部程序音乐播放
       # 如果用了hass_play_music，就不要开启play_music，两者只留一个
       - play_music
-      #- hass_get_state
-      #- hass_set_state
+      #- hass_state
       #- hass_play_music
 
 Memory:
@@ -360,6 +360,9 @@ ASR:
     type: fun_local
     model_dir: models/SenseVoiceSmall
     output_dir: tmp/
+    # 识别语种：auto 自动检测；如需限制只识别中文可设为 zh，避免中文短句误判为韩文等。
+    # SenseVoice 支持 zh、en、ja、ko、yue 等语种标记。
+    language: auto
   FunASRServer:
     # 独立部署FunASR，使用FunASR的API服务，只需要五句话
     # 第一句：mkdir -p ./funasr-runtime-resources/models
@@ -653,18 +656,18 @@ LLM:
   DoubaoLLM:
     # 定义LLM API类型
     type: openai
-    # 先开通服务，打开以下网址，开通的服务搜索Doubao-1.5-pro，开通它
+    # 先开通服务，打开以下网址，开通的服务搜索Doubao-Seed-2.0-Lite，开通它
     # 开通地址：https://console.volcengine.com/ark/region:ark+cn-beijing/openManagement?LLM=%7B%7D&OpenTokenDrawer=false
     # 免费额度500000token
     # 开通后，进入这里获取密钥：https://console.volcengine.com/ark/region:ark+cn-beijing/apiKey?apikey=%7B%7D
     base_url: https://ark.cn-beijing.volces.com/api/v3
-    model_name: doubao-1-5-pro-32k-250115
+    model_name: doubao-seed-2-0-lite-260215
     api_key: 你的doubao web key
   DeepSeekLLM:
     # 定义LLM API类型
     type: openai
     # 可在这里找到你的api key https://platform.deepseek.com/
-    model_name: deepseek-chat
+    model_name: deepseek-v4-flash
     url: https://api.deepseek.com
     api_key: 你的deepseek web key
   ChatGLMLLM:
@@ -1166,6 +1169,8 @@ TTS:
     # cosyvoice-v3和部分音色需要申请开通
     type: alibl_stream
     api_key: 你的api_key
+    # 默认兼容旧地址；业务空间请替换为 wss://<WorkspaceId>.cn-beijing.maas.aliyuncs.com/api-ws/v1/inference
+    ws_url: wss://dashscope.aliyuncs.com/api-ws/v1/inference/
     model: "cosyvoice-v2"
     voice: "longcheng_v2"
     output_dir: tmp/

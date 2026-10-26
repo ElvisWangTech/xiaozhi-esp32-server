@@ -110,8 +110,8 @@ public class ModelConfigServiceImpl extends BaseServiceImpl<ModelConfigDao, Mode
         // 1. 参数验证
         validateEditParameters(modelType, provideCode, id, modelConfigBodyDTO);
 
-        // 2. 验证模型提供者
-        validateModelProvider(modelType, provideCode);
+        // 2. 验证模型提供者，使用注册类型的大小写
+        String registeredModelType = resolveModelType(modelType, provideCode);
 
         // 3. 获取原始配置（不经过敏感数据处理）
         ModelConfigEntity originalEntity = getOriginalConfigFromDb(id);
@@ -120,7 +120,7 @@ public class ModelConfigServiceImpl extends BaseServiceImpl<ModelConfigDao, Mode
         validateLlmConfiguration(modelConfigBodyDTO);
 
         // 5. 准备更新实体并处理敏感数据
-        ModelConfigEntity modelConfigEntity = prepareUpdateEntity(modelConfigBodyDTO, originalEntity, modelType, id);
+        ModelConfigEntity modelConfigEntity = prepareUpdateEntity(modelConfigBodyDTO, originalEntity, registeredModelType, id);
 
         // 6. 执行数据库更新
         modelConfigDao.updateById(modelConfigEntity);
@@ -136,9 +136,9 @@ public class ModelConfigServiceImpl extends BaseServiceImpl<ModelConfigDao, Mode
     public ModelConfigDTO add(String modelType, String provideCode, ModelConfigBodyDTO modelConfigBodyDTO) {
         validateAddParameters(modelType, provideCode, modelConfigBodyDTO);
 
-        validateModelProvider(modelType, provideCode);
+        String registeredModelType = resolveModelType(modelType, provideCode);
 
-        ModelConfigEntity modelConfigEntity = prepareAddEntity(modelConfigBodyDTO, modelType);
+        ModelConfigEntity modelConfigEntity = prepareAddEntity(modelConfigBodyDTO, registeredModelType);
 
         modelConfigDao.insert(modelConfigEntity);
 
@@ -283,13 +283,14 @@ public class ModelConfigServiceImpl extends BaseServiceImpl<ModelConfigDao, Mode
     }
 
     /**
-     * 验证模型提供者
+     * 验证模型提供者并获取注册类型，保留 TTS、Memory、Intent 等类型的大小写
      */
-    private void validateModelProvider(String modelType, String provideCode) {
+    private String resolveModelType(String modelType, String provideCode) {
         List<ModelProviderDTO> providerList = modelProviderService.getList(modelType, provideCode);
         if (CollectionUtil.isEmpty(providerList)) {
             throw new RenException(ErrorCode.MODEL_PROVIDER_NOT_EXIST);
         }
+        return providerList.get(0).getModelType();
     }
 
     /**
@@ -362,14 +363,14 @@ public class ModelConfigServiceImpl extends BaseServiceImpl<ModelConfigDao, Mode
                 if (SensitiveDataUtils.isSensitiveField(key)) {
 
                     if (value instanceof String && !SensitiveDataUtils.isMaskedValue((String) value)) {
-                        updatedJson.put(key, value);
+                        updatedJson.set(key, value);
                     }
                 } else if (value instanceof JSONObject) {
                     // 递归处理嵌套JSON
                     mergeJson(updatedJson, key, (JSONObject) value);
                 } else {
                     // 非敏感字段直接更新
-                    updatedJson.put(key, value);
+                    updatedJson.set(key, value);
                 }
             }
 
@@ -405,7 +406,7 @@ public class ModelConfigServiceImpl extends BaseServiceImpl<ModelConfigDao, Mode
 
         // 如果 original 中不存在 key，创建一个新的 JSON 对象
         if (!original.containsKey(key)) {
-            original.put(key, new JSONObject());
+            original.set(key, new JSONObject());
         }
 
         // 获取 original 中的子对象
@@ -420,7 +421,7 @@ public class ModelConfigServiceImpl extends BaseServiceImpl<ModelConfigDao, Mode
             log.warn("mergeJson: key '{}' 的值不是 JSONObject 类型 (实际类型：{})，将创建新对象",
                     key, originalValue != null ? originalValue.getClass().getSimpleName() : "null");
             originalChild = new JSONObject();
-            original.put(key, originalChild);
+            original.set(key, originalChild);
         }
 
         for (String childKey : updated.keySet()) {
@@ -430,7 +431,7 @@ public class ModelConfigServiceImpl extends BaseServiceImpl<ModelConfigDao, Mode
             } else {
                 if (!SensitiveDataUtils.isSensitiveField(childKey) ||
                         (childValue instanceof String && !isMaskedValue((String) childValue))) {
-                    originalChild.put(childKey, childValue);
+                    originalChild.set(childKey, childValue);
                 }
             }
         }
