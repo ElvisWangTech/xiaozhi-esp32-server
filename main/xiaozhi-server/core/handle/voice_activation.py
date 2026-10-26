@@ -37,6 +37,8 @@ CN_DIGITS = {
 
 CONFIRM_WORDS = {"对", "是", "好", "嗯", "行", "确认", "对的", "是的", "没错", "正确", "可以", "好的"}
 REJECT_WORDS = ("不对", "不是", "不行", "错", "重说", "重来", "重新", "不要")
+SKIP_SKILLS_WORDS = ("稍后再说", "以后再说", "先聊天", "跳过", "不用了", "算了", "取消")
+SKILLS_COMMAND_WORDS = ("绑定技能", "配置技能", "技能绑定", "设置技能")
 
 
 def compact_text(text):
@@ -106,8 +108,40 @@ def is_resend(text):
     return any(word in compact for word in ("重发", "再发", "没收到", "重新发送"))
 
 
+def is_skills_command(text):
+    compact = compact_text(unwrap_user_text(text))
+    return any(word in compact for word in SKILLS_COMMAND_WORDS)
+
+
+def is_skip_skills(text):
+    compact = compact_text(text)
+    if not compact:
+        return False
+    # 「不要跳过」表示继续，不当作放弃
+    if "不要跳过" in compact or "别跳过" in compact:
+        return False
+    return any(word in compact for word in SKIP_SKILLS_WORDS)
+
+
 def spoken_digits(number):
     return "，".join(list(number))
+
+
+async def start_skills_onboarding(conn, announce=None):
+    """日常对话中主动说「绑定技能」时重新进入技能绑定。"""
+    if getattr(conn, "voice_activation_handler", None) is not None:
+        handler = conn.voice_activation_handler
+        if getattr(handler, "stage", None) == "skills":
+            await handler._bind_skills()
+            return
+        await handler._say("当前还在完成其他设置，请稍后再试。")
+        return
+    conn.voice_onboarding = "skills"
+    conn.skills_pending = True
+    conn.voice_activation_handler = VoiceActivationSession(conn, stage="skills")
+    if announce:
+        await conn.voice_activation_handler._say(announce)
+    await conn.voice_activation_handler.start()
 
 
 def unwrap_user_text(text):
@@ -163,11 +197,18 @@ class VoiceActivationSession:
     ASK_CODE = "ask_code"
     ASK_NICKNAME = "ask_nickname"
     CONFIRM_NICKNAME = "confirm_nickname"
+    RETRY_SKILLS = "retry_skills"
+    ASK_REBOOT = "ask_reboot"
 
     def __init__(self, conn, stage="bind", announce_bind_success=False):
         self.conn = conn
         self.stage = stage
-        self.state = self.ASK_PHONE if stage == "bind" else self.ASK_NICKNAME
+        if stage == "bind":
+            self.state = self.ASK_PHONE
+        elif stage == "nickname":
+            self.state = self.ASK_NICKNAME
+        else:
+            self.state = self.RETRY_SKILLS
         self.phone = None
         self.phone_digits = ""
         self.nickname = None
@@ -177,6 +218,9 @@ class VoiceActivationSession:
         self._phone_wait_task = None
 
     async def start(self):
+        if self.stage == "skills":
+            await self._bind_skills()
+            return
         if self.state == self.ASK_NICKNAME:
             prefix = "绑定成功。" if self.announce_bind_success else ""
             await self._say(prefix + "请说出助手的昵称。")
@@ -214,6 +258,10 @@ class VoiceActivationSession:
             await self._on_nickname(text)
         elif self.state == self.CONFIRM_NICKNAME:
             await self._on_confirm_nickname(text)
+        elif self.state == self.RETRY_SKILLS:
+            await self._on_retry_skills(text)
+        elif self.state == self.ASK_REBOOT:
+            await self._on_ask_reboot(text)
 
     def _invalidate_phone_wait(self):
         self._phone_epoch += 1
@@ -404,9 +452,141 @@ class VoiceActivationSession:
             await self._say(api_error_text(exc))
             return
         await self.conn.refresh_agent_prompt()
+        self.conn.voice_onboarding = "skills"
+        self.stage = "skills"
+        await self._say(f"好的，我是{self.nickname}。正在绑定技能。")
+        await self._bind_skills()
+
+    async def _bind_skills(self):
+        try:
+            await self._post(
+                "/device/voice-activation/skills",
+                {"macAddress": self._mac()},
+            )
+        except Exception as exc:
+            self.conn.logger.bind(tag=TAG).warning(f"技能绑定失败: {exc}")
+            self.state = self.RETRY_SKILLS
+            self.conn.skills_pending = True
+            self.conn.voice_onboarding = "skills"
+            await self._say(api_error_text(exc) + "。请说确认重试，或者说稍后再说。")
+            return
+        self.conn.voice_onboarding = None
+        self.conn.skills_pending = False
+        self.state = self.ASK_REBOOT
+        await self._say("技能已经绑定好了。是否重启设备？")
+
+    async def _on_retry_skills(self, text):
+        if is_skip_skills(text):
+            self.conn.voice_activation_handler = None
+            # 数据库仍是 skills，日常对话里可以说「绑定技能」再进来
+            self.conn.voice_onboarding = None
+            self.conn.skills_pending = True
+            await self._say("好的。之后想绑定技能，可以说绑定技能。现在可以开始聊天了。")
+            return
+        compact = compact_text(text)
+        if (
+            is_confirm(text)
+            or is_skills_command(text)
+            or "重试" in compact
+            or "再试" in compact
+            or "不要跳过" in compact
+        ):
+            await self._bind_skills()
+            return
+        await self._say("请说确认重试，或者说稍后再说。")
+
+    async def _on_ask_reboot(self, text):
+        if is_reject(text):
+            await self._finish_without_reboot()
+            return
+        compact = compact_text(text)
+        if is_confirm(text) or "重启" in compact:
+            await self._reboot_device()
+            return
+        await self._say("请说确认重启设备，或者说不要。")
+
+    async def _finish_without_reboot(self):
         self.conn.voice_activation_handler = None
         self.conn.voice_onboarding = None
-        await self._say(f"好的，我是{self.nickname}。设置完成，我们可以开始聊天了。")
+        self.conn.skills_pending = False
+        await self._say("好的，我们可以开始聊天了。")
+
+    async def _reboot_device(self):
+        await self._say("好的，正在重启设备。")
+        for _ in range(50):
+            if not self._playback_active():
+                break
+            await asyncio.sleep(0.2)
+        # 工具列表可能还在异步拉取，稍等再匹配
+        tool_name = None
+        for _ in range(20):
+            tool_name = self._find_reboot_tool()
+            if tool_name:
+                break
+            mcp_client = getattr(self.conn, "mcp_client", None)
+            if mcp_client is None:
+                break
+            await asyncio.sleep(0.25)
+        if not tool_name:
+            available = list(
+                (getattr(getattr(self.conn, "mcp_client", None), "name_mapping", None) or {}).values()
+            )
+            self.conn.logger.bind(tag=TAG).warning(
+                f"未找到重启工具，当前设备 MCP 工具: {available}"
+            )
+            self.conn.voice_activation_handler = None
+            self.conn.voice_onboarding = None
+            self.conn.skills_pending = False
+            await self._say("暂时无法自动重启，请手动重启设备。")
+            return
+        try:
+            from core.providers.tools.device_mcp.mcp_handler import call_mcp_tool
+
+            # 设备马上重启，不必久等结果
+            await call_mcp_tool(self.conn, self.conn.mcp_client, tool_name, "{}", timeout=5)
+        except Exception as exc:
+            # 重启过程中连接断开也属正常
+            self.conn.logger.bind(tag=TAG).info(f"已下发重启工具 {tool_name}: {exc}")
+        self.conn.voice_activation_handler = None
+        self.conn.voice_onboarding = None
+        self.conn.skills_pending = False
+
+    def _find_reboot_tool(self):
+        """本设备固件重启工具是 self.qiniu.custom.restart，不是标准 self.reboot。"""
+        mcp_client = getattr(self.conn, "mcp_client", None)
+        if mcp_client is None:
+            return None
+        mapping = getattr(mcp_client, "name_mapping", None) or {}
+        if not mapping:
+            return None
+
+        preferred = (
+            "self_qiniu_custom_restart",
+            "self.qiniu.custom.restart",
+            "self_reboot",
+            "self.reboot",
+            "reboot",
+            "restart",
+        )
+        for name in preferred:
+            if name in mapping:
+                return name
+            for sanitized, original in mapping.items():
+                if name == sanitized or name == original:
+                    return sanitized
+
+        for sanitized, original in mapping.items():
+            haystack = f"{sanitized} {original}".lower()
+            if "wifi" in haystack or "switch" in haystack:
+                continue
+            if (
+                "reboot" in haystack
+                or haystack.endswith("restart")
+                or ".restart" in (original or "").lower()
+                or "_restart" in sanitized
+            ):
+                return sanitized
+        return None
 
     def _playback_active(self):
         tts = getattr(self.conn, "tts", None)
@@ -437,6 +617,10 @@ class VoiceActivationSession:
             await self._say("请说出助手的昵称。")
         elif self.state == self.CONFIRM_NICKNAME:
             await self._say(f"助手的昵称是{self.nickname}，对吗？")
+        elif self.state == self.RETRY_SKILLS:
+            await self._say("技能绑定还未完成，请说确认重试，或者说稍后再说。")
+        elif self.state == self.ASK_REBOOT:
+            await self._say("技能已经绑定好了。是否重启设备？")
 
     async def _send_recognized_text(self, text):
         """把识别文本回给设备。不发 tts start，避免还在收号时设备退出录音。"""

@@ -53,4 +53,11 @@ public class VoiceActivationController {
         voiceActivationService.saveNickname(dto);
         return new Result<>();
     }
+
+    @PostMapping("/skills")
+    @Operation(summary = "默认技能绑定")
+    public Result<Void> skills(@Valid @RequestBody VoiceActivationMacDTO dto) {
+        voiceActivationService.bindSkills(dto.getMacAddress());
+        return new Result<>();
+    }
 }

@@ -1,57 +1,60 @@
 <mxfile host="app.diagrams.net">
   <diagram name="语音激活" id="voice-activation">
-    <mxGraphModel dx="1200" dy="800" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1654" pageHeight="1169" math="0" shadow="0">
+    <mxGraphModel dx="1400" dy="900" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1654" pageHeight="1400" math="0" shadow="0">
       <root>
         <mxCell id="0"/>
         <mxCell id="1" parent="0"/>
         <mxCell id="lane-device" value="设备" style="swimlane;horizontal=0;startSize=28;fillColor=#dae8fc;strokeColor=#6c8ebf;fontStyle=1;" vertex="1" parent="1">
-          <mxGeometry x="40" y="40" width="220" height="980" as="geometry"/>
+          <mxGeometry x="40" y="40" width="200" height="1200" as="geometry"/>
         </mxCell>
         <mxCell id="lane-py" value="xiaozhi-server" style="swimlane;horizontal=0;startSize=28;fillColor=#d5e8d4;strokeColor=#82b366;fontStyle=1;" vertex="1" parent="1">
-          <mxGeometry x="260" y="40" width="280" height="980" as="geometry"/>
+          <mxGeometry x="240" y="40" width="240" height="1200" as="geometry"/>
         </mxCell>
         <mxCell id="lane-api" value="manager-api" style="swimlane;horizontal=0;startSize=28;fillColor=#fff2cc;strokeColor=#d6b656;fontStyle=1;" vertex="1" parent="1">
-          <mxGeometry x="540" y="40" width="280" height="980" as="geometry"/>
+          <mxGeometry x="480" y="40" width="240" height="1200" as="geometry"/>
         </mxCell>
         <mxCell id="lane-sms" value="阿里云号码认证" style="swimlane;horizontal=0;startSize=28;fillColor=#f8cecc;strokeColor=#b85450;fontStyle=1;" vertex="1" parent="1">
-          <mxGeometry x="820" y="40" width="240" height="980" as="geometry"/>
+          <mxGeometry x="720" y="40" width="200" height="1200" as="geometry"/>
+        </mxCell>
+        <mxCell id="lane-lite" value="portal_lite" style="swimlane;horizontal=0;startSize=28;fillColor=#e1d5e7;strokeColor=#9673a6;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="920" y="40" width="220" height="1200" as="geometry"/>
         </mxCell>
 
         <mxCell id="d1" value="OTA 上报，设备不存在" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;" vertex="1" parent="lane-device">
-          <mxGeometry x="40" y="50" width="150" height="50" as="geometry"/>
+          <mxGeometry x="30" y="50" width="140" height="50" as="geometry"/>
         </mxCell>
         <mxCell id="a1" value="生成激活码&#xa;activation_type=voice" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;" vertex="1" parent="lane-api">
-          <mxGeometry x="50" y="50" width="180" height="50" as="geometry"/>
+          <mxGeometry x="30" y="50" width="180" height="50" as="geometry"/>
         </mxCell>
         <mxCell id="e1" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;" edge="1" parent="1" source="d1" target="a1">
           <mxGeometry relative="1" as="geometry"/>
         </mxCell>
 
         <mxCell id="d2" value="连接 WebSocket" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;" vertex="1" parent="lane-device">
-          <mxGeometry x="40" y="150" width="150" height="40" as="geometry"/>
+          <mxGeometry x="30" y="140" width="140" height="40" as="geometry"/>
         </mxCell>
         <mxCell id="p1" value="10042 后查询会话&#xa;确认为 voice" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;" vertex="1" parent="lane-py">
-          <mxGeometry x="50" y="140" width="180" height="50" as="geometry"/>
+          <mxGeometry x="30" y="130" width="180" height="50" as="geometry"/>
         </mxCell>
         <mxCell id="e2" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;" edge="1" parent="1" source="d2" target="p1">
           <mxGeometry relative="1" as="geometry"/>
         </mxCell>
 
         <mxCell id="p2" value="请说手机号&#xa;播报号码并确认" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;" vertex="1" parent="lane-py">
-          <mxGeometry x="50" y="240" width="180" height="50" as="geometry"/>
+          <mxGeometry x="30" y="220" width="180" height="50" as="geometry"/>
         </mxCell>
         <mxCell id="d3" value="说出手机号并确认" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;" vertex="1" parent="lane-device">
-          <mxGeometry x="40" y="250" width="150" height="40" as="geometry"/>
+          <mxGeometry x="30" y="230" width="140" height="40" as="geometry"/>
         </mxCell>
         <mxCell id="e3" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;" edge="1" parent="1" source="d3" target="p2">
           <mxGeometry relative="1" as="geometry"/>
         </mxCell>
 
         <mxCell id="a2" value="发送验证码" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;" vertex="1" parent="lane-api">
-          <mxGeometry x="50" y="340" width="180" height="40" as="geometry"/>
+          <mxGeometry x="30" y="320" width="180" height="40" as="geometry"/>
         </mxCell>
         <mxCell id="s1" value="SendSmsVerifyCode" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;" vertex="1" parent="lane-sms">
-          <mxGeometry x="40" y="340" width="160" height="40" as="geometry"/>
+          <mxGeometry x="20" y="320" width="160" height="40" as="geometry"/>
         </mxCell>
         <mxCell id="e4" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;" edge="1" parent="1" source="p2" target="a2">
           <mxGeometry relative="1" as="geometry"/>
@@ -61,16 +64,16 @@
         </mxCell>
 
         <mxCell id="d4" value="说出短信验证码" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;" vertex="1" parent="lane-device">
-          <mxGeometry x="40" y="440" width="150" height="40" as="geometry"/>
+          <mxGeometry x="30" y="410" width="140" height="40" as="geometry"/>
         </mxCell>
         <mxCell id="p3" value="提交验证码" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;" vertex="1" parent="lane-py">
-          <mxGeometry x="50" y="440" width="180" height="40" as="geometry"/>
+          <mxGeometry x="30" y="410" width="180" height="40" as="geometry"/>
         </mxCell>
-        <mxCell id="a3" value="校验通过&#xa;管理员创建智能体&#xa;绑定设备并写手机号" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;" vertex="1" parent="lane-api">
-          <mxGeometry x="40" y="430" width="200" height="60" as="geometry"/>
+        <mxCell id="a3" value="校验通过&#xa;建智能体并绑定&#xa;status=nickname" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;" vertex="1" parent="lane-api">
+          <mxGeometry x="30" y="400" width="180" height="60" as="geometry"/>
         </mxCell>
         <mxCell id="s2" value="CheckSmsVerifyCode" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;" vertex="1" parent="lane-sms">
-          <mxGeometry x="40" y="440" width="160" height="40" as="geometry"/>
+          <mxGeometry x="20" y="410" width="160" height="40" as="geometry"/>
         </mxCell>
         <mxCell id="e6" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;" edge="1" parent="1" source="d4" target="p3">
           <mxGeometry relative="1" as="geometry"/>
@@ -83,13 +86,13 @@
         </mxCell>
 
         <mxCell id="p4" value="绑定成功&#xa;请说助手昵称并确认" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;" vertex="1" parent="lane-py">
-          <mxGeometry x="50" y="560" width="180" height="50" as="geometry"/>
+          <mxGeometry x="30" y="520" width="180" height="50" as="geometry"/>
         </mxCell>
         <mxCell id="d5" value="说出昵称并确认" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;" vertex="1" parent="lane-device">
-          <mxGeometry x="40" y="570" width="150" height="40" as="geometry"/>
+          <mxGeometry x="30" y="530" width="140" height="40" as="geometry"/>
         </mxCell>
-        <mxCell id="a4" value="写入 agentName&#xa;onboarding_status=done" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;" vertex="1" parent="lane-api">
-          <mxGeometry x="40" y="560" width="200" height="50" as="geometry"/>
+        <mxCell id="a4" value="写入 agentName&#xa;status=skills" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;" vertex="1" parent="lane-api">
+          <mxGeometry x="30" y="520" width="180" height="50" as="geometry"/>
         </mxCell>
         <mxCell id="e9" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;" edge="1" parent="1" source="d5" target="p4">
           <mxGeometry relative="1" as="geometry"/>
@@ -98,21 +101,53 @@
           <mxGeometry relative="1" as="geometry"/>
         </mxCell>
 
-        <mxCell id="d6" value="进入日常对话" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;" vertex="1" parent="lane-device">
-          <mxGeometry x="40" y="680" width="150" height="40" as="geometry"/>
+        <mxCell id="p6" value="自动请求技能绑定&#xa;不询问用户" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;" vertex="1" parent="lane-py">
+          <mxGeometry x="30" y="630" width="180" height="50" as="geometry"/>
         </mxCell>
-        <mxCell id="p5" value="刷新提示词&#xa;开始正常聊天" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;" vertex="1" parent="lane-py">
-          <mxGeometry x="50" y="670" width="180" height="50" as="geometry"/>
+        <mxCell id="a5" value="POST /skills&#xa;代理 portal_lite&#xa;status=done" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;" vertex="1" parent="lane-api">
+          <mxGeometry x="30" y="630" width="180" height="60" as="geometry"/>
         </mxCell>
-        <mxCell id="e11" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;" edge="1" parent="1" source="a4" target="p5">
+        <mxCell id="l1" value="POST /api/device/bind&#xa;创建空技能壳" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;" vertex="1" parent="lane-lite">
+          <mxGeometry x="30" y="630" width="160" height="50" as="geometry"/>
+        </mxCell>
+        <mxCell id="e13" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;" edge="1" parent="1" source="a4" target="p6">
           <mxGeometry relative="1" as="geometry"/>
         </mxCell>
-        <mxCell id="e12" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;" edge="1" parent="1" source="p5" target="d6">
+        <mxCell id="e14" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;" edge="1" parent="1" source="p6" target="a5">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e15" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;" edge="1" parent="1" source="a5" target="l1">
           <mxGeometry relative="1" as="geometry"/>
         </mxCell>
 
-        <mxCell id="note" value="技能绑定待定。升级、换号、解绑以后复用同一套「播报确认 + 短信验证码」，本次不实现。" style="text;html=1;strokeColor=none;fillColor=none;align=left;verticalAlign=top;whiteSpace=wrap;rounded=0;" vertex="1" parent="1">
-          <mxGeometry x="40" y="1040" width="720" height="40" as="geometry"/>
+        <mxCell id="p7" value="技能已绑定&#xa;是否重启设备？" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;" vertex="1" parent="lane-py">
+          <mxGeometry x="30" y="750" width="180" height="50" as="geometry"/>
+        </mxCell>
+        <mxCell id="d7" value="确认或拒绝重启" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;" vertex="1" parent="lane-device">
+          <mxGeometry x="30" y="760" width="140" height="40" as="geometry"/>
+        </mxCell>
+        <mxCell id="e16" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;" edge="1" parent="1" source="l1" target="p7">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e17" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;" edge="1" parent="1" source="d7" target="p7">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="p8" value="确认：MCP reboot&#xa;拒绝：进入闲聊" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;" vertex="1" parent="lane-py">
+          <mxGeometry x="30" y="860" width="180" height="50" as="geometry"/>
+        </mxCell>
+        <mxCell id="d8" value="重启或日常对话" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;" vertex="1" parent="lane-device">
+          <mxGeometry x="30" y="870" width="140" height="40" as="geometry"/>
+        </mxCell>
+        <mxCell id="e18" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;" edge="1" parent="1" source="p7" target="p8">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e19" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;" edge="1" parent="1" source="p8" target="d8">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="note" value="第三阶段：昵称确认后自动技能绑定，不询问用户；成功后再问是否重启。凭证授权仍走门户配对，本阶段只建空技能壳。" style="text;html=1;strokeColor=none;fillColor=none;align=left;verticalAlign=top;whiteSpace=wrap;rounded=0;" vertex="1" parent="1">
+          <mxGeometry x="40" y="1260" width="900" height="40" as="geometry"/>
         </mxCell>
       </root>
     </mxGraphModel>

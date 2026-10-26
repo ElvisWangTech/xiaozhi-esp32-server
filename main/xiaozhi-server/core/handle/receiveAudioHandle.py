@@ -64,7 +64,9 @@ async def startToChat(conn: "ConnectionHandler", text):
     else:
         conn.current_speaker = None
 
-    if getattr(conn, "voice_onboarding", None) == "nickname" and getattr(conn, "voice_activation_handler", None) is None:
+    if getattr(conn, "voice_onboarding", None) in ("nickname", "skills") and getattr(
+        conn, "voice_activation_handler", None
+    ) is None:
         return
 
     if getattr(conn, "voice_activation_handler", None) is not None:
@@ -86,6 +88,13 @@ async def startToChat(conn: "ConnectionHandler", text):
     # manual 模式下不打断正在播放的内容
     if conn.client_is_speaking and conn.client_listen_mode != "manual":
         await handleAbortMessage(conn)
+
+    from core.handle.voice_activation import is_skills_command, start_skills_onboarding
+
+    # 引导失败或稍后后，用户可主动说「绑定技能」重新进入（接口会校验 onboarding_status）
+    if is_skills_command(actual_text):
+        await start_skills_onboarding(conn, announce="好的，开始绑定技能。")
+        return
 
     # 首先进行意图分析，使用实际文本内容
     intent_handled = await handle_user_intent(conn, actual_text)

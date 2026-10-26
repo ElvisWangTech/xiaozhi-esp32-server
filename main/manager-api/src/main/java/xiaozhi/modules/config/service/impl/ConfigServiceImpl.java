@@ -173,6 +173,8 @@ public class ConfigServiceImpl implements ConfigService {
         result.put("device_max_output_size", deviceMaxOutputSize);
         if ("nickname".equals(device.getOnboardingStatus())) {
             result.put("voice_onboarding", "nickname");
+        } else if ("skills".equals(device.getOnboardingStatus())) {
+            result.put("voice_onboarding", "skills");
         }
 
         // 获取聊天记录配置

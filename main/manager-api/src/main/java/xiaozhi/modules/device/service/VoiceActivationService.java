@@ -1,14 +1,25 @@
 package xiaozhi.modules.device.service;
 
+import java.util.HashMap;
 import java.util.Map;
 
 import org.apache.commons.lang3.StringUtils;
+import org.springframework.http.HttpEntity;
+import org.springframework.http.HttpHeaders;
+import org.springframework.http.HttpMethod;
+import org.springframework.http.MediaType;
+import org.springframework.http.ResponseEntity;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.web.client.RestClientResponseException;
+import org.springframework.web.client.RestTemplate;
 
 import com.baomidou.mybatisplus.core.conditions.query.QueryWrapper;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 
 import lombok.AllArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 import xiaozhi.common.exception.ErrorCode;
 import xiaozhi.common.exception.RenException;
 import xiaozhi.common.redis.RedisKeys;
@@ -16,6 +27,7 @@ import xiaozhi.common.redis.RedisUtils;
 import xiaozhi.common.utils.ToolUtil;
 import xiaozhi.modules.agent.dto.AgentCreateDTO;
 import xiaozhi.modules.agent.entity.AgentEntity;
+import xiaozhi.modules.agent.service.AgentMcpAccessPointService;
 import xiaozhi.modules.agent.service.AgentService;
 import xiaozhi.modules.device.dto.VoiceActivationBindDTO;
 import xiaozhi.modules.device.dto.VoiceActivationNicknameDTO;
@@ -27,21 +39,30 @@ import xiaozhi.modules.sms.service.DypnsSmsCodeService;
 import xiaozhi.modules.sys.dao.SysUserDao;
 import xiaozhi.modules.sys.entity.SysUserEntity;
 import xiaozhi.modules.sys.enums.SuperAdminEnum;
+import xiaozhi.modules.sys.service.SysParamsService;
 
+@Slf4j
 @Service
 @AllArgsConstructor
 public class VoiceActivationService {
 
     public static final String ONBOARDING_NICKNAME = "nickname";
+    public static final String ONBOARDING_SKILLS = "skills";
     public static final String ONBOARDING_DONE = "done";
     public static final String ACTIVATION_VOICE = "voice";
     private static final String DEFAULT_AGENT_NAME = "小智";
+    private static final String PARAM_PORTAL_BASE_URL = "portal_lite.base_url";
+    private static final String PARAM_PORTAL_BIND_TOKEN = "portal_lite.bind_token";
 
     private final DeviceService deviceService;
     private final AgentService agentService;
+    private final AgentMcpAccessPointService agentMcpAccessPointService;
     private final DypnsSmsCodeService smsCodeService;
     private final SysUserDao sysUserDao;
+    private final SysParamsService sysParamsService;
     private final RedisUtils redisUtils;
+    private final RestTemplate restTemplate;
+    private final ObjectMapper objectMapper;
 
     public VoiceActivationSessionVO session(String macAddress) {
         String mac = requireMac(macAddress);
@@ -122,8 +143,116 @@ public class VoiceActivationService {
         }
         agent.setAgentName(nickname);
         agentService.updateById(agent);
+        device.setOnboardingStatus(ONBOARDING_SKILLS);
+        deviceService.updateById(device);
+    }
+
+    @Transactional(rollbackFor = Exception.class)
+    public void bindSkills(String macAddress) {
+        String mac = requireMac(macAddress);
+        DeviceEntity device = deviceService.getDeviceByMacAddress(mac);
+        if (device == null) {
+            throw new RenException(ErrorCode.DEVICE_NOT_EXIST);
+        }
+        if (!ONBOARDING_SKILLS.equals(device.getOnboardingStatus())) {
+            throw new RenException("当前不需要绑定技能");
+        }
+        if (StringUtils.isBlank(device.getPhone())) {
+            throw new RenException("设备未记录手机号，无法绑定技能");
+        }
+        AgentEntity agent = agentService.selectById(device.getAgentId());
+        if (agent == null) {
+            throw new RenException(ErrorCode.AGENT_NOT_FOUND);
+        }
+        String endpointUrl = agentMcpAccessPointService.getAgentMcpAccessAddress(agent.getId());
+        if (StringUtils.isBlank(endpointUrl) || !endpointUrl.startsWith("ws")) {
+            throw new RenException("智能体 MCP 接入点未配置");
+        }
+        String baseUrl = StringUtils.trimToEmpty(sysParamsService.getValue(PARAM_PORTAL_BASE_URL, true));
+        String bindToken = StringUtils.trimToEmpty(sysParamsService.getValue(PARAM_PORTAL_BIND_TOKEN, true));
+        if (StringUtils.isBlank(baseUrl) || StringUtils.isBlank(bindToken)) {
+            throw new RenException("技能服务暂不可用");
+        }
+        String agentName = StringUtils.defaultIfBlank(agent.getAgentName(), DEFAULT_AGENT_NAME);
+        String deviceName = agentName;
+        Map<String, Object> body = new HashMap<>();
+        body.put("device_name", deviceName);
+        body.put("mac_address", mac);
+        body.put("agent_name", agentName);
+        body.put("endpoint_url", endpointUrl);
+        body.put("phone", device.getPhone());
+        callPortalBind(baseUrl, bindToken, body);
         device.setOnboardingStatus(ONBOARDING_DONE);
         deviceService.updateById(device);
+    }
+
+    private void callPortalBind(String baseUrl, String bindToken, Map<String, Object> body) {
+        String url = StringUtils.removeEnd(baseUrl, "/") + "/api/device/bind";
+        HttpHeaders headers = new HttpHeaders();
+        headers.setContentType(MediaType.APPLICATION_JSON);
+        headers.set("X-Bind-Token", bindToken);
+        try {
+            ResponseEntity<String> response = restTemplate.exchange(
+                    url,
+                    HttpMethod.POST,
+                    new HttpEntity<>(body, headers),
+                    String.class);
+            String payload = response.getBody();
+            if (!response.getStatusCode().is2xxSuccessful()) {
+                log.warn("portal_lite bind failed: url={} status={} body={}",
+                        url, response.getStatusCode().value(), abbreviate(payload));
+                throw new RenException(portalErrorMessage(payload, response.getStatusCode().value()));
+            }
+            JsonNode root = StringUtils.isBlank(payload) ? null : objectMapper.readTree(payload);
+            if (root != null && root.has("ok") && !root.path("ok").asBoolean(false)) {
+                throw new RenException(portalErrorMessage(payload, response.getStatusCode().value()));
+            }
+        } catch (RenException e) {
+            throw e;
+        } catch (RestClientResponseException e) {
+            log.warn("portal_lite bind failed: url={} status={} body={}",
+                    url, e.getStatusCode().value(), abbreviate(e.getResponseBodyAsString()));
+            throw new RenException(portalErrorMessage(e.getResponseBodyAsString(), e.getStatusCode().value()));
+        } catch (Exception e) {
+            log.warn("portal_lite bind error: url={} err={}", url, e.getMessage());
+            throw new RenException("技能服务连不上，请稍后再试");
+        }
+    }
+
+    private String portalErrorMessage(String payload, int status) {
+        if (StringUtils.isNotBlank(payload)) {
+            String trimmed = payload.trim();
+            if (trimmed.startsWith("<") || trimmed.toLowerCase().contains("<!doctype")) {
+                if (status == 404) {
+                    return "技能服务接口不存在，请升级 portal_lite";
+                }
+                return "技能服务返回异常页面";
+            }
+            try {
+                JsonNode root = objectMapper.readTree(payload);
+                String error = root.path("error").asText(null);
+                if (StringUtils.isNotBlank(error) && error.length() <= 40) {
+                    return error;
+                }
+            } catch (Exception ignored) {
+                // keep status-based fallback
+            }
+        }
+        if (status == 401 || status == 403) {
+            return "技能服务口令错误";
+        }
+        if (status == 404) {
+            return "技能服务接口不存在，请升级 portal_lite";
+        }
+        return "技能绑定失败";
+    }
+
+    private static String abbreviate(String text) {
+        if (text == null) {
+            return "";
+        }
+        String oneLine = text.replace('\n', ' ').replace('\r', ' ').trim();
+        return oneLine.length() <= 200 ? oneLine : oneLine.substring(0, 200);
     }
 
     private SysUserEntity findSuperAdmin() {

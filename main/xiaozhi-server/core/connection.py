@@ -100,7 +100,8 @@ class ConnectionHandler:
 
         self.need_bind = False  # 是否需要绑定设备
         self.voice_activation = False  # 未绑定且激活方式为语音
-        self.voice_onboarding = None  # nickname 表示绑定后还要设置昵称
+        self.voice_onboarding = None  # nickname / skills 表示绑定后的引导步骤
+        self.skills_pending = False  # 技能绑定失败或稍后后，允许语音再说「绑定技能」
         self.voice_activation_handler = None
         self.bind_completed_event = asyncio.Event()
         self.bind_code = None  # 绑定设备的验证码
@@ -558,6 +559,10 @@ class ConnectionHandler:
                 asyncio.run_coroutine_threadsafe(
                     self._start_nickname_onboarding(), self.loop
                 )
+            elif self.voice_onboarding == "skills" and self.voice_activation_handler is None:
+                asyncio.run_coroutine_threadsafe(
+                    self._start_skills_onboarding(), self.loop
+                )
 
         except Exception as e:
             self.logger.bind(tag=TAG).error(f"实例化组件失败: {e}")
@@ -691,6 +696,12 @@ class ConnectionHandler:
         from core.handle.voice_activation import VoiceActivationSession
 
         self.voice_activation_handler = VoiceActivationSession(self, stage="nickname")
+        await self.voice_activation_handler.start()
+
+    async def _start_skills_onboarding(self):
+        from core.handle.voice_activation import VoiceActivationSession
+
+        self.voice_activation_handler = VoiceActivationSession(self, stage="skills")
         await self.voice_activation_handler.start()
 
     async def complete_voice_bind_setup(self):
