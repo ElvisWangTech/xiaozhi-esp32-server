@@ -12,7 +12,7 @@
 | --- | --- | --- |
 | 第一阶段 激活 | 确认手机号、发短信、校验验证码、超级管理员建智能体并绑定设备 | 实现 |
 | 第二阶段 角色绑定 | 只询问助手昵称，写入智能体 `agentName` | 实现 |
-| 第三阶段 技能绑定 | 昵称确认后自动调 portal_lite 默认技能绑定，成功后询问是否重启设备 | 实现 |
+| 第三阶段 技能绑定 | 昵称确认后自动通用绑定，默认开通瑞幸→滴滴（仅验证码时打断；失败口头提示），最后询问是否重启 | 实现 |
 
 控制台原有 `POST /device/bind/{agentId}/{deviceCode}` 保留，给非 voice 路径使用。一个智能体只能绑定一台设备，见下文「一机一体」。
 
@@ -25,8 +25,8 @@
 5. 确认后调用发送接口。成功后请用户说出短信验证码。失败则播报原因，留在确认步骤，再说「确认」会重发。
 6. 校验通过后：查找 `super_admin=1` 的用户（取 id 最小的一个），**新建**一个智能体（不按手机号查找已有智能体），用默认模板创建，初始名为「小智」。按激活码写入 `ai_device`，`user_id` 为该管理员，并保存手机号，`onboarding_status=nickname`。同一手机号再绑另一台设备时，再新建一个智能体。
 7. 播报绑定成功，重新拉取该设备的私有配置。若 `voice_onboarding=nickname`，请用户说助手昵称，播报确认后写入 `agentName`，状态改为 `skills`。
-8. 昵称确认后**不询问用户**，自动请求技能绑定（`POST /device/voice-activation/skills` → portal_lite）。成功后把状态改为 `done`，播报「技能已经绑定好了」，再问是否重启设备。用户确认后通过设备 MCP `reboot` 重启；拒绝则进入日常对话。失败保持 `skills`，播报原因，可说「确认/重试」。
-9. 断线重连：已绑定且状态为 `nickname` 时只继续问昵称；为 `skills` 时只继续技能绑定与重启询问，不再走激活。
+8. 昵称确认后**不询问用户**，自动做通用技能绑定（`POST /skills` → portal_lite `/api/device/bind` + `/api/portal/invite`）。成功后**默认**依次开通瑞幸咖啡、滴滴出行（先瑞幸：滴滴常需实名/免密支付）。`/skills/auth` → portal automation；仅 `waiting_code` 时要短信验证码；说「不要/跳过」则 cancel 该项。单项失败会当场播报原因，全部结束后再汇总失败项并提示可说「绑定技能」重试，然后问是否重启。麦当劳暂不支持。通用绑定失败保持 `skills`。
+9. 断线重连：已绑定且状态为 `nickname` 时只继续问昵称；为 `skills` 时继续通用绑定与默认授权流程，不再走激活。
 
 验证码阶段说「重说」会回到手机号。说「重发」会再发一条短信（仍受频控）。
 
@@ -74,7 +74,37 @@
 
 请求：`{ "macAddress": "..." }`
 
-仅当 `onboarding_status=skills` 时，由 manager-api 代理调用 portal_lite 默认技能绑定。成功后把状态改为 `done`。失败保持 `skills`，供重试或重连。
+仅当 `onboarding_status=skills` 时：调用 portal_lite 通用绑定，用返回的 `device_id` 签发邀请令牌（`X-Admin-Token`），写入 Redis。成功后**不**改为 `done`，由语音侧默认启动授权自动化。
+
+`POST /device/voice-activation/skills/auth`
+
+请求：`{ "macAddress": "...", "service": "didi" }`
+
+`service` 仅 `didi` / `luckin`。启动 portal `/api/automation/start`，立即返回 `{ status, service, taskId, message }`。`status`：`pending` / `waiting_code` / `done` / `failed` / `skipped`。
+
+`POST /device/voice-activation/skills/auth/status`
+
+请求：`{ "macAddress": "...", "taskId": "..." }`
+
+查询自动化状态，返回同上。
+
+`POST /device/voice-activation/skills/auth/code`
+
+请求：`{ "macAddress": "...", "taskId": "...", "code": "123456" }`
+
+提交短信验证码到 `/api/automation/code`。
+
+`POST /device/voice-activation/skills/auth/cancel`
+
+请求：`{ "macAddress": "...", "taskId": "..." }`
+
+取消当前授权任务。
+
+`POST /device/voice-activation/skills/complete`
+
+请求：`{ "macAddress": "..." }`
+
+授权流程结束后调用：可选 `portal/finish`，把 `onboarding_status` 改为 `done`，清掉邀请缓存。
 
 已绑定设备的 `POST /config/agent-models`：需要昵称时返回 `voice_onboarding=nickname`；需要技能绑定时返回 `voice_onboarding=skills`。
 
@@ -97,6 +127,7 @@
 | `aliyun.dypns.mock` | `true` 时不调用阿里云，验证码写在服务端日志里，供开发联调 |
 | `portal_lite.base_url` | portal_lite 服务地址，例如 `http://127.0.0.1:5005` |
 | `portal_lite.bind_token` | 对应 `X-Bind-Token` / `LITE_BIND_TOKEN` |
+| `portal_lite.admin_token` | 对应 `X-Admin-Token` / `LITE_ADMIN_TOKEN`，签发邀请令牌；为空时回退 `bind_token` |
 
 频控：同一手机号 60 秒内不可重发，每天最多 10 条，验证失败最多 5 次。未配置密钥且未开启 mock 时，接口返回「短信服务暂不可用」。
 
@@ -126,57 +157,57 @@
 
 - 实现第三阶段技能绑定：昵称确认后 `onboarding_status=skills`，自动调 portal_lite `POST /api/device/bind`，成功后询问是否重启设备（设备 MCP `reboot`）。智控台参数 `portal_lite.base_url`、`portal_lite.bind_token` 见 `db/changelog/202610231600.sql`。
 
+### 2026-10-26
+
+- 技能绑定拆成通用绑定 + 授权技能询问（方案 A）：通用绑定后依次询问滴滴/瑞幸，确认则写 `auth_bind` 元数据。
+
+### 2026-10-26（方案 B）
+
+- 重构为默认开通：通用绑定后签发 invite，自动跑瑞幸→滴滴 automation；仅 `waiting_code` 时要短信验证码；拒绝则 cancel 该项；失败当场与结束时口头提示。新增 `portal_lite.admin_token` 与 `/skills/auth/{status,code,cancel}`。
+
 ## 后续操作（本次不实现）
 
 升级、更换手机号、解绑也走语音：先播报当前绑定手机号请用户确认，确认后发送短信，验证码通过后再执行变更。设备上的 `phone` 和号码认证校验就是为这些操作留的。本次只保存手机号并完成激活校验，不提供上述三条对话。
 
-## 第三阶段
+## 第三阶段（方案 B）
 
-激活和昵称完成之前，不询问技能。昵称确认后的默认技能绑定为自动动作，**不需要和用户确认**。绑定成功后再询问是否重启设备；用户确认后重启。
+激活和昵称完成之前，不询问技能。昵称确认后：先自动做**通用技能绑定**，再**默认**跑瑞幸→滴滴授权自动化（不问「要开通吗」），仅短信验证码阶段打断用户；失败会提示原因，最后询问是否重启。
+
+真实凭证由 portal_lite Playwright 自动化写入 skills；本阶段不再只写 `auth_bind` 元数据。
 
 ### 对话顺序
 
 | 步骤 | `onboarding_status` | 对话 |
 | --- | --- | --- |
 | 设备绑定成功 | `nickname` | 询问助手昵称 |
-| 昵称确认写入 | `skills` | 自动请求技能绑定，不询问用户 |
-| 技能绑定成功 | `done` | 播报「技能已经绑定好了。是否重启设备？」 |
-| 用户确认重启 | `done` | 调用设备 MCP 重启工具（本固件为 `self.qiniu.custom.restart`；也匹配含 `reboot` / `restart` 的工具） |
-| 用户拒绝重启 | `done` | 「好的，我们可以开始聊天了」，清引导 handler |
+| 昵称确认写入 | `skills` | 自动通用技能绑定，不询问用户 |
+| 通用绑定成功 | `skills` | 「正在开通瑞幸咖啡」——默认启动 automation |
+| 瑞幸 `waiting_code` | `skills` | 「请说出瑞幸短信验证码」；「不要/跳过」则 cancel |
+| 瑞幸结束 | `skills` | 自动开通滴滴出行（同上） |
+| 授权做完 | `done` | 汇总成功/失败（失败含原因；滴滴失败可提示实名/免密），`complete` 后问是否重启 |
+| 用户确认重启 | `done` | 设备 MCP `self.qiniu.custom.restart` |
+| 用户拒绝重启 | `done` | 「好的，我们可以开始聊天了」 |
 
-断线重连：`voice_onboarding=skills` 时只继续技能绑定与重启询问，不再问手机号或昵称。技能绑定失败时保持 `skills`，播报原因；用户可说「确认」重试，或「稍后再说」先聊天，之后再说「绑定技能 / 配置技能」重新进入。已是 `done` 的老设备不回填技能绑定。
+断线重连：`voice_onboarding=skills` 时继续通用绑定与默认授权。通用绑定失败可说「确认」重试，或「稍后再说」先聊天，之后再说「绑定技能」。已是 `done` 的老设备不回填。
 
-部署注意：`portal_lite.base_url` 指向的服务必须包含 `POST /api/device/bind`。若只部署了旧版 portal_lite（有 `/api/health` 但无 bind 路由），会返回 404 HTML，语音侧会提示「技能服务接口不存在，请升级 portal_lite」。
+部署注意：`portal_lite` 须提供 `/api/device/bind`、`/api/portal/invite`、`/api/automation/{start,status,code,cancel}`；并配置 `admin_token`（或与 bind_token 相同）。
 
 ### 外部接口（portal_lite）
 
-技能服务在仓库外：`mcd_mcp` 的 `portal_lite`。manager-api 代理调用：
+技能服务在仓库外：`mcd_mcp` 的 `portal_lite`。
 
-`POST {portal_lite.base_url}/api/device/bind`
+| 步骤 | 方法 | 鉴权 |
+| --- | --- | --- |
+| 通用绑定 | `POST /api/device/bind` | `X-Bind-Token` |
+| 签发邀请 | `POST /api/portal/invite` `{device_id}` | `X-Admin-Token` |
+| 启动授权 | `POST /api/automation/start` `{token, service, phone}` | invite `token` |
+| 查状态 | `GET /api/automation/status?task_id=` | — |
+| 交验证码 | `POST /api/automation/code` `{task_id, code}` | — |
+| 取消 | `POST /api/automation/cancel` `{task_id}` | — |
+| 结束邀请 | `POST /api/portal/finish` `{token}` | invite `token` |
 
-鉴权：请求头 `X-Bind-Token: {portal_lite.bind_token}`。
+**通用绑定** body：`device_name`、`mac_address`、`agent_name`、`endpoint_url`、`phone`。返回含 `device_id`。
 
-请求体：
+自动化状态：`queued` → `starting` → `waiting_code` → `submitting` → `done` / `error` / `canceled`。语音侧只处理短信类服务（didi/luckin）；`waiting_scan`（麦当劳）暂不支持。
 
-```json
-{
-  "device_name": "小助",
-  "mac_address": "aa:bb:cc:dd:ee:ff",
-  "agent_name": "小助",
-  "endpoint_url": "ws://.../mcp/?token=...",
-  "phone": "13800138000"
-}
-```
-
-| 字段 | 来源 |
-| --- | --- |
-| `mac_address` | 设备 MAC |
-| `phone` | `ai_device.phone` |
-| `agent_name` / `device_name` | 刚写入的智能体昵称 |
-| `endpoint_url` | 该智能体的 MCP 接入点地址（`AgentMcpAccessPointService.getAgentMcpAccessAddress`），供 mcd_mcp broker 建通道 |
-
-成功响应含 `ok`、`device_id`、`agent_id`、`skill_id` 等。同 MAC 重复调用幂等。该接口创建空技能壳（`skill_<agent_id>`），不预填滴滴/瑞幸等凭证；凭证授权仍走门户配对，不在本阶段调用。
-
-未配置 `portal_lite.base_url` / `portal_lite.bind_token`，或智能体 MCP 接入点为空时，接口返回错误，状态保持 `skills`。
-
-控制台手工绑定路径不强制调 portal_lite。不新增 WebSocket 消息类型。
+未配置 `portal_lite.*` 或 MCP 接入点为空时返回错误，状态保持 `skills`。控制台手工绑定不强制调 portal_lite。不新增 WebSocket 消息类型。

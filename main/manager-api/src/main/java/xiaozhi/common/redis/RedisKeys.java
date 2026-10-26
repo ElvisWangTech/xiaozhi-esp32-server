@@ -168,6 +168,13 @@ public class RedisKeys {
     }
 
     /**
+     * 语音激活：portal_lite 邀请令牌与设备 ID（通用绑定后签发）
+     */
+    public static String getVoicePortalInviteKey(String macAddress) {
+        return "voice:portal:invite:" + macAddress.replace(":", "_").toLowerCase();
+    }
+
+    /**
      * 聊天记录UUID映射的Key
      */
     public static String getChatHistoryKey(String uuid) {

@@ -198,7 +198,15 @@ class VoiceActivationSession:
     ASK_NICKNAME = "ask_nickname"
     CONFIRM_NICKNAME = "confirm_nickname"
     RETRY_SKILLS = "retry_skills"
+    ASK_AUTH_CODE = "ask_auth_code"
     ASK_REBOOT = "ask_reboot"
+
+    # 方案 B：默认依次开通；瑞幸先于滴滴（滴滴常需实名/免密支付）
+    # 不询问「要开通吗」；仅 waiting_code 时打断要验证码
+    AUTH_QUEUE = (
+        ("luckin", "瑞幸咖啡"),
+        ("didi", "滴滴出行"),
+    )
 
     def __init__(self, conn, stage="bind", announce_bind_success=False):
         self.conn = conn
@@ -213,6 +221,12 @@ class VoiceActivationSession:
         self.phone_digits = ""
         self.nickname = None
         self.announce_bind_success = announce_bind_success
+        self.auth_queue = []
+        self.auth_service = None
+        self.auth_label = None
+        self.auth_task_id = None
+        self.auth_done = []
+        self.auth_failed = []
         self._busy = False
         self._phone_epoch = 0
         self._phone_wait_task = None
@@ -260,6 +274,8 @@ class VoiceActivationSession:
             await self._on_confirm_nickname(text)
         elif self.state == self.RETRY_SKILLS:
             await self._on_retry_skills(text)
+        elif self.state == self.ASK_AUTH_CODE:
+            await self._on_auth_code(text)
         elif self.state == self.ASK_REBOOT:
             await self._on_ask_reboot(text)
 
@@ -470,10 +486,204 @@ class VoiceActivationSession:
             self.conn.voice_onboarding = "skills"
             await self._say(api_error_text(exc) + "。请说确认重试，或者说稍后再说。")
             return
+        self.conn.voice_onboarding = "skills"
+        self.conn.skills_pending = True
+        self.auth_queue = list(self.AUTH_QUEUE)
+        self.auth_service = None
+        self.auth_label = None
+        self.auth_task_id = None
+        self.auth_done = []
+        self.auth_failed = []
+        first_label = self.AUTH_QUEUE[0][1] if self.AUTH_QUEUE else "技能"
+        await self._say(f"通用技能已绑定。正在开通{first_label}。")
+        await self._run_next_auth()
+
+    def _mark_auth_failed(self, label, reason=""):
+        name = label or "技能"
+        if name not in self.auth_failed:
+            self.auth_failed.append(name)
+        return reason
+
+    def _auth_finish_prefix(self):
+        """汇总开通结果，失败项必须口头提示。"""
+        parts = []
+        if self.auth_done:
+            parts.append("、".join(self.auth_done) + "已开通")
+        if self.auth_failed:
+            failed = "、".join(self.auth_failed)
+            tip = f"{failed}开通失败"
+            if any("滴滴" in name for name in self.auth_failed):
+                tip += "。滴滴出行可能需要先完成实名认证和免密支付后再试"
+            tip += "。可以说绑定技能重新开通"
+            parts.append(tip)
+        if not parts:
+            return "技能引导已结束。"
+        return "。".join(parts) + "。"
+
+    async def _run_next_auth(self):
+        if not self.auth_queue:
+            await self._finish_skills_and_ask_reboot(self._auth_finish_prefix())
+            return
+        service, label = self.auth_queue.pop(0)
+        self.auth_service = service
+        self.auth_label = label
+        self.auth_task_id = None
+        first_service = self.AUTH_QUEUE[0][0] if self.AUTH_QUEUE else None
+        if service != first_service:
+            await self._say(f"正在开通{label}。")
+        try:
+            result = await self._post(
+                "/device/voice-activation/skills/auth",
+                {"macAddress": self._mac(), "service": service},
+            )
+        except Exception as exc:
+            self.conn.logger.bind(tag=TAG).warning(f"{label}授权启动失败: {exc}")
+            reason = api_error_text(exc)
+            self._mark_auth_failed(label, reason)
+            await self._say(f"{label}开通失败：{reason}。")
+            await self._run_next_auth()
+            return
+        await self._handle_auth_result(result or {})
+
+    async def _handle_auth_result(self, result):
+        status = str((result or {}).get("status") or "")
+        task_id = (result or {}).get("taskId")
+        message = (result or {}).get("message") or ""
+        label = self.auth_label or "技能"
+        if task_id:
+            self.auth_task_id = task_id
+
+        if status == "waiting_code":
+            self.state = self.ASK_AUTH_CODE
+            self.conn.last_activity_time = time.time() * 1000
+            await self._say(f"请说出{label}短信里的验证码。不要可以说跳过。")
+            return
+
+        if status == "done":
+            if label not in self.auth_done:
+                self.auth_done.append(label)
+            await self._say(f"{label}已开通。")
+            await self._run_next_auth()
+            return
+
+        if status in ("failed", "skipped"):
+            if status == "skipped":
+                await self._say(f"好的，已跳过{label}。")
+            else:
+                reason = message.strip() if message else ""
+                self._mark_auth_failed(label, reason)
+                if reason:
+                    await self._say(f"{label}开通失败：{reason}。")
+                else:
+                    await self._say(f"{label}开通失败。")
+            await self._run_next_auth()
+            return
+
+        # pending：轮询至 waiting_code / done / failed
+        for _ in range(60):
+            await asyncio.sleep(1.5)
+            if not self.auth_task_id:
+                break
+            try:
+                polled = await self._post(
+                    "/device/voice-activation/skills/auth/status",
+                    {"macAddress": self._mac(), "taskId": self.auth_task_id},
+                )
+            except Exception as exc:
+                self.conn.logger.bind(tag=TAG).warning(f"{label}授权状态查询失败: {exc}")
+                reason = api_error_text(exc)
+                self._mark_auth_failed(label, reason)
+                await self._say(f"{label}开通失败：{reason}。")
+                await self._run_next_auth()
+                return
+            polled_status = str((polled or {}).get("status") or "")
+            if polled_status == "pending":
+                continue
+            await self._handle_auth_result(polled or {})
+            return
+
+        await self._cancel_auth_task()
+        self._mark_auth_failed(label, "等待超时")
+        await self._say(f"{label}开通失败：等待超时。")
+        await self._run_next_auth()
+
+    async def _cancel_auth_task(self):
+        if not self.auth_task_id:
+            return
+        try:
+            await self._post(
+                "/device/voice-activation/skills/auth/cancel",
+                {"macAddress": self._mac(), "taskId": self.auth_task_id},
+            )
+        except Exception as exc:
+            self.conn.logger.bind(tag=TAG).info(f"取消授权任务失败: {exc}")
+        self.auth_task_id = None
+
+    async def _on_auth_code(self, text):
+        label = self.auth_label or "技能"
+        if is_skip_skills(text) or is_reject(text):
+            await self._cancel_auth_task()
+            await self._say(f"好的，已跳过{label}。")
+            await self._run_next_auth()
+            return
+        if is_resend(text):
+            await self._say("验证码由服务方发送，请留意短信。收到后直接说出验证码。")
+            return
+        code = extract_code(text)
+        if not code:
+            await self._say("没有听清验证码，请再说一遍。或者说跳过。")
+            return
+        if not self.auth_task_id:
+            self._mark_auth_failed(label, "任务已失效")
+            await self._say(f"{label}开通失败：任务已失效。")
+            await self._run_next_auth()
+            return
+        try:
+            result = await self._post(
+                "/device/voice-activation/skills/auth/code",
+                {
+                    "macAddress": self._mac(),
+                    "taskId": self.auth_task_id,
+                    "code": code,
+                },
+            )
+        except Exception as exc:
+            self.conn.logger.bind(tag=TAG).warning(f"{label}提交验证码失败: {exc}")
+            await self._say(api_error_text(exc) + "。请再说一遍验证码，或者说跳过。")
+            return
+        status = str((result or {}).get("status") or "")
+        if status == "waiting_code":
+            await self._say("验证码不正确或尚未生效，请再说一遍，或者说跳过。")
+            return
+        if status == "done":
+            if label not in self.auth_done:
+                self.auth_done.append(label)
+            await self._say(f"{label}已开通。")
+            await self._run_next_auth()
+            return
+        if status in ("failed", "skipped"):
+            await self._handle_auth_result(result or {})
+            return
+        # pending：提交后继续轮询
+        await self._say("验证码已提交，正在登录。")
+        await self._handle_auth_result(result or {})
+
+    async def _finish_skills_and_ask_reboot(self, prefix=""):
+        try:
+            await self._post(
+                "/device/voice-activation/skills/complete",
+                {"macAddress": self._mac()},
+            )
+        except Exception as exc:
+            self.conn.logger.bind(tag=TAG).warning(f"完成技能引导失败: {exc}")
+            # 即使 complete 失败，也允许进入重启询问，避免卡在引导
         self.conn.voice_onboarding = None
         self.conn.skills_pending = False
         self.state = self.ASK_REBOOT
-        await self._say("技能已经绑定好了。是否重启设备？")
+        summary = (prefix or "").strip() or "技能引导已结束。"
+        if not summary.endswith("。"):
+            summary += "。"
+        await self._say(summary + "是否重启设备？")
 
     async def _on_retry_skills(self, text):
         if is_skip_skills(text):
@@ -619,6 +829,9 @@ class VoiceActivationSession:
             await self._say(f"助手的昵称是{self.nickname}，对吗？")
         elif self.state == self.RETRY_SKILLS:
             await self._say("技能绑定还未完成，请说确认重试，或者说稍后再说。")
+        elif self.state == self.ASK_AUTH_CODE:
+            label = self.auth_label or "技能"
+            await self._say(f"请说出{label}短信验证码。或者说跳过。")
         elif self.state == self.ASK_REBOOT:
             await self._say("技能已经绑定好了。是否重启设备？")
 

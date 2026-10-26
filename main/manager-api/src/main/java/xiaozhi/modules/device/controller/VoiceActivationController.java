@@ -12,10 +12,14 @@ import xiaozhi.common.utils.Result;
 import xiaozhi.modules.device.dto.VoiceActivationBindDTO;
 import xiaozhi.modules.device.dto.VoiceActivationMacDTO;
 import xiaozhi.modules.device.dto.VoiceActivationNicknameDTO;
+import xiaozhi.modules.device.dto.VoiceActivationSkillAuthDTO;
+import xiaozhi.modules.device.dto.VoiceActivationSkillCodeDTO;
+import xiaozhi.modules.device.dto.VoiceActivationSkillTaskDTO;
 import xiaozhi.modules.device.dto.VoiceActivationSmsDTO;
 import xiaozhi.modules.device.service.VoiceActivationService;
 import xiaozhi.modules.device.vo.VoiceActivationBindVO;
 import xiaozhi.modules.device.vo.VoiceActivationSessionVO;
+import xiaozhi.modules.device.vo.VoiceActivationSkillAuthVO;
 
 @Tag(name = "语音激活")
 @RestController
@@ -55,9 +59,45 @@ public class VoiceActivationController {
     }
 
     @PostMapping("/skills")
-    @Operation(summary = "默认技能绑定")
+    @Operation(summary = "通用技能绑定并签发邀请令牌")
     public Result<Void> skills(@Valid @RequestBody VoiceActivationMacDTO dto) {
         voiceActivationService.bindSkills(dto.getMacAddress());
+        return new Result<>();
+    }
+
+    @PostMapping("/skills/auth")
+    @Operation(summary = "启动授权技能自动化（滴滴、瑞幸）")
+    public Result<VoiceActivationSkillAuthVO> skillsAuth(@Valid @RequestBody VoiceActivationSkillAuthDTO dto) {
+        return new Result<VoiceActivationSkillAuthVO>()
+                .ok(voiceActivationService.startSkillAuth(dto.getMacAddress(), dto.getService()));
+    }
+
+    @PostMapping("/skills/auth/status")
+    @Operation(summary = "查询授权技能自动化状态")
+    public Result<VoiceActivationSkillAuthVO> skillsAuthStatus(@Valid @RequestBody VoiceActivationSkillTaskDTO dto) {
+        return new Result<VoiceActivationSkillAuthVO>()
+                .ok(voiceActivationService.skillAuthStatus(dto.getMacAddress(), dto.getTaskId()));
+    }
+
+    @PostMapping("/skills/auth/code")
+    @Operation(summary = "提交授权技能短信验证码")
+    public Result<VoiceActivationSkillAuthVO> skillsAuthCode(@Valid @RequestBody VoiceActivationSkillCodeDTO dto) {
+        return new Result<VoiceActivationSkillAuthVO>()
+                .ok(voiceActivationService.submitSkillAuthCode(
+                        dto.getMacAddress(), dto.getTaskId(), dto.getCode()));
+    }
+
+    @PostMapping("/skills/auth/cancel")
+    @Operation(summary = "取消授权技能自动化")
+    public Result<VoiceActivationSkillAuthVO> skillsAuthCancel(@Valid @RequestBody VoiceActivationSkillTaskDTO dto) {
+        return new Result<VoiceActivationSkillAuthVO>()
+                .ok(voiceActivationService.cancelSkillAuth(dto.getMacAddress(), dto.getTaskId()));
+    }
+
+    @PostMapping("/skills/complete")
+    @Operation(summary = "完成技能引导")
+    public Result<Void> skillsComplete(@Valid @RequestBody VoiceActivationMacDTO dto) {
+        voiceActivationService.completeSkills(dto.getMacAddress());
         return new Result<>();
     }
 }
