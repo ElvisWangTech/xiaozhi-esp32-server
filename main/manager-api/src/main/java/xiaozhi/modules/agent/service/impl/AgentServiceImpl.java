@@ -309,7 +309,7 @@ public class AgentServiceImpl extends BaseServiceImpl<AgentDao, AgentEntity> imp
 
     private String boundPhone(String agentId) {
         List<DeviceEntity> devices = deviceService.listByAgentId(agentId);
-        if (ToolUtil.isEmpty(devices)) {
+        if (CollUtil.isEmpty(devices)) {
             return null;
         }
         String phone = devices.stream()

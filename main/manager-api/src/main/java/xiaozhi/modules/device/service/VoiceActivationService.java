@@ -25,7 +25,6 @@ import xiaozhi.common.exception.ErrorCode;
 import xiaozhi.common.exception.RenException;
 import xiaozhi.common.redis.RedisKeys;
 import xiaozhi.common.redis.RedisUtils;
-import xiaozhi.common.utils.ToolUtil;
 import xiaozhi.modules.agent.dto.AgentCreateDTO;
 import xiaozhi.modules.agent.entity.AgentEntity;
 import xiaozhi.modules.agent.service.AgentMcpAccessPointService;
@@ -342,7 +341,7 @@ public class VoiceActivationService {
     @SuppressWarnings("unchecked")
     private PortalInvite loadPortalInvite(String mac) {
         Object value = redisUtils.get(RedisKeys.getVoicePortalInviteKey(mac));
-        if (ToolUtil.isEmpty(value) || !(value instanceof Map)) {
+        if (!(value instanceof Map<?, ?> mapValue) || mapValue.isEmpty()) {
             return null;
         }
         Map<String, Object> map = (Map<String, Object>) value;
@@ -541,7 +540,7 @@ public class VoiceActivationService {
     @SuppressWarnings("unchecked")
     private Map<String, Object> activationData(String mac) {
         Object value = redisUtils.get(activationKey(mac));
-        if (ToolUtil.isEmpty(value) || !(value instanceof Map)) {
+        if (!(value instanceof Map<?, ?> map) || map.isEmpty()) {
             return null;
         }
         return (Map<String, Object>) value;
