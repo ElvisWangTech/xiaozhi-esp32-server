@@ -10,6 +10,8 @@ from core.handle.voice_activation import (
     match_persona,
     parse_nickname_reply,
     persona_menu,
+    resolve_persona,
+    supplement_text,
 )
 
 
@@ -74,16 +76,20 @@ def test_extract_nickname_bare_name_skips_llm_and_rejects_noise():
 
 
 def test_extract_owner_title():
-    assert extract_owner_title("老板") == ("老板", False)
-    assert extract_owner_title("叫我老板") == ("老板", True)
-    assert extract_owner_title("你可以叫我张先生") == ("张先生", True)
-    assert extract_owner_title("请称呼我为妈妈") == ("妈妈", True)
-    assert extract_owner_title("我是小王") == ("小王", True)
-    assert extract_owner_title("叫我老板就行") == ("老板", True)
-    assert extract_owner_title("嗯，老板") == ("老板", False)
-    assert extract_owner_title("我该怎么称呼您呢") == (None, False)
-    assert extract_owner_title("确认") == (None, False)
-    assert extract_owner_title("不对，叫我老板") == ("老板", True)
+    bare = _FakeConn('{"title":"不该调用"}')
+    assert asyncio.run(extract_owner_title(bare, "老板")) == "老板"
+    assert asyncio.run(extract_owner_title(bare, "嗯，老板")) == "老板"
+    assert asyncio.run(extract_owner_title(bare, "确认")) is None
+    assert bare.calls == []
+
+    called = _FakeConn('{"title":"张先生"}')
+    assert asyncio.run(extract_owner_title(called, "你可以称呼我为张先生")) == "张先生"
+    assert called.calls and "你可以称呼我为张先生" in called.calls[0][1]
+
+    corrected = _FakeConn('{"title":"妈妈"}')
+    assert asyncio.run(extract_owner_title(corrected, "不对，叫我妈妈")) == "妈妈"
+    assert asyncio.run(extract_owner_title(_FakeConn('{"title":""}'), "我该怎么称呼您呢")) is None
+    assert asyncio.run(extract_owner_title(_FakeConn(RuntimeError("down")), "叫我老板")) is None
 
 
 def test_match_persona_by_name_or_index():
@@ -96,6 +102,28 @@ def test_match_persona_by_name_or_index():
     assert match_persona("确认", TEMPLATES) is None
     assert match_persona("不要英语老师", TEMPLATES) is None
     assert match_persona("十", TEMPLATES) is None
+
+
+def test_resolve_persona_uses_llm_for_description():
+    local = _FakeConn('{"template":"不该调用"}')
+    assert asyncio.run(resolve_persona(local, "英语老师", TEMPLATES)) == "英语老师"
+    assert asyncio.run(resolve_persona(local, "第二个", TEMPLATES)) == "星际游子"
+    assert local.calls == []
+
+    described = _FakeConn('{"template":"湾湾小何"}')
+    assert asyncio.run(resolve_persona(described, "我想要那个台湾女生", TEMPLATES)) == "湾湾小何"
+    assert described.calls
+    assert asyncio.run(resolve_persona(_FakeConn('{"template":"外星人不存在"}'), "随便来一个", TEMPLATES)) is None
+
+
+def test_supplement_decline_uses_llm_for_sentence():
+    assert asyncio.run(supplement_text(_FakeConn('{"decline":false}'), "没有")) == ""
+    direct = _FakeConn('{"decline":true}')
+    assert asyncio.run(supplement_text(direct, "说话温柔一点")) == "说话温柔一点"
+    assert direct.calls == []
+    declined = _FakeConn('{"decline":true}')
+    assert asyncio.run(supplement_text(declined, "没什么要补充的")) == ""
+    assert declined.calls
 
 
 def test_supplement_and_menu():

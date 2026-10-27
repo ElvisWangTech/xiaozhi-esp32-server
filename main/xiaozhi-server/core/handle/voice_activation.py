@@ -162,10 +162,26 @@ _SPEECH_TAILS = (
     "嘛",
     "了",
 )
-_OWNER_CALL_RE = re.compile(r"(?:称呼我|叫我|喊我)(?:为|是|做)?(.+)$")
-_OWNER_SELF_RE = re.compile(r"^我(?:的名字|的称呼)?(?:是|叫)(.+)$")
-_OWNER_PARTICLE_LEADS = ("嗯", "啊", "呃", "那就", "那个", "就是", "好的")
-_OWNER_STOP = {"不知道", "不确定", "随便", "都行", "都可以", "无所谓", "称呼", "您", "你", "我"}
+_OWNER_SYSTEM_PROMPT = (
+    "你在语音引导里，从用户原话中提取助手该怎么称呼用户。"
+    "只输出一个 JSON 对象，不要解释，不要使用 markdown。"
+    '格式：{"title":"老板"}。听不出称呼时输出 {"title":""}。\n'
+    "规则：\n"
+    "1. 用户可能直接说称呼，也可能说整句，例如「叫我老板」「你可以称呼我为张先生」「我是小王」。只保留真实称呼。\n"
+    "2. 称呼 1 到 12 个字，不要带语气词。\n"
+    "3. 只是在确认或否定，例如「对」「确认」「不对」「重说」，title 留空。\n"
+    "4. 否定里如果带了新称呼，例如「不对，叫我妈妈」，取出妈妈。\n"
+    "5. 没给出称呼，例如「我该怎么称呼您」，title 留空。"
+)
+_OWNER_SENTENCE_CUES = ("称呼", "叫", "喊", "是", "的", "你", "您", "我", "不", "怎么", "什么", "如何", "怎样")
+_SUPPLEMENT_SYSTEM_PROMPT = (
+    "用户刚被问还有没有要补充的角色设定。没有的话会说没有。"
+    "判断这句是在拒绝补充，还是在说出补充内容。"
+    '只输出一个 JSON 对象：{"decline":true} 或 {"decline":false}。不要解释。\n'
+    "「没有」「不用了」「没什么要补充的」「先不用」是拒绝，decline 为 true。\n"
+    "「说话温柔一点」「少讲道理」是补充，decline 为 false。"
+)
+_SUPPLEMENT_DECLINE_CUES = ("没", "不用", "不需要", "不补", "算了", "跳过", "先不", "别")
 _NO_SUPPLEMENT = {
     "没有",
     "没有了",
@@ -258,21 +274,37 @@ def is_pure_reject(text):
     return False
 
 
-def _is_bare_nickname(compact):
-    name = _strip_speech_tails(compact).replace("「", "").replace("」", "")
+def _strip_bare_leads(compact):
+    changed = True
+    while changed and compact:
+        changed = False
+        for lead in ("嗯", "啊", "呃", "哎"):
+            if compact.startswith(lead) and len(compact) > len(lead):
+                compact = compact[len(lead) :]
+                changed = True
+                break
+    return compact
+
+
+def _plain_name(compact):
+    return _strip_speech_tails(_strip_bare_leads(compact)).replace("「", "").replace("」", "")
+
+
+def _is_bare_name(compact, cues):
+    name = _plain_name(compact)
     if not _valid_short_name(name):
         return False
-    return not any(cue in compact for cue in _NICKNAME_SENTENCE_CUES)
+    return not any(cue in compact for cue in cues)
 
 
-def _log_nickname(conn, level, message):
+def _log_guide(conn, level, message):
     logger = getattr(conn, "logger", None)
     if logger is None:
         return
     getattr(logger.bind(tag=TAG), level)(message)
 
 
-def parse_nickname_reply(text):
+def parse_json_object(text):
     raw = (text or "").strip()
     if raw.startswith("```"):
         raw = re.sub(r"^```(?:json)?", "", raw).strip()
@@ -289,13 +321,32 @@ def parse_nickname_reply(text):
             return None
     if not isinstance(data, dict):
         return None
-    name = _strip_speech_tails(compact_text(data.get("nickname") or ""))
-    name = name.replace("「", "").replace("」", "")
+    return data
+
+
+def parse_nickname_reply(text):
+    data = parse_json_object(text)
+    if not data:
+        return None
+    name = _plain_name(compact_text(data.get("nickname") or ""))
     if not _valid_short_name(name):
         return None
     if any(token in name for token in ("昵称", "名字", "叫你", "叫做", "就叫", "你的", "您的")):
         return None
     return name
+
+
+async def _ask_llm_json(conn, system_prompt, user_text, label):
+    llm = getattr(conn, "llm", None)
+    if llm is None or not hasattr(llm, "response_no_stream"):
+        _log_guide(conn, "warning", f"{label}时没有可用的对话模型")
+        return None
+    try:
+        reply = await asyncio.to_thread(llm.response_no_stream, system_prompt, user_text)
+    except Exception as exc:
+        _log_guide(conn, "warning", f"{label}失败: {exc}")
+        return None
+    return parse_json_object(reply)
 
 
 def same_name_agreement(text, current):
@@ -315,62 +366,38 @@ async def extract_nickname(conn, text):
     compact = compact_text(raw)
     if not compact or is_confirm(compact) or is_pure_reject(compact):
         return None
-    if _is_bare_nickname(compact):
-        return _strip_speech_tails(compact).replace("「", "").replace("」", "")
-    llm = getattr(conn, "llm", None)
-    if llm is None or not hasattr(llm, "response_no_stream"):
-        _log_nickname(conn, "warning", "提取昵称时没有可用的对话模型")
-        return None
-    try:
-        reply = await asyncio.to_thread(
-            llm.response_no_stream,
-            _NICKNAME_SYSTEM_PROMPT,
-            raw,
-        )
-    except Exception as exc:
-        _log_nickname(conn, "warning", f"提取昵称失败: {exc}")
-        return None
-    nickname = parse_nickname_reply(reply)
-    _log_nickname(conn, "info", f"昵称识别: {raw} -> {nickname or ''}")
+    if _is_bare_name(compact, _NICKNAME_SENTENCE_CUES):
+        return _plain_name(compact)
+    data = await _ask_llm_json(conn, _NICKNAME_SYSTEM_PROMPT, raw, "提取昵称")
+    nickname = parse_nickname_reply(json.dumps(data, ensure_ascii=False) if data else "")
+    _log_guide(conn, "info", f"昵称识别: {raw} -> {nickname or ''}")
     return nickname
 
 
-def _strip_owner_particles(compact):
-    changed = True
-    while changed and compact:
-        changed = False
-        for lead in sorted(_OWNER_PARTICLE_LEADS, key=len, reverse=True):
-            if compact.startswith(lead) and len(compact) > len(lead):
-                compact = compact[len(lead) :]
-                changed = True
-                break
-    return compact
+def parse_owner_reply(text):
+    data = parse_json_object(text)
+    if not data:
+        return None
+    title = _plain_name(compact_text(data.get("title") or ""))
+    if not _valid_short_name(title):
+        return None
+    if any(token in title for token in ("称呼", "叫我", "喊我", "你的", "您的", "怎么", "什么")):
+        return None
+    return title
 
 
-def extract_owner_title(text):
-    """从「叫我老板」或直接说的称呼里抽出主人称呼。"""
-    compact = compact_text(unwrap_user_text(text))
-    if not compact or is_confirm(compact):
-        return None, False
-    if any(word in compact for word in ("怎么", "什么", "怎样", "如何")):
-        return None, False
-    compact = _strip_owner_particles(compact)
-    call = _OWNER_CALL_RE.search(compact)
-    self_match = _OWNER_SELF_RE.match(compact)
-    if is_reject(compact) and not call and not self_match:
-        return None, False
-    framed = False
-    body = compact
-    if call:
-        body = call.group(1)
-        framed = True
-    elif self_match:
-        body = self_match.group(1)
-        framed = True
-    body = _strip_speech_tails(body).replace("「", "").replace("」", "")
-    if body in _OWNER_STOP or not _valid_short_name(body):
-        return None, framed
-    return body, framed
+async def extract_owner_title(conn, text):
+    """用当前对话模型从原话里抽出主人称呼。单独一个短称呼不调用模型。"""
+    raw = unwrap_user_text(text).strip()
+    compact = compact_text(raw)
+    if not compact or is_confirm(compact) or is_pure_reject(compact):
+        return None
+    if _is_bare_name(compact, _OWNER_SENTENCE_CUES):
+        return _plain_name(compact)
+    data = await _ask_llm_json(conn, _OWNER_SYSTEM_PROMPT, raw, "提取称呼")
+    title = parse_owner_reply(json.dumps(data, ensure_ascii=False) if data else "")
+    _log_guide(conn, "info", f"称呼识别: {raw} -> {title or ''}")
+    return title
 
 
 def is_no_supplement(text):
@@ -407,6 +434,69 @@ def match_persona(text, names):
     if index is None or index < 1 or index > len(names):
         return None
     return names[index - 1]
+
+
+def _persona_system_prompt(names):
+    listed = "、".join(names)
+    return (
+        "你在语音引导里，根据用户原话从给定性格模板中选一个。"
+        f"可选模板只有这些：{listed}。"
+        "只输出一个 JSON 对象，不要解释，不要使用 markdown。"
+        '{"template":"英语老师"}。没选中时输出 {"template":""}。\n'
+        "规则：\n"
+        "1. template 必须是列表中的原文，不能自造。\n"
+        "2. 用户说序号、名字或描述，都要对应到列表中的一个。\n"
+        "3. 只是确认，或只是否定而没有改选，template 留空。\n"
+        "4. 否定里改选了另一个，例如「不要英语老师，我要汪汪队长」，选出汪汪队长。\n"
+        "5. 听不清或对不上任何一个，template 留空。"
+    )
+
+
+def parse_persona_reply(text, names):
+    data = parse_json_object(text)
+    if not data:
+        return None
+    chosen = str(data.get("template") or "").strip()
+    for name in names:
+        if chosen == name or compact_text(chosen) == compact_text(name):
+            return name
+    return None
+
+
+async def resolve_persona(conn, text, names):
+    """模板名或序号直接匹配。其余说法交给模型，从给定模板里选。"""
+    if not names or is_confirm(compact_text(unwrap_user_text(text))) or is_pure_reject(text):
+        return None
+    matched = match_persona(text, names)
+    if matched:
+        return matched
+    raw = unwrap_user_text(text).strip()
+    if not compact_text(raw):
+        return None
+    data = await _ask_llm_json(conn, _persona_system_prompt(names), raw, "选择性格")
+    chosen = parse_persona_reply(json.dumps(data, ensure_ascii=False) if data else "", names)
+    _log_guide(conn, "info", f"性格识别: {raw} -> {chosen or ''}")
+    return chosen
+
+
+async def supplement_text(conn, text):
+    """拒绝补充时返回空字符串。听不清时返回 None。其余保留用户原话。"""
+    if is_confirm(compact_text(unwrap_user_text(text))):
+        return None
+    if is_no_supplement(text) or is_pure_reject(text):
+        return ""
+    raw = unwrap_user_text(text).strip()
+    compact = compact_text(raw)
+    if any(cue in compact for cue in _SUPPLEMENT_DECLINE_CUES):
+        data = await _ask_llm_json(conn, _SUPPLEMENT_SYSTEM_PROMPT, raw, "判断补充")
+        if not data or "decline" not in data:
+            return None
+        if data.get("decline") is True or str(data.get("decline")).lower() == "true":
+            return ""
+    cleaned = clean_supplement(text)
+    if not cleaned or len(cleaned) > _SUPPLEMENT_LIMIT:
+        return cleaned or None
+    return cleaned
 
 
 def persona_menu(names):
@@ -803,7 +893,7 @@ class VoiceActivationSession:
         await self._say(f"好的，我是{name}。我该怎么称呼您呢？")
 
     async def _on_owner(self, text):
-        title, _framed = extract_owner_title(text)
+        title = await extract_owner_title(self.conn, text)
         if not title:
             await self._say("没有听清。您希望我怎么称呼您？")
             return
@@ -812,27 +902,28 @@ class VoiceActivationSession:
         await self._say(f"我称呼您为{title}，对吗？")
 
     async def _on_confirm_owner(self, text):
-        corrected, framed = extract_owner_title(text)
-        if framed and corrected and corrected != self.owner_title:
+        if same_name_agreement(text, self.owner_title) or is_confirm(text):
+            await self._begin_persona()
+            return
+        if is_pure_reject(text):
+            self.owner_title = None
+            self.state = self.ASK_OWNER
+            await self._say("好的，我该怎么称呼您呢？")
+            return
+        corrected = await extract_owner_title(self.conn, text)
+        if corrected and corrected != self.owner_title:
             self.owner_title = corrected
             await self._say(f"我称呼您为{self.owner_title}，对吗？")
             return
-        if same_name_agreement(text, self.owner_title):
-            corrected, framed = self.owner_title, True
+        if corrected == self.owner_title:
+            await self._begin_persona()
+            return
         if is_reject(text):
             self.owner_title = None
             self.state = self.ASK_OWNER
             await self._say("好的，我该怎么称呼您呢？")
             return
-        if corrected and not framed and not is_confirm(text) and corrected != self.owner_title:
-            self.owner_title = corrected
-            await self._say(f"我称呼您为{self.owner_title}，对吗？")
-            return
-        agreed = is_confirm(text) or (framed and corrected == self.owner_title)
-        if not agreed:
-            await self._say("请说确认，或者说重说。")
-            return
-        await self._begin_persona()
+        await self._say("请说确认，或者说重说。")
 
     async def _begin_persona(self):
         self.persona_name = None
@@ -873,8 +964,8 @@ class VoiceActivationSession:
                 return
             loaded_now = True
         matched = None
-        if not is_confirm(text) and not is_reject(text):
-            matched = match_persona(text, self.persona_templates)
+        if not is_confirm(text):
+            matched = await resolve_persona(self.conn, text, self.persona_templates)
         if matched:
             self.persona_name = matched
             self.state = self.CONFIRM_PERSONA
@@ -886,31 +977,37 @@ class VoiceActivationSession:
         await self._say("没有听清。请说序号，或者说模板名字。")
 
     async def _on_confirm_persona(self, text):
-        if is_reject(text):
-            self.persona_name = None
-            self.state = self.ASK_PERSONA
-            await self._say("好的。" + self._persona_menu())
+        if is_confirm(text):
+            await self._ask_supplement()
             return
-        switched = match_persona(text, self.persona_templates)
-        if switched and switched != self.persona_name and not is_confirm(text):
+        if is_pure_reject(text):
+            await self._reask_persona()
+            return
+        switched = await resolve_persona(self.conn, text, self.persona_templates)
+        if switched and switched != self.persona_name:
             self.persona_name = switched
             await self._say(f"性格用{switched}，对吗？")
             return
-        if not is_confirm(text):
-            await self._say("请说确认，或者说重说。")
+        if switched == self.persona_name:
+            await self._ask_supplement()
             return
+        if is_reject(text):
+            await self._reask_persona()
+            return
+        await self._say("请说确认，或者说重说。")
+
+    async def _reask_persona(self):
+        self.persona_name = None
+        self.state = self.ASK_PERSONA
+        await self._say("好的。" + self._persona_menu())
+
+    async def _ask_supplement(self):
         self.state = self.ASK_SUPPLEMENT
         await self._say("还有要补充的吗？直接说就行。没有的话请说没有。")
 
     async def _on_supplement(self, text):
-        if is_no_supplement(text):
-            await self._save_role("")
-            return
-        if is_confirm(text):
-            await self._say("请直接说补充内容，或者说没有。")
-            return
-        supplement = clean_supplement(text)
-        if not supplement:
+        supplement = await supplement_text(self.conn, text)
+        if supplement is None:
             await self._say("没有听清。请补充，或者说没有。")
             return
         if len(supplement) > _SUPPLEMENT_LIMIT:
