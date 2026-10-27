@@ -58,6 +58,8 @@ public class VoiceActivationService {
     public static final String ONBOARDING_NICKNAME = "nickname";
     public static final String ONBOARDING_ROLE = "role";
     public static final String ONBOARDING_SKILLS = "skills";
+    /** 用户已经跳过一次。唤醒后仍会自动绑定，失败不再播报。 */
+    public static final String ONBOARDING_SKILLS_QUIET = "skills_quiet";
     public static final String ONBOARDING_DONE = "done";
     public static final String ACTIVATION_VOICE = "voice";
     private static final String DEFAULT_AGENT_NAME = "小智";
@@ -342,6 +344,22 @@ public class VoiceActivationService {
     }
 
     @Transactional(rollbackFor = Exception.class)
+    public void deferSkills(String macAddress) {
+        String mac = requireMac(macAddress);
+        DeviceEntity device = deviceService.getDeviceByMacAddress(mac);
+        if (device == null) {
+            throw new RenException(ErrorCode.DEVICE_NOT_EXIST);
+        }
+        if (!isSkillsOnboarding(device.getOnboardingStatus())) {
+            throw new RenException("当前不需要绑定技能");
+        }
+        if (!ONBOARDING_SKILLS_QUIET.equals(device.getOnboardingStatus())) {
+            device.setOnboardingStatus(ONBOARDING_SKILLS_QUIET);
+            deviceService.updateById(device);
+        }
+    }
+
+    @Transactional(rollbackFor = Exception.class)
     public void completeSkills(String macAddress) {
         String mac = requireMac(macAddress);
         DeviceEntity device = requireSkillsDevice(mac);
@@ -404,12 +422,16 @@ public class VoiceActivationService {
         return trimmed;
     }
 
+    private static boolean isSkillsOnboarding(String status) {
+        return ONBOARDING_SKILLS.equals(status) || ONBOARDING_SKILLS_QUIET.equals(status);
+    }
+
     private DeviceEntity requireSkillsDevice(String mac) {
         DeviceEntity device = deviceService.getDeviceByMacAddress(mac);
         if (device == null) {
             throw new RenException(ErrorCode.DEVICE_NOT_EXIST);
         }
-        if (!ONBOARDING_SKILLS.equals(device.getOnboardingStatus())) {
+        if (!isSkillsOnboarding(device.getOnboardingStatus())) {
             throw new RenException("当前不需要绑定技能");
         }
         if (StringUtils.isBlank(device.getPhone())) {

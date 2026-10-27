@@ -177,6 +177,8 @@ public class ConfigServiceImpl implements ConfigService {
             result.put("voice_onboarding", "role");
         } else if ("skills".equals(device.getOnboardingStatus())) {
             result.put("voice_onboarding", "skills");
+        } else if ("skills_quiet".equals(device.getOnboardingStatus())) {
+            result.put("voice_onboarding", "skills_quiet");
         }
 
         // 获取聊天记录配置

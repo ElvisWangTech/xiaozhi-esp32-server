@@ -1080,6 +1080,19 @@ class VoiceActivationSession:
         await self._say("好的。正在绑定技能。")
         await self._bind_skills()
 
+    def _skills_quiet(self):
+        """用户已经跳过一次。这次是唤醒后的自动重试，失败不再出声。"""
+        return getattr(self.conn, "voice_onboarding", None) == "skills_quiet"
+
+    async def _release_quiet_skills(self):
+        """静默重试失败：留在聊天里，下次唤醒再试。"""
+        self.conn.skills_pending = True
+        self.conn.voice_onboarding = None
+        self.conn.voice_activation_handler = None
+        task = self._idle_task
+        if task is not None and not task.done():
+            task.cancel()
+
     async def _bind_skills(self):
         try:
             await self._post(
@@ -1088,6 +1101,9 @@ class VoiceActivationSession:
             )
         except Exception as exc:
             self.conn.logger.bind(tag=TAG).warning(f"技能绑定失败: {exc}")
+            if self._skills_quiet():
+                await self._release_quiet_skills()
+                return
             self.state = self.RETRY_SKILLS
             self.conn.skills_pending = True
             self.conn.voice_onboarding = "skills"
@@ -1293,11 +1309,20 @@ class VoiceActivationSession:
         await self._say(summary + "是否重启设备？")
 
     async def _on_retry_skills(self, text):
+        if self._skills_quiet():
+            return
         if is_skip_skills(text):
             self.conn.voice_activation_handler = None
-            # 数据库仍是 skills，日常对话里可以说「绑定技能」再进来
+            # 记下已经跳过。数据库改为静默重试，下次唤醒仍会自动绑定。
             self.conn.voice_onboarding = None
             self.conn.skills_pending = True
+            try:
+                await self._post(
+                    "/device/voice-activation/skills/defer",
+                    {"macAddress": self._mac()},
+                )
+            except Exception as exc:
+                self.conn.logger.bind(tag=TAG).warning(f"记录跳过技能绑定失败: {exc}")
             await self._say("好的。之后想绑定技能，可以说绑定技能。现在可以开始聊天了。")
             return
         compact = compact_text(text)
@@ -1448,6 +1473,8 @@ class VoiceActivationSession:
         elif self.state == self.ASK_SUPPLEMENT:
             await self._say("还有要补充的吗？直接说就行。没有的话请说没有。")
         elif self.state == self.RETRY_SKILLS:
+            if self._skills_quiet():
+                return
             await self._say("技能绑定还未完成，请说确认重试，或者说稍后再说。")
         elif self.state == self.ASK_AUTH_CODE:
             label = self.auth_label or "技能"

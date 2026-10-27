@@ -111,6 +111,13 @@ public class VoiceActivationController {
                 .ok(voiceActivationService.cancelSkillAuth(dto.getMacAddress(), dto.getTaskId()));
     }
 
+    @PostMapping("/skills/defer")
+    @Operation(summary = "用户跳过技能绑定，之后静默重试")
+    public Result<Void> skillsDefer(@Valid @RequestBody VoiceActivationMacDTO dto) {
+        voiceActivationService.deferSkills(dto.getMacAddress());
+        return new Result<>();
+    }
+
     @PostMapping("/skills/complete")
     @Operation(summary = "完成技能引导")
     public Result<Void> skillsComplete(@Valid @RequestBody VoiceActivationMacDTO dto) {

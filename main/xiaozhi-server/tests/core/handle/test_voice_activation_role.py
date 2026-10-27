@@ -322,3 +322,54 @@ def test_long_silence_stops_asr_then_prompts_sleep():
     assert order[0] == "stop"
     assert "休息" in order[1]
     assert session.conn.close_after_chat is True
+
+
+def test_first_skill_skip_is_spoken_later_failure_is_silent():
+    said = []
+    posts = []
+
+    class _Conn:
+        def __init__(self):
+            self.logger = _FakeLogger()
+            self.headers = {"device-id": "aa:bb"}
+            self.voice_onboarding = "skills"
+            self.voice_activation_handler = None
+            self.skills_pending = False
+
+    conn = _Conn()
+    session = VoiceActivationSession(conn, stage="skills")
+    conn.voice_activation_handler = session
+
+    async def _post(path, payload):
+        posts.append(path)
+        if path.endswith("/skills"):
+            raise RuntimeError("API返回错误: 技能服务暂不可用")
+
+    async def _say(text):
+        said.append(text)
+
+    session._post = _post
+    session._say = _say
+
+    async def _first():
+        await session._bind_skills()
+        await session._on_retry_skills("稍后再说")
+
+    asyncio.run(_first())
+    assert any("稍后再说" in text for text in said)
+    assert "/device/voice-activation/skills/defer" in posts
+    assert any("绑定技能" in text for text in said)
+
+    said.clear()
+    conn.voice_onboarding = "skills_quiet"
+    conn.voice_activation_handler = session
+    conn.skills_pending = False
+
+    async def _later():
+        await session._bind_skills()
+
+    asyncio.run(_later())
+    assert said == []
+    assert conn.voice_activation_handler is None
+    assert conn.skills_pending is True
+    assert conn.voice_onboarding is None

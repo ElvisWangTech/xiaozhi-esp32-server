@@ -685,7 +685,7 @@ class ConnectionHandler:
                 asyncio.run_coroutine_threadsafe(
                     self._start_role_onboarding(), self.loop
                 )
-            elif self.voice_onboarding == "skills" and self.voice_activation_handler is None:
+            elif self.voice_onboarding in ("skills", "skills_quiet") and self.voice_activation_handler is None:
                 asyncio.run_coroutine_threadsafe(
                     self._start_skills_onboarding(), self.loop
                 )
