@@ -14,6 +14,28 @@ if TYPE_CHECKING:
 
 TAG = __name__
 logger = setup_logging()
+# 60ms 一帧。没开口时留约 1.8 秒，避免字头被裁掉；开口后最多留约 6 秒。
+_IDLE_PREROLL_FRAMES = 30
+_SPEECH_BUFFER_FRAMES = 100
+
+
+def stash_unsent(buffer, frame, speaking, idle_limit=_IDLE_PREROLL_FRAMES, speech_limit=_SPEECH_BUFFER_FRAMES):
+    """连接还没就绪时先把音频留下。静音只留一小段，说话时把这一句都留下。"""
+    buffer.append(frame)
+    limit = speech_limit if speaking else idle_limit
+    if len(buffer) > limit:
+        del buffer[:-limit]
+    return buffer
+
+
+def merge_replay(recent, unsent, limit=_SPEECH_BUFFER_FRAMES):
+    """连接中途断开时，把已经发出去但还没识别完的音频和新到的音频接在一起。"""
+    if not recent:
+        return list(unsent)
+    merged = list(recent) + list(unsent)
+    if len(merged) > limit:
+        return merged[-limit:]
+    return merged
 
 
 class ASRProvider(ASRProviderBase):
@@ -34,6 +56,10 @@ class ASRProvider(ASRProviderBase):
         self._last_audio_at = 0.0
         self._keepalive_task = None
         self._silence_keepalive_logged = False
+        # 还没送到当前连接上的 PCM。换连接时整段补发，不依赖只剩 10 帧的 asr_audio。
+        self._unsent = []
+        self._recent = []
+        self._hold_replay = False
 
         # 配置参数
         self.appid = str(config.get("appid"))
@@ -138,12 +164,8 @@ class ASRProvider(ASRProviderBase):
                 )
                 self.forward_task = asyncio.create_task(self._forward_asr_results(conn, opened))
 
-                if flush_cache and conn.asr_audio:
-                    for cached_pcm in conn.asr_audio[-10:]:
-                        try:
-                            await self._send_pcm(opened, cached_pcm)
-                        except Exception as e:
-                            logger.bind(tag=TAG).info(f"发送缓存音频数据时发生错误: {e}")
+                if flush_cache:
+                    await self._flush_unsent(opened)
                 return True
             except Exception as e:
                 logger.bind(tag=TAG).error(f"建立ASR连接失败: {str(e)}")
@@ -161,13 +183,50 @@ class ASRProvider(ASRProviderBase):
                     self.is_processing = False
                 return False
 
-    async def _send_pcm(self, ws, pcm_frame):
+    def _stash(self, conn, pcm_frame, audio_have_voice):
+        speaking = bool(
+            audio_have_voice
+            or getattr(conn, "client_have_voice", False)
+            or self._awaiting_listen
+            or self._hold_replay
+        )
+        stash_unsent(self._unsent, pcm_frame, speaking)
+
+    def _preserve_recent_for_replay(self):
+        """这次连接没正常收完，下一轮连上后把开头补回去。"""
+        if not self._recent:
+            return
+        self._unsent = merge_replay(self._recent, self._unsent)
+        self._recent = []
+        self._hold_replay = True
+
+    async def _flush_unsent(self, ws):
+        frames = self._unsent
+        if not frames:
+            return
+        self._unsent = []
+        self._hold_replay = False
+        logger.bind(tag=TAG).info(f"ASR已连接，补发缓冲音频 {len(frames)} 帧")
+        for index, pcm in enumerate(frames):
+            try:
+                await self._send_pcm(ws, pcm)
+            except Exception as exc:
+                self._unsent = frames[index:]
+                self._hold_replay = True
+                logger.bind(tag=TAG).info(f"补发缓冲音频失败: {exc}")
+                raise
+
+    async def _send_pcm(self, ws, pcm_frame, remember=True):
         payload = gzip.compress(pcm_frame)
         audio_request = bytearray(self.generate_audio_default_header())
         audio_request.extend(len(payload).to_bytes(4, "big"))
         audio_request.extend(payload)
         await ws.send(audio_request)
         self._last_audio_at = time.monotonic()
+        if remember:
+            self._recent.append(pcm_frame)
+            if len(self._recent) > _SPEECH_BUFFER_FRAMES:
+                del self._recent[:-_SPEECH_BUFFER_FRAMES]
 
     def _cancel_keepalive(self, ws=None):
         task = self._keepalive_task
@@ -190,7 +249,7 @@ class ASRProvider(ASRProviderBase):
                 if time.monotonic() - self._last_audio_at < 6:
                     continue
                 try:
-                    await self._send_pcm(ws, frame)
+                    await self._send_pcm(ws, frame, remember=False)
                 except Exception as exc:
                     logger.bind(tag=TAG).info(f"发送静音保活失败: {exc}")
                     return
@@ -206,16 +265,19 @@ class ASRProvider(ASRProviderBase):
 
         if self._session_alive():
             self._awaiting_listen = False
-        elif audio_have_voice or self._awaiting_listen:
-            if await self._open_session(conn, flush_cache=True):
-                self._awaiting_listen = False
-
-        # 发送当前音频数据
-        if self._session_alive():
             try:
                 await self._send_pcm(self.asr_ws, pcm_frame)
             except Exception as e:
                 logger.bind(tag=TAG).info(f"发送音频数据时发生错误: {e}")
+                self._stash(conn, pcm_frame, audio_have_voice)
+                self._hold_replay = True
+            return
+
+        # 连接还没好，先攒着。连上后按顺序补发，不只补最后 10 帧。
+        self._stash(conn, pcm_frame, audio_have_voice)
+        if audio_have_voice or self._awaiting_listen:
+            if await self._open_session(conn, flush_cache=True):
+                self._awaiting_listen = False
 
     async def _forward_asr_results(self, conn: "ConnectionHandler", ws):
         try:
@@ -326,6 +388,7 @@ class ASRProvider(ASRProviderBase):
             if self.asr_ws is not None and self.asr_ws is not ws:
                 return
             self._cancel_keepalive(ws)
+            self._preserve_recent_for_replay()
             if self.asr_ws is ws:
                 try:
                     await ws.close()
@@ -339,6 +402,10 @@ class ASRProvider(ASRProviderBase):
 
     def stop_ws_connection(self):
         self._cancel_keepalive()
+        # 这句已经识别完，不要在下一次连接里再播一遍。
+        self._recent = []
+        self._unsent = []
+        self._hold_replay = False
         if self.asr_ws:
             asyncio.create_task(self.asr_ws.close())
             self.asr_ws = None

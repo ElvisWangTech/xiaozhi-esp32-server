@@ -110,6 +110,23 @@ def test_persona_catalog_keeps_voice_codes():
     assert empty == {}
 
 
+def test_asr_keeps_speech_until_reconnect():
+    from core.providers.asr.doubao_stream import merge_replay, stash_unsent
+
+    buffer = []
+    for index in range(40):
+        stash_unsent(buffer, index, speaking=False)
+    assert buffer == list(range(10, 40))
+    for index in range(40, 45):
+        stash_unsent(buffer, index, speaking=True)
+    assert buffer[0] == 10
+    assert buffer[-1] == 44
+
+    replay = merge_replay([1, 2, 3], [4])
+    assert replay == [1, 2, 3, 4]
+    assert merge_replay([], [9]) == [9]
+
+
 def test_apply_persona_voice_updates_tts():
     class _TTS:
         voice = "old"
