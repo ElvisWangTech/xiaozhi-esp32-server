@@ -84,7 +84,7 @@ public class ConfigServiceImpl implements ConfigService {
             throw new RenException(ErrorCode.AGENT_TEMPLATE_NOT_FOUND);
         }
 
-        // 未绑定设备没有智能体。语音激活播报固定用 MiMo，音色用模型自己的配置。
+        // 未绑定设备没有智能体。语音激活固定用豆包语音识别2.0、deepseek-chat、豆包语音合成2.0，音色用模型自己的配置。
         // 构建模块配置
         buildModuleConfig(
                 null,
@@ -98,11 +98,11 @@ public class ConfigServiceImpl implements ConfigService {
                 null,
                 null,
                 agent.getVadModelId(),
-                agent.getAsrModelId(),
+                "ASR_DoubaoStreamASRV2",
+                "LLM_DeepSeekLLM",
                 null,
                 null,
-                null,
-                "TTS_MimoTTS",
+                "TTS_HSDSTTS_V2",
                 null,
                 null,
                 null,
