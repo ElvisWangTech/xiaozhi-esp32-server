@@ -76,13 +76,13 @@
 
 请求：`{ "macAddress": "..." }`
 
-仅当 `onboarding_status=role` 时，按排序返回性格模板名称，例如 `["湾湾小何", "星际游子"]`。
+仅当 `onboarding_status=role` 时，按排序返回仍在使用的性格模板。每项包含名称和豆包音色编码，例如 `[{"name":"湾湾小何","voice":"zh_female_xiaohe_uranus_bigtts"},{"name":"星际游子","voice":"zh_male_m191_uranus_bigtts"}]`。`sort < 0` 的模板不返回。
 
 `POST /device/voice-activation/role`
 
 请求：`{ "macAddress": "...", "ownerTitle": "老板", "templateName": "英语老师", "supplement": "说话温柔一点" }`
 
-`supplement` 可空。仅当状态为 `role` 时，把模板的 `systemPrompt` 抄到智能体，并追加主人称呼和补充，然后把状态改为 `skills`。`{{assistant_name}}` 仍留给配置下发时替换成昵称。
+`supplement` 可空。仅当状态为 `role` 时，把模板的 `systemPrompt`、TTS 模型和音色抄到智能体，并追加主人称呼和补充，然后把状态改为 `skills`。`{{assistant_name}}` 仍留给配置下发时替换成昵称。
 
 `POST /device/voice-activation/skills`
 

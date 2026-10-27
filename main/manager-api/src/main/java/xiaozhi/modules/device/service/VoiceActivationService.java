@@ -41,6 +41,9 @@ import xiaozhi.modules.device.entity.DeviceEntity;
 import xiaozhi.modules.device.vo.VoiceActivationBindVO;
 import xiaozhi.modules.device.vo.VoiceActivationSessionVO;
 import xiaozhi.modules.device.vo.VoiceActivationSkillAuthVO;
+import xiaozhi.modules.device.vo.VoiceActivationTemplateVO;
+import xiaozhi.modules.timbre.service.TimbreService;
+import xiaozhi.modules.timbre.vo.TimbreDetailsVO;
 import xiaozhi.modules.sms.service.DypnsSmsCodeService;
 import xiaozhi.modules.sys.dao.SysUserDao;
 import xiaozhi.modules.sys.entity.SysUserEntity;
@@ -66,6 +69,7 @@ public class VoiceActivationService {
     private final DeviceService deviceService;
     private final AgentService agentService;
     private final AgentTemplateService agentTemplateService;
+    private final TimbreService timbreService;
     private final AgentMcpAccessPointService agentMcpAccessPointService;
     private final DypnsSmsCodeService smsCodeService;
     private final SysUserDao sysUserDao;
@@ -157,25 +161,48 @@ public class VoiceActivationService {
         deviceService.updateById(device);
     }
 
-    public List<String> listRoleTemplates(String macAddress) {
+    public List<VoiceActivationTemplateVO> listRoleTemplates(String macAddress) {
         requireRoleDevice(requireMac(macAddress));
         QueryWrapper<AgentTemplateEntity> wrapper = new QueryWrapper<>();
+        wrapper.ge("sort", 0);
         wrapper.orderByAsc("sort");
         List<AgentTemplateEntity> templates = agentTemplateService.list(wrapper);
-        List<String> names = new ArrayList<>();
+        List<VoiceActivationTemplateVO> items = new ArrayList<>();
         if (templates == null) {
-            return names;
+            return items;
         }
         for (AgentTemplateEntity template : templates) {
             if (template == null || StringUtils.isBlank(template.getAgentName())) {
                 continue;
             }
             String name = template.getAgentName().trim();
-            if (!names.contains(name)) {
-                names.add(name);
+            boolean duplicated = false;
+            for (VoiceActivationTemplateVO existing : items) {
+                if (name.equals(existing.getName())) {
+                    duplicated = true;
+                    break;
+                }
             }
+            if (duplicated) {
+                continue;
+            }
+            VoiceActivationTemplateVO item = new VoiceActivationTemplateVO();
+            item.setName(name);
+            item.setVoice(templateVoiceCode(template.getTtsVoiceId()));
+            items.add(item);
         }
-        return names;
+        return items;
+    }
+
+    private String templateVoiceCode(String ttsVoiceId) {
+        if (StringUtils.isBlank(ttsVoiceId)) {
+            return null;
+        }
+        TimbreDetailsVO timbre = timbreService.get(ttsVoiceId);
+        if (timbre == null || StringUtils.isBlank(timbre.getTtsVoice())) {
+            return null;
+        }
+        return timbre.getTtsVoice().trim();
     }
 
     @Transactional(rollbackFor = Exception.class)
@@ -188,12 +215,20 @@ public class VoiceActivationService {
         AgentEntity agent = requireAgent(device);
         QueryWrapper<AgentTemplateEntity> wrapper = new QueryWrapper<>();
         wrapper.eq("agent_name", templateName);
+        wrapper.ge("sort", 0);
         wrapper.orderByAsc("sort");
         List<AgentTemplateEntity> found = agentTemplateService.list(wrapper);
         if (found == null || found.isEmpty() || StringUtils.isBlank(found.get(0).getSystemPrompt())) {
             throw new RenException("没有这个性格模板");
         }
-        agent.setSystemPrompt(composeRolePrompt(found.get(0).getSystemPrompt(), ownerTitle, supplement));
+        AgentTemplateEntity template = found.get(0);
+        agent.setSystemPrompt(composeRolePrompt(template.getSystemPrompt(), ownerTitle, supplement));
+        if (StringUtils.isNotBlank(template.getTtsModelId())) {
+            agent.setTtsModelId(template.getTtsModelId());
+        }
+        if (StringUtils.isNotBlank(template.getTtsVoiceId())) {
+            agent.setTtsVoiceId(template.getTtsVoiceId());
+        }
         agentService.updateById(agent);
         device.setOnboardingStatus(ONBOARDING_SKILLS);
         deviceService.updateById(device);

@@ -4,12 +4,14 @@ import asyncio
 
 from core.handle.voice_activation import (
     VoiceActivationSession,
+    apply_persona_voice,
     clean_supplement,
     extract_nickname,
     extract_owner_title,
     is_no_supplement,
     match_persona,
     parse_nickname_reply,
+    parse_persona_catalog,
     persona_menu,
     resolve_persona,
     supplement_text,
@@ -93,6 +95,31 @@ def test_extract_owner_title():
     assert asyncio.run(extract_owner_title(_FakeConn(RuntimeError("down")), "叫我老板")) is None
 
 
+def test_persona_catalog_keeps_voice_codes():
+    names, voices = parse_persona_catalog(
+        [
+            {"name": "湾湾小何", "voice": "zh_female_xiaohe_uranus_bigtts"},
+            {"name": "星际游子", "voice": "zh_male_m191_uranus_bigtts"},
+            {"name": "英语老师", "voice": "zh_female_vv_uranus_bigtts"},
+        ]
+    )
+    assert names == ["湾湾小何", "星际游子", "英语老师"]
+    assert voices["英语老师"] == "zh_female_vv_uranus_bigtts"
+    plain, empty = parse_persona_catalog(["湾湾小何"])
+    assert plain == ["湾湾小何"]
+    assert empty == {}
+
+
+def test_apply_persona_voice_updates_tts():
+    class _TTS:
+        voice = "old"
+
+    tts = _TTS()
+    assert apply_persona_voice(tts, "zh_male_m191_uranus_bigtts") is True
+    assert tts.voice == "zh_male_m191_uranus_bigtts"
+    assert apply_persona_voice(tts, "") is False
+
+
 def test_match_persona_by_name_or_index():
     assert match_persona("英语老师", TEMPLATES) == "英语老师"
     assert match_persona("我选汪汪队长", TEMPLATES) == "汪汪队长"
@@ -134,7 +161,7 @@ def test_supplement_and_menu():
     assert not is_no_supplement("说话温柔一点")
     assert clean_supplement("  说话温柔一点。 ") == "说话温柔一点"
     menu = persona_menu(TEMPLATES)
-    assert menu.startswith("接下来选一个性格。一，湾湾小何。")
+    assert menu.startswith("接下来选一个性格。一，湾湾小何。二，星际游子。")
     assert "五，汪汪队长" in menu
 
 

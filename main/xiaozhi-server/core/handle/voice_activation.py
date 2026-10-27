@@ -447,7 +447,7 @@ def _persona_system_prompt(names):
         "1. template 必须是列表中的原文，不能自造。\n"
         "2. 用户说序号、名字或描述，都要对应到列表中的一个。\n"
         "3. 只是确认，或只是否定而没有改选，template 留空。\n"
-        "4. 否定里改选了另一个，例如「不要英语老师，我要汪汪队长」，选出汪汪队长。\n"
+        "4. 否定里改选了另一个，例如「不要英语老师，我要星际游子」，选出星际游子。\n"
         "5. 听不清或对不上任何一个，template 留空。"
     )
 
@@ -499,8 +499,43 @@ async def supplement_text(conn, text):
     return cleaned
 
 
+def parse_persona_catalog(payload):
+    """模板接口返回名称列表，或带音色编码的对象列表。"""
+    names = []
+    voices = {}
+    for item in payload or []:
+        if isinstance(item, str) and item.strip():
+            names.append(item.strip())
+            continue
+        if not isinstance(item, dict) or not item.get("name"):
+            continue
+        name = str(item["name"]).strip()
+        if not name:
+            continue
+        names.append(name)
+        voice = str(item.get("voice") or "").strip()
+        if voice:
+            voices[name] = voice
+    return names, voices
+
+
+def apply_persona_voice(tts, voice):
+    """下一句合成改用这个音色。火山会话按句启动，改 voice 即可。"""
+    if not voice or tts is None or not hasattr(tts, "voice"):
+        return False
+    tts.voice = voice
+    return True
+
+
+def spoken_ordinal(number):
+    """序号用「二」，不用「两」。"""
+    if number == 2:
+        return "二"
+    return spoken_count(number)
+
+
 def persona_menu(names):
-    parts = [f"{spoken_count(index)}，{name}" for index, name in enumerate(names, 1)]
+    parts = [f"{spoken_ordinal(index)}，{name}" for index, name in enumerate(names, 1)]
     return "接下来选一个性格。" + "。".join(parts) + "。请说序号，或者说名字。"
 
 
@@ -611,6 +646,7 @@ class VoiceActivationSession:
         self.owner_title = None
         self.persona_name = None
         self.persona_templates = []
+        self.persona_voices = {}
         self.announce_bind_success = announce_bind_success
         self.auth_queue = []
         self.auth_service = None
@@ -946,20 +982,22 @@ class VoiceActivationSession:
             self.conn.logger.bind(tag=TAG).warning(f"读取性格模板失败: {exc}")
             await self._say(api_error_text(exc) + "。请再说一次。")
             return False
-        names = []
-        for item in payload or []:
-            if isinstance(item, str) and item.strip():
-                names.append(item.strip())
-            elif isinstance(item, dict) and item.get("name"):
-                names.append(str(item["name"]).strip())
+        names, voices = parse_persona_catalog(payload)
         if not names:
             await self._say("还没有可选的性格模板。请再说一次。")
             return False
         self.persona_templates = names
+        self.persona_voices = voices
         return True
 
     def _persona_menu(self):
         return persona_menu(self.persona_templates)
+
+    def _use_persona_voice(self, name):
+        voice = (self.persona_voices or {}).get(name)
+        if not apply_persona_voice(getattr(self.conn, "tts", None), voice):
+            return
+        self.conn.logger.bind(tag=TAG).info(f"性格模板 {name} 切换音色: {voice}")
 
     async def _on_persona(self, text):
         loaded_now = False
@@ -973,6 +1011,7 @@ class VoiceActivationSession:
         if matched:
             self.persona_name = matched
             self.state = self.CONFIRM_PERSONA
+            self._use_persona_voice(matched)
             await self._say(f"性格用{matched}，对吗？")
             return
         if loaded_now or is_confirm(text) or is_reject(text):
@@ -990,6 +1029,7 @@ class VoiceActivationSession:
         switched = await resolve_persona(self.conn, text, self.persona_templates)
         if switched and switched != self.persona_name:
             self.persona_name = switched
+            self._use_persona_voice(switched)
             await self._say(f"性格用{switched}，对吗？")
             return
         if switched == self.persona_name:

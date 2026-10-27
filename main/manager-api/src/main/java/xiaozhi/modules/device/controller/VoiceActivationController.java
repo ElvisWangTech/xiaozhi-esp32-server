@@ -23,6 +23,7 @@ import xiaozhi.modules.device.service.VoiceActivationService;
 import xiaozhi.modules.device.vo.VoiceActivationBindVO;
 import xiaozhi.modules.device.vo.VoiceActivationSessionVO;
 import xiaozhi.modules.device.vo.VoiceActivationSkillAuthVO;
+import xiaozhi.modules.device.vo.VoiceActivationTemplateVO;
 
 @Tag(name = "语音激活")
 @RestController
@@ -63,8 +64,8 @@ public class VoiceActivationController {
 
     @PostMapping("/role/templates")
     @Operation(summary = "列出可选的角色性格模板")
-    public Result<List<String>> roleTemplates(@Valid @RequestBody VoiceActivationMacDTO dto) {
-        return new Result<List<String>>().ok(voiceActivationService.listRoleTemplates(dto.getMacAddress()));
+    public Result<List<VoiceActivationTemplateVO>> roleTemplates(@Valid @RequestBody VoiceActivationMacDTO dto) {
+        return new Result<List<VoiceActivationTemplateVO>>().ok(voiceActivationService.listRoleTemplates(dto.getMacAddress()));
     }
 
     @PostMapping("/role")
