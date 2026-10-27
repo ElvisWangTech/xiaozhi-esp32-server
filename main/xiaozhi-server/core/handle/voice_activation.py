@@ -1523,7 +1523,9 @@ class VoiceActivationSession:
         if ready is not None and not ready.done():
             ready.cancel()
         asr = getattr(self.conn, "asr", None)
-        stop = getattr(asr, "stop_ws_connection", None)
+        stop = getattr(asr, "disconnect", None)
+        if stop is None:
+            stop = getattr(asr, "stop_ws_connection", None)
         if stop is not None:
             stop()
         self.conn.logger.bind(tag=TAG).info("语音激活长时间无回应，断开ASR并让设备休眠")

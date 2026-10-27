@@ -127,6 +127,41 @@ def test_asr_keeps_speech_until_reconnect():
     assert merge_replay([], [9]) == [9]
 
 
+def test_utterance_end_keeps_asr_socket():
+    from core.providers.asr.doubao_stream import ASRProvider, playback_blocks_upload
+
+    provider = ASRProvider(
+        {"appid": "1", "access_token": "token", "sample_rate": 16000},
+        True,
+    )
+    socket = object()
+    provider.asr_ws = socket
+    provider.is_processing = True
+    provider._is_stopping = False
+    provider._recent = [b"a"]
+    provider._unsent = [b"b"]
+    provider.stop_ws_connection()
+    assert provider.asr_ws is socket
+    assert provider.is_processing is True
+    assert provider._recent == []
+    assert provider._unsent == []
+
+    blocked, resume_at = playback_blocks_upload(True, False, False, 10.0, 0.0, True)
+    assert blocked is True
+    assert resume_at == 11.0
+    blocked, resume_at = playback_blocks_upload(False, False, False, 10.5, resume_at, True)
+    assert blocked is True
+    blocked, _ = playback_blocks_upload(False, False, False, 11.0, resume_at, True)
+    assert blocked is False
+    blocked, _ = playback_blocks_upload(True, True, False, 10.0, 0.0, True)
+    assert blocked is False
+    blocked, resume_at = playback_blocks_upload(True, False, False, 10.0, 0.0, False)
+    assert blocked is True
+    assert resume_at == 10.0
+    blocked, _ = playback_blocks_upload(False, False, False, 10.1, resume_at, False)
+    assert blocked is False
+
+
 def test_apply_persona_voice_updates_tts():
     class _TTS:
         voice = "old"
@@ -232,7 +267,7 @@ def test_silence_packet_only_after_audio_gap():
     provider._last_audio_at = 0
     provider._silence_keepalive_logged = False
 
-    async def _send(_ws, frame):
+    async def _send(_ws, frame, remember=True):
         sent.append(frame)
         provider.asr_ws = None
 

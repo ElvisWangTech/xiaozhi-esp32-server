@@ -41,8 +41,8 @@ class ListenTextMessageHandler(TextMessageHandler):
                 return
 
             conn.client_voice_stop = True
-            if conn.asr.interface_type == InterfaceType.STREAM:
-                # 流式模式下，发送结束请求
+            if conn.asr.interface_type == InterfaceType.STREAM and conn.client_listen_mode == "manual":
+                # 按键松开才结束这一段。自动模式保持同一条识别连接。
                 asyncio.create_task(conn.asr._send_stop_request())
             else:
                 # 非流式模式：直接触发ASR识别

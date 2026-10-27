@@ -38,6 +38,23 @@ def merge_replay(recent, unsent, limit=_SPEECH_BUFFER_FRAMES):
     return merged
 
 
+# 服务端发完音频后，设备缓冲区里往往还剩约 1 秒。这段时间麦会收到扬声器。
+_PLAYBACK_TAIL_SECONDS = 1.0
+
+
+def playback_blocks_upload(speaking, aec, manual, now, resume_at, hold_tail, tail_seconds=_PLAYBACK_TAIL_SECONDS):
+    """没有回声消除时，播放期间不上送麦克风。聊天再多留一小段，避开设备里还没播完的声音。"""
+    if aec or manual:
+        return False, resume_at
+    if speaking:
+        if hold_tail:
+            return True, now + tail_seconds
+        return True, now
+    if now < resume_at:
+        return True, resume_at
+    return False, resume_at
+
+
 class ASRProvider(ASRProviderBase):
     def __init__(self, config, delete_audio_file):
         super().__init__()
@@ -49,13 +66,16 @@ class ASRProvider(ASRProviderBase):
         self.is_processing = False  # 添加处理状态标志
         self._is_stopping = False  # 添加停止标志，防止竞态条件
         self._connect_lock = asyncio.Lock()
-        # 提示音收尾时才建连。平时只上传真实音频；满 6 秒没有任何包时补一包静音，
-        # 避开火山 8 秒等包超时（45000081，服务端固定，不能加长）。
+        # 提示音收尾时才建连。连上之后一直听，不在每句结束时断开。
+        # 满 6 秒没有任何包时补一包静音，避开火山 8 秒等包超时（45000081，服务端固定，不能加长）。
         self._awaiting_listen = False
         self._ignore_results = False
         self._last_audio_at = 0.0
         self._keepalive_task = None
         self._silence_keepalive_logged = False
+        self._resume_upload_at = 0.0
+        self._playback_drop_logged = False
+        self._drop_replay = False
         # 还没送到当前连接上的 PCM。换连接时整段补发，不依赖只剩 10 帧的 asr_audio。
         self._unsent = []
         self._recent = []
@@ -259,9 +279,33 @@ class ASRProvider(ASRProviderBase):
         except asyncio.CancelledError:
             return
 
+    def _suppress_playback(self, conn):
+        """播放回答时麦里主要是扬声器。没有回声消除就先不上送，连接保持。"""
+        hold_tail = getattr(conn, "voice_activation_handler", None) is None
+        blocked, self._resume_upload_at = playback_blocks_upload(
+            bool(getattr(conn, "client_is_speaking", False)),
+            bool(getattr(conn, "client_aec", False)),
+            getattr(conn, "client_listen_mode", "auto") == "manual",
+            time.monotonic(),
+            self._resume_upload_at,
+            hold_tail,
+        )
+        if blocked and not self._playback_drop_logged:
+            self._playback_drop_logged = True
+            logger.bind(tag=TAG).info("播放中不上送麦克风，ASR连接保持")
+        if not blocked:
+            self._playback_drop_logged = False
+        return blocked
+
     async def receive_audio(self, conn: "ConnectionHandler", pcm_frame, audio_have_voice):
         # 先调用父类方法处理基础逻辑
         await super().receive_audio(conn, pcm_frame, audio_have_voice)
+
+        if self._suppress_playback(conn):
+            conn.client_have_voice = False
+            if len(conn.asr_audio) > 10:
+                del conn.asr_audio[:-10]
+            return
 
         if self._session_alive():
             self._awaiting_listen = False
@@ -317,11 +361,8 @@ class ASRProvider(ASRProviderBase):
                                 and not payload["result"].get("text")
                                 and conn.client_listen_mode != "manual"
                             ):
-                                logger.bind(tag=TAG).error(f"识别文本：空")
-                                self.text = ""
-                                if len(audio_data) > 15:  # 确保有足够音频数据
-                                    await self.handle_voice_stop(conn, audio_data)
-                                break
+                                # 连接一直开着时，两句之间的空结果是正常的，不能因此关掉。
+                                continue
 
                             # 专门处理没有文本的识别结果（手动模式下可能已经识别完成但是没松按键）
                             elif not payload["result"].get("text") and not utterances:
@@ -354,12 +395,13 @@ class ASRProvider(ASRProviderBase):
                                             await self.handle_voice_stop(conn, audio_data)
                                         break
                                     else:
-                                        # 自动模式下直接覆盖
+                                        # 自动模式下直接覆盖。这句交给对话后连接继续听下一句。
                                         self.text = current_text
                                         if len(audio_data) > 15:  # 确保有足够音频数据
                                             await self.handle_voice_stop(
                                                 conn, audio_data
                                             )
+                                            conn.reset_audio_states()
                                     break
                         elif "error" in payload:
                             error_msg = payload.get("error", "未知错误")
@@ -388,7 +430,13 @@ class ASRProvider(ASRProviderBase):
             if self.asr_ws is not None and self.asr_ws is not ws:
                 return
             self._cancel_keepalive(ws)
-            self._preserve_recent_for_replay()
+            if self._drop_replay:
+                self._recent = []
+                self._unsent = []
+                self._hold_replay = False
+                self._drop_replay = False
+            else:
+                self._preserve_recent_for_replay()
             if self.asr_ws is ws:
                 try:
                     await ws.close()
@@ -401,8 +449,17 @@ class ASRProvider(ASRProviderBase):
             conn.reset_audio_states()
 
     def stop_ws_connection(self):
+        """一句已经识别完。连接留着听下一句，避免每次说话都重新握手。"""
+        self._recent = []
+        self._unsent = []
+        self._hold_replay = False
+        if self._session_alive():
+            logger.bind(tag=TAG).info("本句已识别，ASR连接保持")
+
+    def disconnect(self):
+        """真正关掉计费连接。长时间无回应或设备断开时用。"""
+        self._drop_replay = True
         self._cancel_keepalive()
-        # 这句已经识别完，不要在下一次连接里再播一遍。
         self._recent = []
         self._unsent = []
         self._hold_replay = False
@@ -565,9 +622,20 @@ class ASRProvider(ASRProviderBase):
 
     async def close(self):
         """资源清理方法"""
-        if self.asr_ws:
-            await self.asr_ws.close()
-            self.asr_ws = None
+        self._drop_replay = True
+        self._cancel_keepalive()
+        self._recent = []
+        self._unsent = []
+        self._hold_replay = False
+        self._is_stopping = True
+        ws = self.asr_ws
+        self.asr_ws = None
+        self.is_processing = False
+        if ws is not None:
+            try:
+                await ws.close()
+            except Exception:
+                pass
         if self.forward_task:
             self.forward_task.cancel()
             try:
