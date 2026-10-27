@@ -102,7 +102,7 @@ class ConnectionHandler:
 
         self.need_bind = False  # 是否需要绑定设备
         self.voice_activation = False  # 未绑定且激活方式为语音
-        self.voice_onboarding = None  # nickname / skills 表示绑定后的引导步骤
+        self.voice_onboarding = None  # nickname / role / skills 表示绑定后的引导步骤
         self.skills_pending = False  # 技能绑定失败或稍后后，允许语音再说「绑定技能」
         self.voice_activation_handler = None
         self.bind_completed_event = asyncio.Event()
@@ -681,6 +681,10 @@ class ConnectionHandler:
                 asyncio.run_coroutine_threadsafe(
                     self._start_nickname_onboarding(), self.loop
                 )
+            elif self.voice_onboarding == "role" and self.voice_activation_handler is None:
+                asyncio.run_coroutine_threadsafe(
+                    self._start_role_onboarding(), self.loop
+                )
             elif self.voice_onboarding == "skills" and self.voice_activation_handler is None:
                 asyncio.run_coroutine_threadsafe(
                     self._start_skills_onboarding(), self.loop
@@ -818,6 +822,12 @@ class ConnectionHandler:
         from core.handle.voice_activation import VoiceActivationSession
 
         self.voice_activation_handler = VoiceActivationSession(self, stage="nickname")
+        await self.voice_activation_handler.start()
+
+    async def _start_role_onboarding(self):
+        from core.handle.voice_activation import VoiceActivationSession
+
+        self.voice_activation_handler = VoiceActivationSession(self, stage="role")
         await self.voice_activation_handler.start()
 
     async def _start_skills_onboarding(self):

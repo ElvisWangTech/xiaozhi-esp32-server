@@ -1,6 +1,8 @@
 package xiaozhi.modules.device.service;
 
+import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 
 import org.apache.commons.lang3.StringUtils;
@@ -27,10 +29,13 @@ import xiaozhi.common.redis.RedisKeys;
 import xiaozhi.common.redis.RedisUtils;
 import xiaozhi.modules.agent.dto.AgentCreateDTO;
 import xiaozhi.modules.agent.entity.AgentEntity;
+import xiaozhi.modules.agent.entity.AgentTemplateEntity;
 import xiaozhi.modules.agent.service.AgentMcpAccessPointService;
 import xiaozhi.modules.agent.service.AgentService;
+import xiaozhi.modules.agent.service.AgentTemplateService;
 import xiaozhi.modules.device.dto.VoiceActivationBindDTO;
 import xiaozhi.modules.device.dto.VoiceActivationNicknameDTO;
+import xiaozhi.modules.device.dto.VoiceActivationRoleDTO;
 import xiaozhi.modules.device.dto.VoiceActivationSmsDTO;
 import xiaozhi.modules.device.entity.DeviceEntity;
 import xiaozhi.modules.device.vo.VoiceActivationBindVO;
@@ -48,6 +53,7 @@ import xiaozhi.modules.sys.service.SysParamsService;
 public class VoiceActivationService {
 
     public static final String ONBOARDING_NICKNAME = "nickname";
+    public static final String ONBOARDING_ROLE = "role";
     public static final String ONBOARDING_SKILLS = "skills";
     public static final String ONBOARDING_DONE = "done";
     public static final String ACTIVATION_VOICE = "voice";
@@ -59,6 +65,7 @@ public class VoiceActivationService {
 
     private final DeviceService deviceService;
     private final AgentService agentService;
+    private final AgentTemplateService agentTemplateService;
     private final AgentMcpAccessPointService agentMcpAccessPointService;
     private final DypnsSmsCodeService smsCodeService;
     private final SysUserDao sysUserDao;
@@ -146,8 +153,59 @@ public class VoiceActivationService {
         }
         agent.setAgentName(nickname);
         agentService.updateById(agent);
+        device.setOnboardingStatus(ONBOARDING_ROLE);
+        deviceService.updateById(device);
+    }
+
+    public List<String> listRoleTemplates(String macAddress) {
+        requireRoleDevice(requireMac(macAddress));
+        QueryWrapper<AgentTemplateEntity> wrapper = new QueryWrapper<>();
+        wrapper.orderByAsc("sort");
+        List<AgentTemplateEntity> templates = agentTemplateService.list(wrapper);
+        List<String> names = new ArrayList<>();
+        if (templates == null) {
+            return names;
+        }
+        for (AgentTemplateEntity template : templates) {
+            if (template == null || StringUtils.isBlank(template.getAgentName())) {
+                continue;
+            }
+            String name = template.getAgentName().trim();
+            if (!names.contains(name)) {
+                names.add(name);
+            }
+        }
+        return names;
+    }
+
+    @Transactional(rollbackFor = Exception.class)
+    public void saveRole(VoiceActivationRoleDTO dto) {
+        String mac = requireMac(dto.getMacAddress());
+        DeviceEntity device = requireRoleDevice(mac);
+        String ownerTitle = normalizeOwnerTitle(dto.getOwnerTitle());
+        String templateName = normalizeTemplateName(dto.getTemplateName());
+        String supplement = normalizeSupplement(dto.getSupplement());
+        AgentEntity agent = requireAgent(device);
+        QueryWrapper<AgentTemplateEntity> wrapper = new QueryWrapper<>();
+        wrapper.eq("agent_name", templateName);
+        wrapper.orderByAsc("sort");
+        List<AgentTemplateEntity> found = agentTemplateService.list(wrapper);
+        if (found == null || found.isEmpty() || StringUtils.isBlank(found.get(0).getSystemPrompt())) {
+            throw new RenException("没有这个性格模板");
+        }
+        agent.setSystemPrompt(composeRolePrompt(found.get(0).getSystemPrompt(), ownerTitle, supplement));
+        agentService.updateById(agent);
         device.setOnboardingStatus(ONBOARDING_SKILLS);
         deviceService.updateById(device);
+    }
+
+    static String composeRolePrompt(String templatePrompt, String ownerTitle, String supplement) {
+        StringBuilder prompt = new StringBuilder(templatePrompt.trim());
+        prompt.append("\n[主人称呼]\n请称呼用户为「").append(ownerTitle).append("」。");
+        if (StringUtils.isNotBlank(supplement)) {
+            prompt.append("\n[补充设定]\n").append(supplement.trim());
+        }
+        return prompt.toString();
     }
 
     @Transactional(rollbackFor = Exception.class)
@@ -271,6 +329,44 @@ public class VoiceActivationService {
         } catch (Exception e) {
             log.info("portal finish invite skipped: mac={} err={}", mac, e.getMessage());
         }
+    }
+
+    private DeviceEntity requireRoleDevice(String mac) {
+        DeviceEntity device = deviceService.getDeviceByMacAddress(mac);
+        if (device == null) {
+            throw new RenException(ErrorCode.DEVICE_NOT_EXIST);
+        }
+        if (!ONBOARDING_ROLE.equals(device.getOnboardingStatus())) {
+            throw new RenException("当前不需要设置角色");
+        }
+        return device;
+    }
+
+    private static String normalizeOwnerTitle(String title) {
+        if (title == null) {
+            throw new RenException("请说出怎么称呼您");
+        }
+        String trimmed = title.trim().replaceAll("[\\s，。,.!！?？、「」]", "");
+        if (trimmed.isEmpty() || trimmed.length() > 12) {
+            throw new RenException("称呼请控制在1到12个字");
+        }
+        return trimmed;
+    }
+
+    private static String normalizeTemplateName(String name) {
+        String trimmed = StringUtils.trimToEmpty(name);
+        if (trimmed.isEmpty() || trimmed.length() > 32) {
+            throw new RenException("请选择性格模板");
+        }
+        return trimmed;
+    }
+
+    private static String normalizeSupplement(String supplement) {
+        String trimmed = StringUtils.trimToEmpty(supplement);
+        if (trimmed.length() > 80) {
+            throw new RenException("补充请控制在八十个字以内");
+        }
+        return trimmed;
     }
 
     private DeviceEntity requireSkillsDevice(String mac) {

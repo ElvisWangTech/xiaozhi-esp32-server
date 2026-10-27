@@ -5,6 +5,8 @@ import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 
+import java.util.List;
+
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.tags.Tag;
 import jakarta.validation.Valid;
@@ -12,6 +14,7 @@ import xiaozhi.common.utils.Result;
 import xiaozhi.modules.device.dto.VoiceActivationBindDTO;
 import xiaozhi.modules.device.dto.VoiceActivationMacDTO;
 import xiaozhi.modules.device.dto.VoiceActivationNicknameDTO;
+import xiaozhi.modules.device.dto.VoiceActivationRoleDTO;
 import xiaozhi.modules.device.dto.VoiceActivationSkillAuthDTO;
 import xiaozhi.modules.device.dto.VoiceActivationSkillCodeDTO;
 import xiaozhi.modules.device.dto.VoiceActivationSkillTaskDTO;
@@ -55,6 +58,19 @@ public class VoiceActivationController {
     @Operation(summary = "设置助手昵称")
     public Result<Void> nickname(@Valid @RequestBody VoiceActivationNicknameDTO dto) {
         voiceActivationService.saveNickname(dto);
+        return new Result<>();
+    }
+
+    @PostMapping("/role/templates")
+    @Operation(summary = "列出可选的角色性格模板")
+    public Result<List<String>> roleTemplates(@Valid @RequestBody VoiceActivationMacDTO dto) {
+        return new Result<List<String>>().ok(voiceActivationService.listRoleTemplates(dto.getMacAddress()));
+    }
+
+    @PostMapping("/role")
+    @Operation(summary = "保存主人称呼和角色性格")
+    public Result<Void> role(@Valid @RequestBody VoiceActivationRoleDTO dto) {
+        voiceActivationService.saveRole(dto);
         return new Result<>();
     }
 

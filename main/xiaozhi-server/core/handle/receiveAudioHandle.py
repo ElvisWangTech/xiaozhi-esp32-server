@@ -75,7 +75,7 @@ async def startToChat(conn: "ConnectionHandler", text):
     else:
         conn.current_speaker = None
 
-    if getattr(conn, "voice_onboarding", None) in ("nickname", "skills") and getattr(
+    if getattr(conn, "voice_onboarding", None) in ("nickname", "role", "skills") and getattr(
         conn, "voice_activation_handler", None
     ) is None:
         return

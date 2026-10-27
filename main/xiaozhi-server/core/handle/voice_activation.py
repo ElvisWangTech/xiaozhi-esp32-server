@@ -1,4 +1,5 @@
 import asyncio
+import json
 import re
 import time
 import uuid
@@ -123,6 +124,296 @@ def is_skip_skills(text):
     return any(word in compact for word in SKIP_SKILLS_WORDS)
 
 
+_NICKNAME_SYSTEM_PROMPT = (
+    "你在语音引导里，从用户原话中提取助手昵称。"
+    "只输出一个 JSON 对象，不要解释，不要使用 markdown。"
+    '格式：{"nickname":"小智"}。听不出昵称时输出 {"nickname":""}。\n'
+    "规则：\n"
+    "1. 用户可能直接说昵称，也可能说整句，例如「你的昵称是小智」「我想叫你豆豆吧」「就叫小美」。只保留真实昵称。\n"
+    "2. 昵称 1 到 12 个字，不要带语气词。\n"
+    "3. 只是在确认或否定，例如「对」「确认」「不对」「重说」，nickname 留空。\n"
+    "4. 否定里如果带了新昵称，例如「不对，你的昵称是小美」，取出小美。\n"
+    "5. 听不清或不是在起名时，nickname 留空。"
+)
+# 这些字出现时，原话更像句子而不是昵称本身，交给模型判断。
+_NICKNAME_SENTENCE_CUES = ("昵称", "名字", "叫", "是", "的", "你", "您", "我", "不", "重", "该", "什么", "怎么")
+_SPEECH_TAILS = (
+    "可以吗",
+    "好不好",
+    "对不对",
+    "行不行",
+    "就行了",
+    "就可以了",
+    "就好了",
+    "的话",
+    "好吗",
+    "行吗",
+    "对吗",
+    "就行",
+    "就好",
+    "就可以",
+    "谢谢",
+    "吧",
+    "啊",
+    "呀",
+    "呢",
+    "哦",
+    "哈",
+    "嘛",
+    "了",
+)
+_OWNER_CALL_RE = re.compile(r"(?:称呼我|叫我|喊我)(?:为|是|做)?(.+)$")
+_OWNER_SELF_RE = re.compile(r"^我(?:的名字|的称呼)?(?:是|叫)(.+)$")
+_OWNER_PARTICLE_LEADS = ("嗯", "啊", "呃", "那就", "那个", "就是", "好的")
+_OWNER_STOP = {"不知道", "不确定", "随便", "都行", "都可以", "无所谓", "称呼", "您", "你", "我"}
+_NO_SUPPLEMENT = {
+    "没有",
+    "没有了",
+    "没了",
+    "没有啦",
+    "没啦",
+    "没有啊",
+    "没有呀",
+    "没有哦",
+    "没有吧",
+    "没有呢",
+    "不用",
+    "不用了",
+    "不用啦",
+    "不用啊",
+    "不用呀",
+    "不用吧",
+    "不要",
+    "不要了",
+    "不要啦",
+    "别",
+    "别了",
+    "不补充",
+    "没有补充",
+    "不用补充",
+    "不用补充了",
+    "不需要",
+    "不需要了",
+    "无需",
+    "无",
+    "跳过",
+    "就这样",
+    "就这样吧",
+    "算了",
+    "没有要补充的",
+    "先不用",
+    "没补充",
+    "无补充",
+}
+_ORDINAL_RE = re.compile(
+    r"^(?:我就|我想要|我要|我选|就用|那就|就|用|选|那)?第?([0-9]{1,2}|[一二两三四五六七八九十])(?:个|号)?$"
+)
+_ORDINAL_VALUE = {
+    "一": 1,
+    "二": 2,
+    "两": 2,
+    "三": 3,
+    "四": 4,
+    "五": 5,
+    "六": 6,
+    "七": 7,
+    "八": 8,
+    "九": 9,
+    "十": 10,
+}
+_SHORT_NAME_LIMIT = 12
+_SUPPLEMENT_LIMIT = 80
+
+
+def _strip_speech_tails(text):
+    tails = sorted(_SPEECH_TAILS, key=len, reverse=True)
+    changed = True
+    while changed and text:
+        changed = False
+        for tail in tails:
+            if len(text) > len(tail) and text.endswith(tail):
+                text = text[: -len(tail)]
+                changed = True
+                break
+    return text
+
+
+def _valid_short_name(name, limit=_SHORT_NAME_LIMIT):
+    if not name or name in set("吧啊呀呢哦哈嘛了") or is_confirm(name) or is_reject(name):
+        return False
+    return 1 <= len(name) <= limit
+
+
+def is_pure_reject(text):
+    """整句只是否定，没有带出一个新名字。"""
+    compact = compact_text(unwrap_user_text(text))
+    if not compact or not is_reject(compact):
+        return False
+    for word in sorted(REJECT_WORDS, key=len, reverse=True):
+        if word not in compact:
+            continue
+        rest = _strip_speech_tails(compact.replace(word, "", 1))
+        if not rest:
+            return True
+    return False
+
+
+def _is_bare_nickname(compact):
+    name = _strip_speech_tails(compact).replace("「", "").replace("」", "")
+    if not _valid_short_name(name):
+        return False
+    return not any(cue in compact for cue in _NICKNAME_SENTENCE_CUES)
+
+
+def _log_nickname(conn, level, message):
+    logger = getattr(conn, "logger", None)
+    if logger is None:
+        return
+    getattr(logger.bind(tag=TAG), level)(message)
+
+
+def parse_nickname_reply(text):
+    raw = (text or "").strip()
+    if raw.startswith("```"):
+        raw = re.sub(r"^```(?:json)?", "", raw).strip()
+        raw = re.sub(r"```$", "", raw).strip()
+    try:
+        data = json.loads(raw)
+    except Exception:
+        match = re.search(r"\{.*\}", raw, re.S)
+        if not match:
+            return None
+        try:
+            data = json.loads(match.group(0))
+        except Exception:
+            return None
+    if not isinstance(data, dict):
+        return None
+    name = _strip_speech_tails(compact_text(data.get("nickname") or ""))
+    name = name.replace("「", "").replace("」", "")
+    if not _valid_short_name(name):
+        return None
+    if any(token in name for token in ("昵称", "名字", "叫你", "叫做", "就叫", "你的", "您的")):
+        return None
+    return name
+
+
+def same_name_agreement(text, current):
+    """「是小智」「对的小智」在已经听到这个名字时，当作确认。"""
+    if not current:
+        return False
+    compact = compact_text(unwrap_user_text(text))
+    for word in ("对的", "是的", "没错", "确认", "可以", "好的", "对", "是", "行", "嗯"):
+        if compact == word + current:
+            return True
+    return False
+
+
+async def extract_nickname(conn, text):
+    """用当前对话模型从原话里抽出昵称。单独一个短名字不调用模型。"""
+    raw = unwrap_user_text(text).strip()
+    compact = compact_text(raw)
+    if not compact or is_confirm(compact) or is_pure_reject(compact):
+        return None
+    if _is_bare_nickname(compact):
+        return _strip_speech_tails(compact).replace("「", "").replace("」", "")
+    llm = getattr(conn, "llm", None)
+    if llm is None or not hasattr(llm, "response_no_stream"):
+        _log_nickname(conn, "warning", "提取昵称时没有可用的对话模型")
+        return None
+    try:
+        reply = await asyncio.to_thread(
+            llm.response_no_stream,
+            _NICKNAME_SYSTEM_PROMPT,
+            raw,
+        )
+    except Exception as exc:
+        _log_nickname(conn, "warning", f"提取昵称失败: {exc}")
+        return None
+    nickname = parse_nickname_reply(reply)
+    _log_nickname(conn, "info", f"昵称识别: {raw} -> {nickname or ''}")
+    return nickname
+
+
+def _strip_owner_particles(compact):
+    changed = True
+    while changed and compact:
+        changed = False
+        for lead in sorted(_OWNER_PARTICLE_LEADS, key=len, reverse=True):
+            if compact.startswith(lead) and len(compact) > len(lead):
+                compact = compact[len(lead) :]
+                changed = True
+                break
+    return compact
+
+
+def extract_owner_title(text):
+    """从「叫我老板」或直接说的称呼里抽出主人称呼。"""
+    compact = compact_text(unwrap_user_text(text))
+    if not compact or is_confirm(compact):
+        return None, False
+    if any(word in compact for word in ("怎么", "什么", "怎样", "如何")):
+        return None, False
+    compact = _strip_owner_particles(compact)
+    call = _OWNER_CALL_RE.search(compact)
+    self_match = _OWNER_SELF_RE.match(compact)
+    if is_reject(compact) and not call and not self_match:
+        return None, False
+    framed = False
+    body = compact
+    if call:
+        body = call.group(1)
+        framed = True
+    elif self_match:
+        body = self_match.group(1)
+        framed = True
+    body = _strip_speech_tails(body).replace("「", "").replace("」", "")
+    if body in _OWNER_STOP or not _valid_short_name(body):
+        return None, framed
+    return body, framed
+
+
+def is_no_supplement(text):
+    return compact_text(unwrap_user_text(text)) in _NO_SUPPLEMENT
+
+
+def clean_supplement(text):
+    raw = unwrap_user_text(text).strip()
+    return raw.strip("，。,.!！?？、 \n\t")
+
+
+def _ordinal_value(token):
+    if token.isdigit():
+        return int(token)
+    return _ORDINAL_VALUE.get(token)
+
+
+def match_persona(text, names):
+    """用序号或模板名匹配性格。否定句不选中。"""
+    if not names:
+        return None
+    compact = compact_text(unwrap_user_text(text))
+    if not compact or is_confirm(compact) or is_reject(compact):
+        return None
+    hits = [name for name in names if compact_text(name) and compact_text(name) in compact]
+    if hits:
+        hits.sort(key=lambda name: len(compact_text(name)), reverse=True)
+        return hits[0]
+    stripped = _strip_speech_tails(compact)
+    match = _ORDINAL_RE.fullmatch(stripped)
+    if not match:
+        return None
+    index = _ordinal_value(match.group(1))
+    if index is None or index < 1 or index > len(names):
+        return None
+    return names[index - 1]
+
+
+def persona_menu(names):
+    parts = [f"{spoken_count(index)}，{name}" for index, name in enumerate(names, 1)]
+    return "接下来选一个性格。" + "。".join(parts) + "。请说序号，或者说名字。"
+
+
 def spoken_digits(number):
     return "，".join(list(number))
 
@@ -197,6 +488,11 @@ class VoiceActivationSession:
     ASK_CODE = "ask_code"
     ASK_NICKNAME = "ask_nickname"
     CONFIRM_NICKNAME = "confirm_nickname"
+    ASK_OWNER = "ask_owner"
+    CONFIRM_OWNER = "confirm_owner"
+    ASK_PERSONA = "ask_persona"
+    CONFIRM_PERSONA = "confirm_persona"
+    ASK_SUPPLEMENT = "ask_supplement"
     RETRY_SKILLS = "retry_skills"
     ASK_AUTH_CODE = "ask_auth_code"
     ASK_REBOOT = "ask_reboot"
@@ -215,11 +511,16 @@ class VoiceActivationSession:
             self.state = self.ASK_PHONE
         elif stage == "nickname":
             self.state = self.ASK_NICKNAME
+        elif stage == "role":
+            self.state = self.ASK_OWNER
         else:
             self.state = self.RETRY_SKILLS
         self.phone = None
         self.phone_digits = ""
         self.nickname = None
+        self.owner_title = None
+        self.persona_name = None
+        self.persona_templates = []
         self.announce_bind_success = announce_bind_success
         self.auth_queue = []
         self.auth_service = None
@@ -238,6 +539,9 @@ class VoiceActivationSession:
         if self.state == self.ASK_NICKNAME:
             prefix = "绑定成功。" if self.announce_bind_success else ""
             await self._say(prefix + "请说出助手的昵称。")
+            return
+        if self.state == self.ASK_OWNER:
+            await self._say("我该怎么称呼您呢？")
             return
         await self._say("请说出您的手机号码，一共十一位。")
 
@@ -272,6 +576,16 @@ class VoiceActivationSession:
             await self._on_nickname(text)
         elif self.state == self.CONFIRM_NICKNAME:
             await self._on_confirm_nickname(text)
+        elif self.state == self.ASK_OWNER:
+            await self._on_owner(text)
+        elif self.state == self.CONFIRM_OWNER:
+            await self._on_confirm_owner(text)
+        elif self.state == self.ASK_PERSONA:
+            await self._on_persona(text)
+        elif self.state == self.CONFIRM_PERSONA:
+            await self._on_confirm_persona(text)
+        elif self.state == self.ASK_SUPPLEMENT:
+            await self._on_supplement(text)
         elif self.state == self.RETRY_SKILLS:
             await self._on_retry_skills(text)
         elif self.state == self.ASK_AUTH_CODE:
@@ -436,7 +750,7 @@ class VoiceActivationSession:
         await self.start()
 
     async def _on_nickname(self, text):
-        nickname = self._clean_nickname(text)
+        nickname = await extract_nickname(self.conn, text)
         if not nickname:
             await self._say("没有听清昵称，请再说一次。")
             return
@@ -445,19 +759,30 @@ class VoiceActivationSession:
         await self._say(f"助手的昵称是{nickname}，对吗？")
 
     async def _on_confirm_nickname(self, text):
+        if same_name_agreement(text, self.nickname) or is_confirm(text):
+            await self._commit_nickname()
+            return
+        if is_pure_reject(text):
+            self.nickname = None
+            self.state = self.ASK_NICKNAME
+            await self._say("好的，请重新说出助手昵称。")
+            return
+        corrected = await extract_nickname(self.conn, text)
+        if corrected and corrected != self.nickname:
+            self.nickname = corrected
+            await self._say(f"助手的昵称是{self.nickname}，对吗？")
+            return
+        if corrected == self.nickname:
+            await self._commit_nickname()
+            return
         if is_reject(text):
             self.nickname = None
             self.state = self.ASK_NICKNAME
             await self._say("好的，请重新说出助手昵称。")
             return
-        corrected = self._clean_nickname(text)
-        if corrected and not is_confirm(text) and corrected != self.nickname:
-            self.nickname = corrected
-            await self._say(f"助手的昵称是{self.nickname}，对吗？")
-            return
-        if not is_confirm(text):
-            await self._say("请说确认，或者说重说。")
-            return
+        await self._say("请说确认，或者说重说。")
+
+    async def _commit_nickname(self):
         try:
             await self._post(
                 "/device/voice-activation/nickname",
@@ -468,9 +793,150 @@ class VoiceActivationSession:
             await self._say(api_error_text(exc))
             return
         await self.conn.refresh_agent_prompt()
+        await self._begin_owner()
+
+    async def _begin_owner(self):
+        self.stage = "role"
+        self.state = self.ASK_OWNER
+        self.conn.voice_onboarding = "role"
+        name = self.nickname or "助手"
+        await self._say(f"好的，我是{name}。我该怎么称呼您呢？")
+
+    async def _on_owner(self, text):
+        title, _framed = extract_owner_title(text)
+        if not title:
+            await self._say("没有听清。您希望我怎么称呼您？")
+            return
+        self.owner_title = title
+        self.state = self.CONFIRM_OWNER
+        await self._say(f"我称呼您为{title}，对吗？")
+
+    async def _on_confirm_owner(self, text):
+        corrected, framed = extract_owner_title(text)
+        if framed and corrected and corrected != self.owner_title:
+            self.owner_title = corrected
+            await self._say(f"我称呼您为{self.owner_title}，对吗？")
+            return
+        if same_name_agreement(text, self.owner_title):
+            corrected, framed = self.owner_title, True
+        if is_reject(text):
+            self.owner_title = None
+            self.state = self.ASK_OWNER
+            await self._say("好的，我该怎么称呼您呢？")
+            return
+        if corrected and not framed and not is_confirm(text) and corrected != self.owner_title:
+            self.owner_title = corrected
+            await self._say(f"我称呼您为{self.owner_title}，对吗？")
+            return
+        agreed = is_confirm(text) or (framed and corrected == self.owner_title)
+        if not agreed:
+            await self._say("请说确认，或者说重说。")
+            return
+        await self._begin_persona()
+
+    async def _begin_persona(self):
+        self.persona_name = None
+        self.state = self.ASK_PERSONA
+        if not await self._load_persona_templates():
+            return
+        await self._say(self._persona_menu())
+
+    async def _load_persona_templates(self):
+        try:
+            payload = await self._post(
+                "/device/voice-activation/role/templates",
+                {"macAddress": self._mac()},
+            )
+        except Exception as exc:
+            self.conn.logger.bind(tag=TAG).warning(f"读取性格模板失败: {exc}")
+            await self._say(api_error_text(exc) + "。请再说一次。")
+            return False
+        names = []
+        for item in payload or []:
+            if isinstance(item, str) and item.strip():
+                names.append(item.strip())
+            elif isinstance(item, dict) and item.get("name"):
+                names.append(str(item["name"]).strip())
+        if not names:
+            await self._say("还没有可选的性格模板。请再说一次。")
+            return False
+        self.persona_templates = names
+        return True
+
+    def _persona_menu(self):
+        return persona_menu(self.persona_templates)
+
+    async def _on_persona(self, text):
+        loaded_now = False
+        if not self.persona_templates:
+            if not await self._load_persona_templates():
+                return
+            loaded_now = True
+        matched = None
+        if not is_confirm(text) and not is_reject(text):
+            matched = match_persona(text, self.persona_templates)
+        if matched:
+            self.persona_name = matched
+            self.state = self.CONFIRM_PERSONA
+            await self._say(f"性格用{matched}，对吗？")
+            return
+        if loaded_now or is_confirm(text) or is_reject(text):
+            await self._say(self._persona_menu())
+            return
+        await self._say("没有听清。请说序号，或者说模板名字。")
+
+    async def _on_confirm_persona(self, text):
+        if is_reject(text):
+            self.persona_name = None
+            self.state = self.ASK_PERSONA
+            await self._say("好的。" + self._persona_menu())
+            return
+        switched = match_persona(text, self.persona_templates)
+        if switched and switched != self.persona_name and not is_confirm(text):
+            self.persona_name = switched
+            await self._say(f"性格用{switched}，对吗？")
+            return
+        if not is_confirm(text):
+            await self._say("请说确认，或者说重说。")
+            return
+        self.state = self.ASK_SUPPLEMENT
+        await self._say("还有要补充的吗？直接说就行。没有的话请说没有。")
+
+    async def _on_supplement(self, text):
+        if is_no_supplement(text):
+            await self._save_role("")
+            return
+        if is_confirm(text):
+            await self._say("请直接说补充内容，或者说没有。")
+            return
+        supplement = clean_supplement(text)
+        if not supplement:
+            await self._say("没有听清。请补充，或者说没有。")
+            return
+        if len(supplement) > _SUPPLEMENT_LIMIT:
+            await self._say("补充有点长，请控制在八十个字以内。或者说没有。")
+            return
+        await self._save_role(supplement)
+
+    async def _save_role(self, supplement):
+        try:
+            await self._post(
+                "/device/voice-activation/role",
+                {
+                    "macAddress": self._mac(),
+                    "ownerTitle": self.owner_title,
+                    "templateName": self.persona_name,
+                    "supplement": supplement,
+                },
+            )
+        except Exception as exc:
+            self.conn.logger.bind(tag=TAG).warning(f"保存角色设定失败: {exc}")
+            await self._say(api_error_text(exc))
+            return
+        await self.conn.refresh_agent_prompt()
         self.conn.voice_onboarding = "skills"
         self.stage = "skills"
-        await self._say(f"好的，我是{self.nickname}。正在绑定技能。")
+        await self._say("好的。正在绑定技能。")
         await self._bind_skills()
 
     async def _bind_skills(self):
@@ -827,6 +1293,19 @@ class VoiceActivationSession:
             await self._say("请说出助手的昵称。")
         elif self.state == self.CONFIRM_NICKNAME:
             await self._say(f"助手的昵称是{self.nickname}，对吗？")
+        elif self.state == self.ASK_OWNER:
+            await self._say("我该怎么称呼您呢？")
+        elif self.state == self.CONFIRM_OWNER:
+            await self._say(f"我称呼您为{self.owner_title}，对吗？")
+        elif self.state == self.ASK_PERSONA:
+            if self.persona_templates:
+                await self._say(self._persona_menu())
+            else:
+                await self._say("请说出性格模板的序号或名字。")
+        elif self.state == self.CONFIRM_PERSONA:
+            await self._say(f"性格用{self.persona_name}，对吗？")
+        elif self.state == self.ASK_SUPPLEMENT:
+            await self._say("还有要补充的吗？直接说就行。没有的话请说没有。")
         elif self.state == self.RETRY_SKILLS:
             await self._say("技能绑定还未完成，请说确认重试，或者说稍后再说。")
         elif self.state == self.ASK_AUTH_CODE:
@@ -860,15 +1339,6 @@ class VoiceActivationSession:
 
     def _mac(self):
         return self.conn.headers.get("device-id")
-
-    @staticmethod
-    def _clean_nickname(text):
-        nickname = compact_text(unwrap_user_text(text))
-        if not nickname or is_confirm(nickname) or is_reject(nickname):
-            return None
-        if len(nickname) > 12:
-            return None
-        return nickname
 
     async def _post(self, path, payload):
         from config.manage_api_client import ManageApiClient
