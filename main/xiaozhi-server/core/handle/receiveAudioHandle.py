@@ -147,8 +147,14 @@ async def no_voice_close_connect(conn: "ConnectionHandler", have_voice):
                 conn.logger.bind(tag=TAG).info("结束对话，无需发送结束提示语")
                 await conn.close()
                 return
-            if getattr(conn, "voice_activation_handler", None) is not None:
-                await conn.close()
+            handler = getattr(conn, "voice_activation_handler", None)
+            if handler is not None:
+                conn.close_after_chat = True
+                give_up = getattr(handler, "give_up_and_sleep", None)
+                if give_up is not None:
+                    await give_up()
+                else:
+                    await conn.close()
                 return
             prompt = end_prompt.get("prompt")
             if not prompt:

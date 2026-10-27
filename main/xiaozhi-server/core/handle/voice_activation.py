@@ -621,8 +621,12 @@ class VoiceActivationSession:
         self._busy = False
         self._phone_epoch = 0
         self._phone_wait_task = None
+        self._asr_ready_task = None
+        self._idle_task = None
+        self._giving_up = False
 
     async def start(self):
+        self._start_idle_watch()
         if self.stage == "skills":
             await self._bind_skills()
             return
@@ -633,7 +637,7 @@ class VoiceActivationSession:
         if self.state == self.ASK_OWNER:
             await self._say("我该怎么称呼您呢？")
             return
-        await self._say("请说出您的手机号码，一共十一位。")
+        await self._ask_for_phone("请说出您的手机号码，一共十一位。")
 
     async def handle_text(self, text):
         if self._busy:
@@ -714,13 +718,13 @@ class VoiceActivationSession:
                     break
         except asyncio.CancelledError:
             return
-        if epoch != self._phone_epoch or self.state != self.ASK_PHONE:
+        if epoch != self._phone_epoch or self.state != self.ASK_PHONE or self._giving_up:
             return
         if not self.phone_digits:
-            await self._say("没有听清手机号，请按顺序说出十一位手机号。")
+            await self._ask_for_phone("没有听清手机号，请按顺序说出十一位手机号。")
             return
         missing = 11 - len(self.phone_digits)
-        await self._say(f"还差{spoken_count(missing)}位，请继续说。")
+        await self._ask_for_phone(f"还差{spoken_count(missing)}位，请继续说。")
 
     async def _accept_phone(self, phone):
         self._invalidate_phone_wait()
@@ -734,7 +738,7 @@ class VoiceActivationSession:
         digits = digits_from_text(text)
         if not digits and is_reject(text):
             self.phone_digits = ""
-            await self._say("好的，请重新按顺序说出十一位手机号。")
+            await self._ask_for_phone("好的，请重新按顺序说出十一位手机号。")
             return
         if not digits:
             self._schedule_phone_wait()
@@ -750,14 +754,14 @@ class VoiceActivationSession:
         self.phone_digits += digits
         if len(self.phone_digits) > 11:
             self.phone_digits = ""
-            await self._say("位数超过十一位了，请重新按顺序说出手机号。")
+            await self._ask_for_phone("位数超过十一位了，请重新按顺序说出手机号。")
             return
         if len(self.phone_digits) < 11:
             self._schedule_phone_wait()
             return
         if not is_mobile_phone(self.phone_digits):
             self.phone_digits = ""
-            await self._say("手机号需要是以1开头的十一位数字，请重新说。")
+            await self._ask_for_phone("手机号需要是以1开头的十一位数字，请重新说。")
             return
         await self._accept_phone(self.phone_digits)
 
@@ -780,7 +784,7 @@ class VoiceActivationSession:
             self.phone = None
             self.phone_digits = ""
             self.state = self.ASK_PHONE
-            await self._say("好的，请重新按顺序说出十一位手机号。")
+            await self._ask_for_phone("好的，请重新按顺序说出十一位手机号。")
             return
         if not is_confirm(text):
             await self._say("请说确认，或者说重说。")
@@ -810,7 +814,7 @@ class VoiceActivationSession:
             self.phone = None
             self.phone_digits = ""
             self.state = self.ASK_PHONE
-            await self._say("好的，请重新按顺序说出十一位手机号。")
+            await self._ask_for_phone("好的，请重新按顺序说出十一位手机号。")
             return
         code = extract_code(text)
         if not code:
@@ -1379,9 +1383,9 @@ class VoiceActivationSession:
         if self.state == self.ASK_PHONE:
             if self.phone_digits:
                 missing = 11 - len(self.phone_digits)
-                await self._say(f"还差{spoken_count(missing)}位，请继续说。")
+                await self._ask_for_phone(f"还差{spoken_count(missing)}位，请继续说。")
             else:
-                await self._say("请按顺序说出十一位手机号。")
+                await self._ask_for_phone("请按顺序说出十一位手机号。")
         elif self.state == self.CONFIRM_PHONE:
             await self._say(f"您的手机号是，{spoken_digits(self.phone or '')}。对吗？")
         elif self.state == self.ASK_CODE:
@@ -1421,6 +1425,136 @@ class VoiceActivationSession:
             await send_display_message(self.conn, display)
         except Exception as exc:
             self.conn.logger.bind(tag=TAG).warning(f"回传识别文本失败: {exc}")
+
+    def _start_idle_watch(self):
+        task = self._idle_task
+        if task is not None and not task.done():
+            return
+        self._idle_task = asyncio.create_task(self._watch_idle_then_sleep())
+
+    def _idle_limit_seconds(self):
+        config = getattr(self.conn, "config", None) or {}
+        try:
+            base = int(config.get("close_connection_no_voice_time", 120))
+        except (TypeError, ValueError):
+            base = 120
+        if base <= 0:
+            base = 120
+        if self.state == self.ASK_CODE:
+            return max(base, 300)
+        return base
+
+    async def _watch_idle_then_sleep(self):
+        """用户没说话才计时。我们自己的提示音不算。到点断开识别并让设备休眠。"""
+        accumulated = 0.0
+        last = time.monotonic()
+        try:
+            while True:
+                await asyncio.sleep(0.5)
+                if self._giving_up or getattr(self.conn, "voice_activation_handler", None) is not self:
+                    return
+                now = time.monotonic()
+                delta = now - last
+                last = now
+                if self._playback_active() or getattr(self.conn, "client_is_speaking", False):
+                    continue
+                last_voice_ms = getattr(self.conn, "vad_last_voice_time", 0) or 0
+                if last_voice_ms and time.time() * 1000 - last_voice_ms < 1000:
+                    accumulated = 0.0
+                    continue
+                accumulated += delta
+                if accumulated >= self._idle_limit_seconds():
+                    await self.give_up_and_sleep()
+                    return
+        except asyncio.CancelledError:
+            return
+
+    async def give_up_and_sleep(self):
+        """长时间没人说话：停掉计费识别，说一声，再断开连接。
+
+        设备回到空闲后会自己休眠。下次唤醒会重连，语音激活按当前进度重新开始。
+        """
+        if self._giving_up:
+            return
+        self._giving_up = True
+        self.conn.close_after_chat = True
+        self._invalidate_phone_wait()
+        ready = self._asr_ready_task
+        if ready is not None and not ready.done():
+            ready.cancel()
+        asr = getattr(self.conn, "asr", None)
+        stop = getattr(asr, "stop_ws_connection", None)
+        if stop is not None:
+            stop()
+        self.conn.logger.bind(tag=TAG).info("语音激活长时间无回应，断开ASR并让设备休眠")
+        await self._say("没有听到回应，我先休息了。唤醒我之后，我们再继续。")
+
+    async def _ask_for_phone(self, text):
+        """先播提示，等提示音快说完再连 ASR。不在整段提示音期间占着计费连接。"""
+        if self._giving_up:
+            return
+        await self._say(text)
+        self._schedule_asr_ready()
+
+    def _schedule_asr_ready(self):
+        task = self._asr_ready_task
+        self._asr_ready_task = None
+        if task is not None and not task.done():
+            task.cancel()
+        self._asr_ready_task = asyncio.create_task(self._connect_when_prompt_ending())
+
+    async def _connect_when_prompt_ending(self):
+        try:
+            await self._wait_until_prompt_tail()
+            if self._giving_up:
+                return
+            await self._connect_asr_before_prompt()
+            while self._playback_active():
+                await asyncio.sleep(0.05)
+            asr = getattr(self.conn, "asr", None)
+            finish = getattr(asr, "finish_prompt_guard", None)
+            if finish is not None:
+                finish()
+        except asyncio.CancelledError:
+            return
+
+    async def _wait_until_prompt_tail(self):
+        """等语音真正开始播放，并且服务端只剩大约 1 秒时再握手。
+
+        设备端还有播放缓冲，这 1 秒够连上，又不会把整段提示音的时长算进识别费用。
+        """
+        saw_audio = False
+        for _ in range(200):
+            controller = getattr(self.conn, "audio_rate_controller", None)
+            queued_ms = None
+            if controller is not None and (len(controller.queue) > 0 or controller.play_position > 0):
+                saw_audio = True
+                queued_ms = len(controller.queue) * controller.interval_ms
+            if saw_audio and not self._tts_still_generating() and queued_ms is not None and queued_ms <= 1000:
+                return
+            if saw_audio and not self._playback_active():
+                return
+            if not saw_audio and not self._playback_active() and not getattr(self.conn, "client_is_speaking", False):
+                return
+            await asyncio.sleep(0.05)
+
+    def _tts_still_generating(self):
+        tts = getattr(self.conn, "tts", None)
+        if tts is None:
+            return False
+        return not tts.tts_text_queue.empty() or not tts.tts_audio_queue.empty()
+
+    async def _connect_asr_before_prompt(self):
+        asr = getattr(self.conn, "asr", None)
+        ensure = getattr(asr, "ensure_connected", None)
+        if ensure is None:
+            return
+        try:
+            await ensure(self.conn)
+        except Exception as exc:
+            logger = getattr(self.conn, "logger", None)
+            if logger is not None:
+                logger.bind(tag=TAG).warning(f"询问手机号前连接ASR失败: {exc}")
 
     async def _say(self, text):
         from core.handle.sendAudioHandle import send_tts_message

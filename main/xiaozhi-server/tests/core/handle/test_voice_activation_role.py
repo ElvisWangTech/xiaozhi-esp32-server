@@ -3,6 +3,7 @@
 import asyncio
 
 from core.handle.voice_activation import (
+    VoiceActivationSession,
     clean_supplement,
     extract_nickname,
     extract_owner_title,
@@ -135,3 +136,110 @@ def test_supplement_and_menu():
     menu = persona_menu(TEMPLATES)
     assert menu.startswith("接下来选一个性格。一，湾湾小何。")
     assert "五，汪汪队长" in menu
+
+
+def test_phone_prompt_connects_asr_as_prompt_ends():
+    order = []
+
+    class _ASR:
+        async def ensure_connected(self, conn):
+            order.append("connect")
+
+        def finish_prompt_guard(self):
+            order.append("listen")
+
+    class _Conn:
+        def __init__(self):
+            self.asr = _ASR()
+            self.logger = _FakeLogger()
+            self.client_is_speaking = False
+
+    session = VoiceActivationSession(_Conn(), stage="bind")
+
+    async def _say(text):
+        order.append(text)
+
+    session._say = _say
+
+    async def _run():
+        await session.start()
+        await session._asr_ready_task
+        session._idle_task.cancel()
+        try:
+            await session._idle_task
+        except asyncio.CancelledError:
+            pass
+
+    asyncio.run(_run())
+    assert order == ["请说出您的手机号码，一共十一位。", "connect", "listen"]
+
+
+def test_silence_packet_only_after_audio_gap():
+    from core.providers.asr import doubao_stream
+
+    sent = []
+    provider = doubao_stream.ASRProvider(
+        {"appid": "1", "access_token": "token", "sample_rate": 16000},
+        True,
+    )
+    ws = object()
+    provider.asr_ws = ws
+    provider._is_stopping = False
+    provider._last_audio_at = 0
+    provider._silence_keepalive_logged = False
+
+    async def _send(_ws, frame):
+        sent.append(frame)
+        provider.asr_ws = None
+
+    provider._send_pcm = _send
+    original_sleep = doubao_stream.asyncio.sleep
+
+    async def _fast_sleep(_seconds):
+        return None
+
+    async def _run():
+        doubao_stream.asyncio.sleep = _fast_sleep
+        try:
+            await provider._silence_before_packet_timeout(ws)
+        finally:
+            doubao_stream.asyncio.sleep = original_sleep
+
+    asyncio.run(_run())
+    assert len(sent) == 1
+    assert len(sent[0]) == 6400
+
+
+def test_long_silence_stops_asr_then_prompts_sleep():
+    order = []
+
+    class _ASR:
+        def stop_ws_connection(self):
+            order.append("stop")
+
+    class _Conn:
+        def __init__(self):
+            self.asr = _ASR()
+            self.logger = _FakeLogger()
+            self.client_is_speaking = False
+            self.close_after_chat = False
+            self.vad_last_voice_time = 0
+            self.config = {"close_connection_no_voice_time": 1}
+            self.voice_activation_handler = None
+
+    session = VoiceActivationSession(_Conn(), stage="bind")
+    session.conn.voice_activation_handler = session
+
+    async def _say(text):
+        order.append(text)
+
+    session._say = _say
+
+    async def _run():
+        session._start_idle_watch()
+        await asyncio.wait_for(session._idle_task, timeout=3)
+
+    asyncio.run(_run())
+    assert order[0] == "stop"
+    assert "休息" in order[1]
+    assert session.conn.close_after_chat is True
