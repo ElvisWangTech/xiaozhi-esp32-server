@@ -180,6 +180,7 @@ public class ConfigServiceImpl implements ConfigService {
         } else if ("skills_quiet".equals(device.getOnboardingStatus())) {
             result.put("voice_onboarding", "skills_quiet");
         }
+        // skills_manual / done 不返回 voice_onboarding：授权技能不再自动拉起，等用户说「绑定技能」。
 
         // 获取聊天记录配置
         Integer chatHistoryConf = agent.getChatHistoryConf();

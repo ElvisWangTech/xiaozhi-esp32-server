@@ -58,8 +58,12 @@ public class VoiceActivationService {
     public static final String ONBOARDING_NICKNAME = "nickname";
     public static final String ONBOARDING_ROLE = "role";
     public static final String ONBOARDING_SKILLS = "skills";
-    /** 用户已经跳过一次。唤醒后仍会自动绑定，失败不再播报。 */
+    /** 用户已经跳过一次。唤醒后仍会重试通用绑定，失败不再播报。 */
     public static final String ONBOARDING_SKILLS_QUIET = "skills_quiet";
+    /**
+     * 授权技能已经自动启动过一次。不再随重连或唤醒自动开通，只接受用户主动说「绑定技能」。
+     */
+    public static final String ONBOARDING_SKILLS_MANUAL = "skills_manual";
     public static final String ONBOARDING_DONE = "done";
     public static final String ACTIVATION_VOICE = "voice";
     private static final String DEFAULT_AGENT_NAME = "小智";
@@ -271,10 +275,22 @@ public class VoiceActivationService {
         cachePortalInvite(mac, portalDeviceId, issueInviteToken(portal, portalDeviceId));
     }
 
-    public VoiceActivationSkillAuthVO startSkillAuth(String macAddress, String service) {
+    public VoiceActivationSkillAuthVO startSkillAuth(String macAddress, String service, boolean rebind) {
         String mac = requireMac(macAddress);
         DeviceEntity device = requireSkillsDevice(mac);
         String normalized = normalizeAuthService(service);
+        // 自动授权只发生在第一次进入 skills。一旦真正发起，就改成手动，避免重连再次自动开通。
+        if (ONBOARDING_SKILLS.equals(device.getOnboardingStatus())) {
+            device.setOnboardingStatus(ONBOARDING_SKILLS_MANUAL);
+            deviceService.updateById(device);
+        }
+        if (!rebind && portalSkillBound(mac, normalized)) {
+            VoiceActivationSkillAuthVO skipped = new VoiceActivationSkillAuthVO();
+            skipped.setService(normalized);
+            skipped.setStatus("already_bound");
+            skipped.setMessage("已经开通");
+            return skipped;
+        }
         PortalInvite invite = requirePortalInvite(mac);
         PortalConfig portal = requirePortalConfig();
         Map<String, Object> body = new HashMap<>();
@@ -350,7 +366,8 @@ public class VoiceActivationService {
         if (device == null) {
             throw new RenException(ErrorCode.DEVICE_NOT_EXIST);
         }
-        if (!isSkillsOnboarding(device.getOnboardingStatus())) {
+        String status = device.getOnboardingStatus();
+        if (!ONBOARDING_SKILLS.equals(status) && !ONBOARDING_SKILLS_QUIET.equals(status)) {
             throw new RenException("当前不需要绑定技能");
         }
         if (!ONBOARDING_SKILLS_QUIET.equals(device.getOnboardingStatus())) {
@@ -362,7 +379,16 @@ public class VoiceActivationService {
     @Transactional(rollbackFor = Exception.class)
     public void completeSkills(String macAddress) {
         String mac = requireMac(macAddress);
-        DeviceEntity device = requireSkillsDevice(mac);
+        DeviceEntity device = deviceService.getDeviceByMacAddress(mac);
+        if (device == null) {
+            throw new RenException(ErrorCode.DEVICE_NOT_EXIST);
+        }
+        if (ONBOARDING_DONE.equals(device.getOnboardingStatus())) {
+            return;
+        }
+        if (!isSkillsOnboarding(device.getOnboardingStatus())) {
+            throw new RenException("当前不需要绑定技能");
+        }
         finishPortalInvite(mac);
         device.setOnboardingStatus(ONBOARDING_DONE);
         deviceService.updateById(device);
@@ -423,7 +449,9 @@ public class VoiceActivationService {
     }
 
     private static boolean isSkillsOnboarding(String status) {
-        return ONBOARDING_SKILLS.equals(status) || ONBOARDING_SKILLS_QUIET.equals(status);
+        return ONBOARDING_SKILLS.equals(status)
+                || ONBOARDING_SKILLS_QUIET.equals(status)
+                || ONBOARDING_SKILLS_MANUAL.equals(status);
     }
 
     private DeviceEntity requireSkillsDevice(String mac) {
@@ -431,7 +459,8 @@ public class VoiceActivationService {
         if (device == null) {
             throw new RenException(ErrorCode.DEVICE_NOT_EXIST);
         }
-        if (!isSkillsOnboarding(device.getOnboardingStatus())) {
+        if (!isSkillsOnboarding(device.getOnboardingStatus())
+                && !ONBOARDING_DONE.equals(device.getOnboardingStatus())) {
             throw new RenException("当前不需要绑定技能");
         }
         if (StringUtils.isBlank(device.getPhone())) {
@@ -446,6 +475,20 @@ public class VoiceActivationService {
             throw new RenException(ErrorCode.AGENT_NOT_FOUND);
         }
         return agent;
+    }
+
+    private boolean portalSkillBound(String mac, String service) {
+        try {
+            PortalConfig portal = requirePortalConfig();
+            Map<String, Object> body = new HashMap<>();
+            body.put("mac_address", mac);
+            JsonNode view = callPortalJson(portal.baseUrl, portal.bindToken, null,
+                    HttpMethod.POST, "/api/device/auth-status", body);
+            return view.path(service).asBoolean(false);
+        } catch (Exception e) {
+            log.info("auth bound check skipped: service={} err={}", service, e.getMessage());
+            return false;
+        }
     }
 
     private PortalConfig requirePortalConfig() {

@@ -75,13 +75,29 @@ async def startToChat(conn: "ConnectionHandler", text):
     else:
         conn.current_speaker = None
 
+    if getattr(conn, "voice_activation_handler", None) is not None:
+        await conn.voice_activation_handler.handle_text(actual_text)
+        return
+
+    from core.handle.voice_activation import is_rebind_skills, is_skills_command, start_skills_onboarding
+
+    # 唤醒后的静默重试还没挂上会话时，用户已经说了绑定技能，不能把这句话丢掉。
+    if (
+        getattr(conn, "voice_onboarding", None) in ("skills", "skills_quiet")
+        and is_skills_command(actual_text)
+    ):
+        conn.speak_skill_failure = True
+        conn.voice_onboarding = "skills"
+        await start_skills_onboarding(
+            conn,
+            announce="好的，重新绑定授权技能。" if is_rebind_skills(actual_text) else "好的，开始绑定技能。",
+            rebind=is_rebind_skills(actual_text),
+        )
+        return
+
     if getattr(conn, "voice_onboarding", None) in ("nickname", "role", "skills", "skills_quiet") and getattr(
         conn, "voice_activation_handler", None
     ) is None:
-        return
-
-    if getattr(conn, "voice_activation_handler", None) is not None:
-        await conn.voice_activation_handler.handle_text(actual_text)
         return
 
     if conn.need_bind:
@@ -100,11 +116,14 @@ async def startToChat(conn: "ConnectionHandler", text):
     if conn.client_is_speaking and conn.client_listen_mode != "manual":
         await handleAbortMessage(conn)
 
-    from core.handle.voice_activation import is_skills_command, start_skills_onboarding
-
     # 引导失败或稍后后，用户可主动说「绑定技能」重新进入（接口会校验 onboarding_status）
     if is_skills_command(actual_text):
-        await start_skills_onboarding(conn, announce="好的，开始绑定技能。")
+        rebind = is_rebind_skills(actual_text)
+        await start_skills_onboarding(
+            conn,
+            announce="好的，重新绑定授权技能。" if rebind else "好的，开始绑定技能。",
+            rebind=rebind,
+        )
         return
 
     # 首先进行意图分析，使用实际文本内容

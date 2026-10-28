@@ -373,3 +373,247 @@ def test_first_skill_skip_is_spoken_later_failure_is_silent():
     assert conn.voice_activation_handler is None
     assert conn.skills_pending is True
     assert conn.voice_onboarding is None
+
+
+def test_user_asked_skill_bind_announces_failure_during_quiet_retry():
+    said = []
+
+    class _Conn:
+        def __init__(self):
+            self.logger = _FakeLogger()
+            self.headers = {"device-id": "aa:bb"}
+            self.voice_onboarding = "skills_quiet"
+            self.voice_activation_handler = None
+            self.skills_pending = False
+            self.speak_skill_failure = False
+            self.config = {}
+
+    conn = _Conn()
+    session = VoiceActivationSession(conn, stage="skills")
+    conn.voice_activation_handler = session
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def _post(path, payload):
+        started.set()
+        await release.wait()
+        raise RuntimeError("API返回错误: 技能绑定失败")
+
+    async def _say(text):
+        said.append(text)
+
+    async def _send_recognized_text(text):
+        return None
+
+    session._post = _post
+    session._say = _say
+    session._send_recognized_text = _send_recognized_text
+
+    async def _run():
+        task = asyncio.create_task(session._bind_skills())
+        await started.wait()
+        await session.handle_text("绑定技能。")
+        release.set()
+        await task
+
+    asyncio.run(_run())
+    assert any("开始绑定技能" in text for text in said)
+    assert any("技能绑定失败" in text for text in said)
+    assert conn.voice_activation_handler is session
+
+
+def _skill_conn(onboarding="skills"):
+    class _Conn:
+        def __init__(self):
+            self.logger = _FakeLogger()
+            self.headers = {"device-id": "aa:bb"}
+            self.voice_onboarding = onboarding
+            self.voice_activation_handler = None
+            self.skills_pending = False
+
+    return _Conn()
+
+
+def test_later_skill_bind_skips_authorization():
+    said = []
+    posts = []
+    conn = _skill_conn("skills_quiet")
+    session = VoiceActivationSession(conn, stage="skills", include_auth=False)
+    conn.voice_activation_handler = session
+
+    async def _post(path, payload):
+        posts.append(path)
+
+    async def _say(text):
+        said.append(text)
+
+    session._post = _post
+    session._say = _say
+
+    asyncio.run(session._bind_skills())
+    assert posts == [
+        "/device/voice-activation/skills",
+        "/device/voice-activation/skills/complete",
+    ]
+    assert said == ["通用技能已绑定。开通瑞幸或滴滴可以说绑定技能。"]
+    assert conn.voice_activation_handler is None
+    assert conn.voice_onboarding is None
+
+
+def test_first_skill_bind_starts_authorization():
+    said = []
+    posts = []
+    auth_started = []
+    conn = _skill_conn("skills")
+    session = VoiceActivationSession(conn, stage="skills", include_auth=True)
+    conn.voice_activation_handler = session
+
+    async def _post(path, payload):
+        posts.append(path)
+
+    async def _say(text):
+        said.append(text)
+
+    async def _run_next_auth():
+        auth_started.append(True)
+
+    session._post = _post
+    session._say = _say
+    session._run_next_auth = _run_next_auth
+
+    asyncio.run(session._bind_skills())
+    assert posts == ["/device/voice-activation/skills"]
+    assert auth_started == [True]
+    assert any(text == "通用技能已绑定。" for text in said)
+    assert conn.voice_activation_handler is session
+
+
+def test_user_request_during_quiet_bind_starts_authorization():
+    said = []
+    auth_started = []
+    conn = _skill_conn("skills_quiet")
+    session = VoiceActivationSession(conn, stage="skills", include_auth=False)
+    conn.voice_activation_handler = session
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def _post(path, payload):
+        started.set()
+        await release.wait()
+
+    async def _say(text):
+        said.append(text)
+
+    async def _send_recognized_text(text):
+        return None
+
+    async def _run_next_auth():
+        auth_started.append(True)
+
+    session._post = _post
+    session._say = _say
+    session._send_recognized_text = _send_recognized_text
+    session._run_next_auth = _run_next_auth
+
+    async def _run():
+        task = asyncio.create_task(session._bind_skills())
+        await started.wait()
+        await session.handle_text("绑定技能。")
+        release.set()
+        await task
+
+    asyncio.run(_run())
+    assert auth_started == [True]
+    assert any(text == "通用技能已绑定。" for text in said)
+
+
+def test_bound_auth_skill_is_skipped_unless_rebind():
+    said = []
+    payloads = []
+    conn = _skill_conn()
+    session = VoiceActivationSession(conn, stage="skills", include_auth=True)
+    session.auth_queue = [("luckin", "瑞幸咖啡"), ("didi", "滴滴出行")]
+
+    async def _post(path, payload):
+        payloads.append(payload)
+        service = payload.get("service")
+        if service == "luckin":
+            return {"status": "already_bound", "service": "luckin"}
+        return {"status": "waiting_code", "service": "didi", "taskId": "t2"}
+
+    async def _say(text):
+        said.append(text)
+
+    async def _handle_auth_result(result):
+        said.append("handle:" + str((result or {}).get("status")))
+
+    session._post = _post
+    session._say = _say
+    session._handle_auth_result = _handle_auth_result
+
+    asyncio.run(session._run_next_auth())
+    assert payloads[0]["rebind"] is False
+    assert "瑞幸咖啡已经开通。" in said
+    assert "正在开通瑞幸咖啡。" not in said
+    assert "正在开通滴滴出行。" in said
+    assert "handle:waiting_code" in said
+
+    said.clear()
+    payloads.clear()
+    session.rebind_auth = True
+    session.auth_queue = [("luckin", "瑞幸咖啡")]
+
+    async def _post_rebind(path, payload):
+        payloads.append(payload)
+        return {"status": "waiting_code", "service": "luckin", "taskId": "t3"}
+
+    session._post = _post_rebind
+    asyncio.run(session._run_next_auth())
+    assert payloads[0]["rebind"] is True
+    assert "正在开通瑞幸咖啡。" in said
+    assert "瑞幸咖啡已经开通。" not in said
+
+
+def test_submitted_code_does_not_repeat_prompt_and_announces_success():
+    import core.handle.voice_activation as voice_activation
+
+    said = []
+    conn = _skill_conn()
+    session = VoiceActivationSession(conn, stage="skills")
+    session.auth_label = "瑞幸咖啡"
+    session.auth_task_id = "t1"
+    session.state = session.ASK_AUTH_CODE
+    replies = [
+        {"status": "pending", "taskId": "t1"},
+        {"status": "waiting_code", "taskId": "t1", "message": "已向手机发送验证码"},
+        {"status": "done", "taskId": "t1"},
+    ]
+
+    async def _post(path, payload):
+        return replies.pop(0)
+
+    async def _say(text):
+        said.append(text)
+
+    async def _run_next_auth():
+        return None
+
+    session._post = _post
+    session._say = _say
+    session._run_next_auth = _run_next_auth
+    original_sleep = voice_activation.asyncio.sleep
+
+    async def _sleep(_seconds):
+        return None
+
+    voice_activation.asyncio.sleep = _sleep
+    try:
+        asyncio.run(session._on_auth_code("327124"))
+    finally:
+        voice_activation.asyncio.sleep = original_sleep
+
+    spoken = "".join(said)
+    assert "请说出瑞幸咖啡短信里的验证码" not in spoken
+    assert "验证码已提交，正在登录。" in spoken
+    assert "瑞幸咖啡已开通。" in spoken
+    assert replies == []

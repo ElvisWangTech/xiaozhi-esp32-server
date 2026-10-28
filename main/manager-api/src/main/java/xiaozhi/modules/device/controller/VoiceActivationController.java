@@ -86,7 +86,8 @@ public class VoiceActivationController {
     @Operation(summary = "启动授权技能自动化（滴滴、瑞幸）")
     public Result<VoiceActivationSkillAuthVO> skillsAuth(@Valid @RequestBody VoiceActivationSkillAuthDTO dto) {
         return new Result<VoiceActivationSkillAuthVO>()
-                .ok(voiceActivationService.startSkillAuth(dto.getMacAddress(), dto.getService()));
+                .ok(voiceActivationService.startSkillAuth(
+                        dto.getMacAddress(), dto.getService(), Boolean.TRUE.equals(dto.getRebind())));
     }
 
     @PostMapping("/skills/auth/status")

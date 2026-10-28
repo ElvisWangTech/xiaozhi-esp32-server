@@ -14,4 +14,7 @@ public class VoiceActivationSkillAuthDTO {
     @NotBlank(message = "授权服务不能为空")
     @Schema(description = "授权服务：didi / luckin")
     private String service;
+
+    @Schema(description = "用户明确要求重新绑定时为 true，否则已开通的技能直接跳过")
+    private Boolean rebind;
 }

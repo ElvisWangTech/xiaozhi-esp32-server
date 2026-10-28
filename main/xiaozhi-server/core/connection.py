@@ -833,7 +833,11 @@ class ConnectionHandler:
     async def _start_skills_onboarding(self):
         from core.handle.voice_activation import VoiceActivationSession
 
-        self.voice_activation_handler = VoiceActivationSession(self, stage="skills")
+        # skills 才会自动跑授权；skills_quiet 只重试通用绑定。
+        include_auth = self.voice_onboarding == "skills"
+        self.voice_activation_handler = VoiceActivationSession(
+            self, stage="skills", include_auth=include_auth
+        )
         await self.voice_activation_handler.start()
 
     async def complete_voice_bind_setup(self):
