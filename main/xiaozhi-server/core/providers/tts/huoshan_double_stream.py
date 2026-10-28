@@ -152,6 +152,8 @@ class TTSProvider(TTSProviderBase):
         self.resource_type = True if self.resource_id == "seed-tts-2.0" else False
         self.report_on_last = self.resource_type
         self.activate_session = False
+        self._tts_epoch = None
+        self._abort_cancel_sent = False
         if config.get("private_voice"):
             self.voice = config.get("private_voice")
         else:
@@ -387,6 +389,8 @@ class TTSProvider(TTSProviderBase):
 
                 # 发送每个确定的文本片段
                 for txt in confirmed_texts:
+                    if getattr(self.conn, "client_abort", False):
+                        return
                     if txt and self.ws:
                         await self.send_text(self.voice, txt, self.conn.sentence_id)
 
@@ -403,7 +407,9 @@ class TTSProvider(TTSProviderBase):
 
     async def start_session(self, session_id):
         logger.bind(tag=TAG).debug(f"开始会话～～{session_id}")
-        try:       
+        try:
+            self._tts_epoch = getattr(self.conn, "tts_epoch", 0)
+            self._abort_cancel_sent = False
             # 上个会话处于激活状态时关闭上个连接新建链接
             if self.activate_session:
                 await self.close()
@@ -492,6 +498,31 @@ class TTSProvider(TTSProviderBase):
                 pass
             self.ws = None
 
+    async def _discard_tts_after_abort(self):
+        """打断后立刻停掉这一轮合成。不走 close()，避免监听任务取消自己。"""
+        if self._abort_cancel_sent:
+            return
+        self._abort_cancel_sent = True
+        logger.bind(tag=TAG).info("播放被打断，停止继续合成")
+        ws = self.ws
+        if ws is None:
+            return
+        try:
+            header = Header(
+                message_type=FULL_CLIENT_REQUEST,
+                message_type_specific_flags=MsgTypeFlagWithEvent,
+                serial_method=JSON,
+            ).as_bytes()
+            if self.enable_ws_reuse:
+                optional = Optional(
+                    event=EVENT_CancelSession, sessionId=self.conn.sentence_id
+                ).as_bytes()
+            else:
+                optional = Optional(event=EVENT_FinishConnection).as_bytes()
+            await self.send_event(ws, header, optional, str.encode("{}"))
+        except Exception as exc:
+            logger.bind(tag=TAG).info(f"打断时取消TTS会话失败: {exc}")
+
     async def _start_monitor_tts_response(self):
         """监听TTS响应 - 长期运行"""
         try:
@@ -508,6 +539,14 @@ class TTSProvider(TTSProviderBase):
 
                     # 只处理当前活跃会话的响应；旧会话事件不影响当前 activate_session
                     if res.optional.sessionId and self.conn.sentence_id != res.optional.sessionId:
+                        continue
+
+                    if getattr(self.conn, "client_abort", False) and res.optional.event in (
+                        EVENT_TTSSentenceStart,
+                        EVENT_TTSResponse,
+                        EVENT_TTSSentenceEnd,
+                    ):
+                        await self._discard_tts_after_abort()
                         continue
 
                     if res.optional.event == EVENT_SessionCanceled:

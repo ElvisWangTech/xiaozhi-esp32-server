@@ -700,12 +700,20 @@ class VoiceActivationSession:
             return
         await self._ask_for_phone("请说出您的手机号码，一共十一位。")
 
+    def _allow_barge_in(self):
+        return self.state not in (self.ASK_PHONE, self.ASK_CODE, self.ASK_AUTH_CODE)
+
     async def handle_text(self, text):
         if self._busy:
             return
-        # 正在播报时不接收，避免号码中间的停顿被当成新的一句话。
-        if self._playback_active():
-            return
+        # 报号、报验证码时不接收，避免提示音和中间停顿被当成新的一句话。
+        # 确认类问题（对不对、有没有补充）允许打断，否则「对」会在播报尾巴里被丢掉。
+        if self._playback_active() or getattr(self.conn, "client_is_speaking", False):
+            if not self._allow_barge_in():
+                return
+            from core.handle.abortHandle import handleAbortMessage
+
+            await handleAbortMessage(self.conn)
         content = unwrap_user_text(text)
         if not content:
             return
@@ -1102,10 +1110,13 @@ class VoiceActivationSession:
             await self._say(api_error_text(exc))
             return
         await self.conn.refresh_agent_prompt()
+        await self._say("角色性格绑定成功。")
+        await self._wait_spoken()
         self.conn.voice_onboarding = "skills"
         self.stage = "skills"
         self.include_auth = True
-        await self._say("好的。正在绑定技能。")
+        await self._say("接下来绑定技能。")
+        await self._wait_spoken()
         await self._bind_skills()
 
     def _skills_quiet(self):

@@ -116,6 +116,16 @@ class TTSProviderBase(ABC):
         )
 
     def handle_opus(self, opus_data: bytes):
+        conn = getattr(self, "conn", None)
+        if conn is not None and getattr(conn, "client_abort", False):
+            return
+        epoch = getattr(self, "_tts_epoch", None)
+        if (
+            conn is not None
+            and epoch is not None
+            and epoch != getattr(conn, "tts_epoch", 0)
+        ):
+            return
         logger.bind(tag=TAG).debug(f"推送数据到队列里面帧数～～ {len(opus_data)}")
         self.tts_audio_queue.put((SentenceType.MIDDLE, opus_data, None, getattr(self, 'current_sentence_id', None)))
 

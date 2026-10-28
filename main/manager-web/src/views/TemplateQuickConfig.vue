@@ -193,6 +193,15 @@ export default {
       });
     },
     
+    roleTemplateLlmId(templateLlmId, currentLlmId) {
+      if (templateLlmId && templateLlmId !== "LLM_MimoLLM") {
+        return templateLlmId;
+      }
+      if (currentLlmId && currentLlmId !== "LLM_MimoLLM") {
+        return currentLlmId;
+      }
+      return "LLM_DeepSeekLLM";
+    },
     // 应用模板数据
     applyTemplateData(templateData) {
       this.form = {
@@ -205,7 +214,7 @@ export default {
           ttsModelId: templateData.ttsModelId || this.form.model.ttsModelId,
           vadModelId: templateData.vadModelId || this.form.model.vadModelId,
           asrModelId: templateData.asrModelId || this.form.model.asrModelId,
-          llmModelId: templateData.llmModelId || this.form.model.llmModelId,
+          llmModelId: this.roleTemplateLlmId(templateData.llmModelId, this.form.model.llmModelId),
           vllmModelId: templateData.vllmModelId || this.form.model.vllmModelId,
           memModelId: templateData.memModelId || this.form.model.memModelId,
           intentModelId: templateData.intentModelId || this.form.model.intentModelId

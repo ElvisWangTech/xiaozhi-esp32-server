@@ -617,3 +617,295 @@ def test_submitted_code_does_not_repeat_prompt_and_announces_success():
     assert "验证码已提交，正在登录。" in spoken
     assert "瑞幸咖啡已开通。" in spoken
     assert replies == []
+
+
+def test_short_definite_text_is_committed():
+    from core.providers.asr.doubao_stream import should_commit_definite
+
+    assert should_commit_definite("对。", False, False, 8) is True
+    assert should_commit_definite("", False, False, 40) is False
+    assert should_commit_definite("对", True, False, 20) is False
+    assert should_commit_definite("对", True, True, 3) is True
+
+
+def test_mimo_asr_receives_audio_artifacts():
+    import inspect
+
+    from core.providers.asr.mimo import ASRProvider
+
+    params = list(inspect.signature(ASRProvider.speech_to_text).parameters)
+    assert params[:4] == ["self", "opus_data", "session_id", "artifacts"]
+
+
+def test_confirm_reply_interrupts_playback():
+    import core.handle.abortHandle as abort_mod
+
+    dispatched = []
+    aborted = []
+
+    class _Queues:
+        def __init__(self, size):
+            self._size = size
+
+        def empty(self):
+            return self._size == 0
+
+    class _Conn:
+        def __init__(self):
+            self.logger = _FakeLogger()
+            self.config = {}
+            self.headers = {"device-id": "aa:bb"}
+            self.client_is_speaking = True
+            self.tts = type("T", (), {"tts_text_queue": _Queues(1), "tts_audio_queue": _Queues(0)})()
+
+    conn = _Conn()
+    session = VoiceActivationSession(conn, stage="role")
+    session.state = session.CONFIRM_OWNER
+    session.owner_title = "意为"
+
+    async def _abort(target):
+        aborted.append(True)
+        target.client_is_speaking = False
+
+    async def _send(_text):
+        return None
+
+    async def _dispatch(text):
+        dispatched.append(text)
+
+    original = abort_mod.handleAbortMessage
+    abort_mod.handleAbortMessage = _abort
+    session._send_recognized_text = _send
+    session._dispatch = _dispatch
+    try:
+        asyncio.run(session.handle_text("对。"))
+    finally:
+        abort_mod.handleAbortMessage = original
+
+    assert aborted == [True]
+    assert dispatched == ["对。"]
+    assert conn.client_is_speaking is False
+
+
+def test_role_bind_announces_success_before_skills():
+    order = []
+
+    class _Conn:
+        def __init__(self):
+            self.logger = _FakeLogger()
+            self.headers = {"device-id": "aa:bb"}
+
+        async def refresh_agent_prompt(self):
+            order.append("refresh")
+
+    session = VoiceActivationSession(_Conn(), stage="role")
+    session.owner_title = "意为"
+    session.persona_name = "湾湾小何"
+
+    async def _post(_path, _payload):
+        order.append("save")
+
+    async def _say(text):
+        order.append(text)
+
+    async def _wait():
+        order.append("wait")
+
+    async def _bind():
+        order.append("bind")
+
+    session._post = _post
+    session._say = _say
+    session._wait_spoken = _wait
+    session._bind_skills = _bind
+    asyncio.run(session._save_role(""))
+    assert order == [
+        "save",
+        "refresh",
+        "角色性格绑定成功。",
+        "wait",
+        "接下来绑定技能。",
+        "wait",
+        "bind",
+    ]
+
+
+def _speaking_conn(provider):
+    import threading
+
+    class _Conn:
+        client_listen_mode = "auto"
+        client_have_voice = False
+        client_voice_stop = False
+        client_is_speaking = True
+        client_aec = False
+        voice_activation_handler = None
+        asr_audio = []
+        stop_event = threading.Event()
+
+        def __init__(self):
+            self.asr = provider
+
+    return _Conn()
+
+
+def test_barge_in_uploads_preroll_without_waiting_for_send():
+    """播放中打断要带上前面几帧，而且不能等网络发完才收下一帧。"""
+    from core.providers.asr.doubao_stream import ASRProvider, _BARGE_IN_FRAMES
+
+    provider = ASRProvider({}, True)
+    conn = _speaking_conn(provider)
+    provider.asr_ws = object()
+    provider.is_processing = True
+    sent = []
+    release = asyncio.Event()
+
+    async def _slow_send(_ws, frame, remember=True):
+        sent.append(frame)
+        await release.wait()
+
+    provider._send_pcm = _slow_send
+
+    async def _run():
+        import core.handle.abortHandle as abort_mod
+
+        aborted = []
+
+        async def _abort(_conn):
+            aborted.append(True)
+
+        original = abort_mod.handleAbortMessage
+        abort_mod.handleAbortMessage = _abort
+        try:
+            for index in range(_BARGE_IN_FRAMES - 1):
+                await provider.receive_audio(conn, bytes([index]), True)
+            assert provider._unsent == []
+            assert provider._upload_task is None
+            await asyncio.wait_for(
+                provider.receive_audio(conn, bytes([_BARGE_IN_FRAMES]), True),
+                timeout=0.5,
+            )
+            await asyncio.sleep(0)
+            assert len(provider._barge_preroll) == 0
+            assert provider._barge_in is True
+            assert aborted == [True]
+            assert bytes([_BARGE_IN_FRAMES]) in provider._unsent or bytes([_BARGE_IN_FRAMES]) in sent
+            assert len(provider._unsent) + len(sent) == _BARGE_IN_FRAMES
+            await asyncio.wait_for(
+                provider.receive_audio(conn, b"\x06", True),
+                timeout=0.5,
+            )
+            assert b"\x06" in provider._unsent
+        finally:
+            abort_mod.handleAbortMessage = original
+            release.set()
+            provider._is_stopping = True
+            provider._unsent = []
+            task = provider._upload_task
+            if task is not None and not task.done():
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+
+    asyncio.run(_run())
+
+
+def test_reconnect_flush_does_not_block_the_mic_thread():
+    from core.providers.asr.doubao_stream import ASRProvider, _BARGE_IN_FRAMES
+
+    provider = ASRProvider({}, True)
+    conn = _speaking_conn(provider)
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def _slow_open(_conn, flush_cache=True):
+        started.set()
+        await release.wait()
+        return False
+
+    provider._open_session = _slow_open
+
+    async def _run():
+        import core.handle.abortHandle as abort_mod
+
+        async def _abort(_conn):
+            return None
+
+        original = abort_mod.handleAbortMessage
+        abort_mod.handleAbortMessage = _abort
+        try:
+            for index in range(_BARGE_IN_FRAMES):
+                await asyncio.wait_for(
+                    provider.receive_audio(conn, bytes([index]), True),
+                    timeout=0.5,
+                )
+            await asyncio.wait_for(started.wait(), timeout=0.5)
+            assert provider._session_alive() is False
+            assert len(provider._unsent) == _BARGE_IN_FRAMES
+        finally:
+            abort_mod.handleAbortMessage = original
+            provider._is_stopping = True
+            provider._want_connect = False
+            provider._unsent = []
+            release.set()
+            task = provider._upload_task
+            if task is not None and not task.done():
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+
+    asyncio.run(_run())
+
+
+def test_phone_prompt_is_not_treated_as_barge_in():
+    from core.providers.asr.doubao_stream import ASRProvider, _BARGE_IN_FRAMES
+
+    provider = ASRProvider({}, True)
+    conn = _speaking_conn(provider)
+
+    class _Handler:
+        def _allow_barge_in(self):
+            return False
+
+    conn.voice_activation_handler = _Handler()
+
+    async def _run():
+        for index in range(_BARGE_IN_FRAMES + 2):
+            await provider.receive_audio(conn, bytes([index]), True)
+        assert provider._unsent == []
+        assert provider._barge_in is False
+        assert provider._barge_abort_sent is False
+        assert provider._upload_task is None
+
+    asyncio.run(_run())
+
+
+def test_aborted_tts_audio_is_not_queued():
+    import queue
+
+    from core.providers.tts.base import TTSProviderBase
+
+    class _Conn:
+        client_abort = True
+        tts_epoch = 1
+
+    class _Player(TTSProviderBase):
+        async def text_to_speak(self, text, output_file):
+            return None
+
+    player = _Player.__new__(_Player)
+    player.conn = _Conn()
+    player.tts_audio_queue = queue.Queue()
+    player._tts_epoch = 0
+    player.handle_opus(b"old")
+    assert player.tts_audio_queue.empty()
+    player.conn.client_abort = False
+    player.handle_opus(b"late")
+    assert player.tts_audio_queue.empty()
+    player._tts_epoch = 1
+    player.handle_opus(b"new")
+    assert player.tts_audio_queue.get_nowait()[1] == b"new"

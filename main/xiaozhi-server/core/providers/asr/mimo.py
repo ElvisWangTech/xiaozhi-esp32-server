@@ -65,7 +65,6 @@ class ASRProvider(ASRProviderBase):
         self,
         opus_data: List[bytes],
         session_id: str,
-        audio_format="opus",
         artifacts=None,
     ) -> Tuple[Optional[str], Optional[str]]:
         file_path = None
