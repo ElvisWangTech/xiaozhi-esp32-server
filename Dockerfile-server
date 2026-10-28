@@ -1,6 +1,14 @@
-# 生产镜像，仅包含应用代码
+# 生产镜像：在预构建 server-base 上对齐当前 requirements，再放入应用代码
 ARG BASE_IMAGE=ghcr.io/xinnan-tech/xiaozhi-esp32-server:server-base
 FROM ${BASE_IMAGE}
+
+# 拉取的 server-base 往往仍是 mcp 1.x（只有 httpx）。
+# 本仓库 mcp 2.x 在 import 时就需要 httpx2，缺了会直接 ModuleNotFoundError。
+# 依赖单独一层：requirements 不变时，改代码不会重新安装。
+COPY main/xiaozhi-server/requirements.txt /tmp/requirements.txt
+RUN pip install --no-cache-dir -r /tmp/requirements.txt --default-timeout=120 --retries 5 \
+        --extra-index-url https://pypi.org/simple \
+    && rm -f /tmp/requirements.txt
 
 COPY main/xiaozhi-server .
 
