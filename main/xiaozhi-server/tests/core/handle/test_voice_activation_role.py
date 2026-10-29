@@ -3,17 +3,20 @@
 import asyncio
 
 from core.handle.voice_activation import (
+    REPEAT,
     VoiceActivationSession,
     apply_persona_voice,
     clean_supplement,
+    confirm_intent,
     extract_nickname,
     extract_owner_title,
-    is_no_supplement,
-    match_persona,
     parse_nickname_reply,
     parse_persona_catalog,
     persona_menu,
+    resolve_auth_reply,
     resolve_persona,
+    resolve_skill_retry,
+    resolve_skills_request,
     supplement_text,
 )
 
@@ -35,6 +38,7 @@ class _FakeConn:
         self.calls = []
         self.logger = _FakeLogger()
         self.llm = self
+        self.config = {}
 
     def response_no_stream(self, system_prompt, user_prompt):
         self.calls.append((system_prompt, user_prompt))
@@ -63,27 +67,28 @@ def test_extract_nickname_uses_llm_for_sentences():
     assert asyncio.run(extract_nickname(corrected, "不对，你的昵称是小美")) == "小美"
 
 
-def test_extract_nickname_bare_name_skips_llm_and_rejects_noise():
-    conn = _FakeConn('{"nickname":"不该调用"}')
+def test_extract_nickname_always_asks_the_model():
+    conn = _FakeConn('{"intent":"answer","nickname":"小智"}')
     assert asyncio.run(extract_nickname(conn, "小智")) == "小智"
-    assert conn.calls == []
-    assert asyncio.run(extract_nickname(conn, "小智吧")) == "小智"
-    assert asyncio.run(extract_nickname(conn, "确认")) is None
-    assert asyncio.run(extract_nickname(conn, "不对")) is None
-    assert conn.calls == []
-    assert asyncio.run(extract_nickname(_FakeConn('{"nickname":""}'), "你的昵称是")) is None
+    assert conn.calls
+    assert asyncio.run(extract_nickname(_FakeConn('{"intent":"answer","nickname":"小智"}'), "小智吧")) == "小智"
+    assert asyncio.run(extract_nickname(_FakeConn('{"intent":"unclear","nickname":""}'), "确认")) is None
+    assert asyncio.run(extract_nickname(_FakeConn('{"intent":"unclear","nickname":""}'), "不对")) is None
+    assert asyncio.run(extract_nickname(_FakeConn('{"intent":"unclear","nickname":""}'), "你的昵称是")) is None
     long_name = "一二三四五六七八九十一二三"
-    assert asyncio.run(extract_nickname(_FakeConn('{"nickname":"' + long_name + '"}'), long_name)) is None
+    assert asyncio.run(extract_nickname(_FakeConn('{"intent":"answer","nickname":"' + long_name + '"}'), long_name)) is None
     failed = _FakeConn(RuntimeError("down"))
     assert asyncio.run(extract_nickname(failed, "就叫小美")) is None
+    repeated = _FakeConn('{"intent":"repeat","nickname":""}')
+    assert asyncio.run(extract_nickname(repeated, "没听清")) is REPEAT
 
 
 def test_extract_owner_title():
-    bare = _FakeConn('{"title":"不该调用"}')
+    bare = _FakeConn('{"intent":"answer","title":"老板"}')
     assert asyncio.run(extract_owner_title(bare, "老板")) == "老板"
-    assert asyncio.run(extract_owner_title(bare, "嗯，老板")) == "老板"
-    assert asyncio.run(extract_owner_title(bare, "确认")) is None
-    assert bare.calls == []
+    assert bare.calls
+    assert asyncio.run(extract_owner_title(_FakeConn('{"intent":"answer","title":"老板"}'), "嗯，老板")) == "老板"
+    assert asyncio.run(extract_owner_title(_FakeConn('{"intent":"unclear","title":""}'), "确认")) is None
 
     called = _FakeConn('{"title":"张先生"}')
     assert asyncio.run(extract_owner_title(called, "你可以称呼我为张先生")) == "张先生"
@@ -172,45 +177,208 @@ def test_apply_persona_voice_updates_tts():
     assert apply_persona_voice(tts, "") is False
 
 
-def test_match_persona_by_name_or_index():
-    assert match_persona("英语老师", TEMPLATES) == "英语老师"
-    assert match_persona("我选汪汪队长", TEMPLATES) == "汪汪队长"
-    assert match_persona("二", TEMPLATES) == "星际游子"
-    assert match_persona("第二个", TEMPLATES) == "星际游子"
-    assert match_persona("第3个", TEMPLATES) == "英语老师"
-    assert match_persona("就用第五个", TEMPLATES) == "汪汪队长"
-    assert match_persona("确认", TEMPLATES) is None
-    assert match_persona("不要英语老师", TEMPLATES) is None
-    assert match_persona("十", TEMPLATES) is None
+def test_resolve_persona_always_asks_the_model():
+    named = _FakeConn('{"intent":"answer","template":"英语老师"}')
+    assert asyncio.run(resolve_persona(named, "英语老师", TEMPLATES)) == "英语老师"
+    assert named.calls
+    indexed = _FakeConn('{"intent":"answer","template":"星际游子"}')
+    assert asyncio.run(resolve_persona(indexed, "第二个", TEMPLATES)) == "星际游子"
+    assert indexed.calls
 
-
-def test_resolve_persona_uses_llm_for_description():
-    local = _FakeConn('{"template":"不该调用"}')
-    assert asyncio.run(resolve_persona(local, "英语老师", TEMPLATES)) == "英语老师"
-    assert asyncio.run(resolve_persona(local, "第二个", TEMPLATES)) == "星际游子"
-    assert local.calls == []
-
-    described = _FakeConn('{"template":"湾湾小何"}')
+    described = _FakeConn('{"intent":"answer","template":"湾湾小何"}')
     assert asyncio.run(resolve_persona(described, "我想要那个台湾女生", TEMPLATES)) == "湾湾小何"
-    assert described.calls
-    assert asyncio.run(resolve_persona(_FakeConn('{"template":"外星人不存在"}'), "随便来一个", TEMPLATES)) is None
+    refused = _FakeConn('{"intent":"unclear","template":""}')
+    assert asyncio.run(resolve_persona(refused, "不要英语老师", TEMPLATES)) is None
+    assert asyncio.run(resolve_persona(_FakeConn('{"intent":"unclear","template":"外星人不存在"}'), "随便来一个", TEMPLATES)) is None
+    assert asyncio.run(resolve_persona(_FakeConn('{"intent":"repeat","template":""}'), "没听清", TEMPLATES)) is REPEAT
 
 
-def test_supplement_decline_uses_llm_for_sentence():
-    assert asyncio.run(supplement_text(_FakeConn('{"decline":false}'), "没有")) == ""
-    direct = _FakeConn('{"decline":true}')
-    assert asyncio.run(supplement_text(direct, "说话温柔一点")) == "说话温柔一点"
-    assert direct.calls == []
-    declined = _FakeConn('{"decline":true}')
-    assert asyncio.run(supplement_text(declined, "没什么要补充的")) == ""
+def test_supplement_always_asks_the_model():
+    declined = _FakeConn('{"action":"decline"}')
+    assert asyncio.run(supplement_text(declined, "没有")) == ""
     assert declined.calls
+    direct = _FakeConn('{"action":"content"}')
+    assert asyncio.run(supplement_text(direct, "说话温柔一点")) == "说话温柔一点"
+    assert direct.calls
+    sentence = _FakeConn('{"action":"decline"}')
+    assert asyncio.run(supplement_text(sentence, "没什么要补充的")) == ""
+    assert asyncio.run(supplement_text(_FakeConn('{"action":"repeat"}'), "没听清")) is REPEAT
+
+
+def test_reboot_question_is_not_acceptance():
+    conn = _FakeConn('{"intent":"decline"}')
+    session = VoiceActivationSession(conn, stage="skills")
+    session.state = session.ASK_REBOOT
+    said = []
+    rebooted = []
+
+    async def _say(text):
+        said.append(text)
+
+    async def _reboot():
+        rebooted.append(True)
+
+    session._say = _say
+    session._reboot_device = _reboot
+    asyncio.run(session._on_ask_reboot("能不重启吗？"))
+    assert rebooted == []
+    assert conn.calls
+    assert "能不重启吗？" in conn.calls[0][1]
+    assert any("聊天" in text for text in said)
+
+    plain = _FakeConn('{"intent":"accept","value":""}')
+    session.conn = plain
+    asyncio.run(session._on_ask_reboot("确认"))
+    assert rebooted == [True]
+    assert plain.calls
+
+
+def test_restart_word_alone_still_asks_the_model():
+    conn = _FakeConn('{"intent":"unclear"}')
+    session = VoiceActivationSession(conn, stage="skills")
+    session.state = session.ASK_REBOOT
+    said = []
+
+    async def _say(text):
+        said.append(text)
+
+    async def _reboot():
+        raise AssertionError("不应重启")
+
+    session._say = _say
+    session._reboot_device = _reboot
+    session._finish_without_reboot = _reboot
+    asyncio.run(session._on_ask_reboot("必须重启吗"))
+    assert conn.calls
+    assert any("确认" in text for text in said)
+
+
+def test_skill_command_ignores_negation_and_questions():
+    refused = _FakeConn('{"intent":"none"}')
+    assert asyncio.run(resolve_skills_request(refused, "不要绑定技能")) is None
+    assert refused.calls
+    assert asyncio.run(resolve_skills_request(_FakeConn('{"intent":"none"}'), "绑定技能是什么意思")) is None
+
+    bare = _FakeConn('{"intent":"bind"}')
+    assert asyncio.run(resolve_skills_request(bare, "绑定技能。")) == "bind"
+    assert bare.calls
+    unrelated = _FakeConn('{"intent":"none"}')
+    assert asyncio.run(resolve_skills_request(unrelated, "今天天气不错")) is None
+    assert unrelated.calls
+
+
+def test_retry_negation_does_not_retry():
+    conn = _FakeConn('{"intent":"unclear","rebind":false}')
+    session = VoiceActivationSession(conn, stage="skills")
+    session.state = session.RETRY_SKILLS
+    said = []
+    bound = []
+
+    async def _say(text):
+        said.append(text)
+
+    async def _bind():
+        bound.append(True)
+
+    session._say = _say
+    session._bind_skills = _bind
+    asyncio.run(session._on_retry_skills("不要重试"))
+    assert bound == []
+    assert conn.calls
+    assert any("稍后再说" in text for text in said)
+    assert asyncio.run(resolve_skill_retry(_FakeConn('{"intent":"skip","rebind":false}'), "稍后再说")) == ("skip", False)
+
+
+def test_auth_question_does_not_skip():
+    conn = _FakeConn('{"intent":"unclear"}')
+    session = VoiceActivationSession(conn, stage="skills")
+    session.state = session.ASK_AUTH_CODE
+    session.auth_label = "瑞幸咖啡"
+    session.auth_task_id = "t1"
+    said = []
+    cancelled = []
+
+    async def _say(text):
+        said.append(text)
+
+    async def _cancel():
+        cancelled.append(True)
+
+    session._say = _say
+    session._cancel_auth_task = _cancel
+    asyncio.run(session._on_auth_code("能不跳过吗"))
+    assert cancelled == []
+    assert conn.calls
+    assert any("验证码" in text for text in said)
+
+    skipped = _FakeConn('{"intent":"skip"}')
+    assert asyncio.run(resolve_auth_reply(skipped, "跳过")) == ("skip", None)
+    assert skipped.calls
+    coded = _FakeConn('{"intent":"skip"}')
+    assert asyncio.run(resolve_auth_reply(coded, "327124")) == ("code", "327124")
+    assert coded.calls == []
+    mixed = _FakeConn('{"intent":"code"}')
+    assert asyncio.run(resolve_auth_reply(mixed, "验证码是327124")) == ("code", "327124")
+    assert mixed.calls
+
+
+def test_did_not_hear_repeats_the_current_question():
+    conn = _FakeConn('{"intent":"repeat","nickname":""}')
+    session = VoiceActivationSession(conn, stage="nickname")
+    session.state = session.ASK_NICKNAME
+    said = []
+
+    async def _say(text):
+        said.append(text)
+
+    async def _send(_text):
+        return None
+
+    session._say = _say
+    session._send_recognized_text = _send
+    asyncio.run(session.handle_text("没听清"))
+    assert session.state == session.ASK_NICKNAME
+    assert session.nickname is None
+    assert said == ["请说出助手的昵称。"]
+    assert conn.calls
+
+    said.clear()
+    session.conn = _FakeConn('{"intent":"repeat","value":""}')
+    session.phone = "13800138000"
+    session.state = session.CONFIRM_PHONE
+    asyncio.run(session.handle_text("你再说一遍"))
+    assert session.state == session.CONFIRM_PHONE
+    assert session.phone == "13800138000"
+    assert any("1，3，8" in text for text in said)
+
+    said.clear()
+    session.conn = _FakeConn('{"intent":"decline","value":""}')
+    asyncio.run(session.handle_text("重说"))
+    assert session.state == session.ASK_PHONE
+    assert any("重新" in text for text in said)
+
+    asked = _FakeConn('{"intent":"repeat","value":""}')
+    session.conn = asked
+    session.state = session.ASK_REBOOT
+    said.clear()
+    asyncio.run(session.handle_text("能再说一遍吗"))
+    assert asked.calls
+    assert session.state == session.ASK_REBOOT
+    assert any("重启" in text for text in said)
+
+
+def test_confirm_intent_asks_the_model():
+    local = _FakeConn('{"intent":"accept","value":""}')
+    assert asyncio.run(confirm_intent(local, "没错", "是否现在重启设备")) == "accept"
+    assert local.calls
+    asked = _FakeConn('{"intent":"decline","value":""}')
+    assert asyncio.run(confirm_intent(asked, "能不重启吗", "是否现在重启设备")) == "decline"
+    assert asked.calls
+    failed = _FakeConn(RuntimeError("down"))
+    assert asyncio.run(confirm_intent(failed, "必须重启吗", "是否现在重启设备")) == "unclear"
 
 
 def test_supplement_and_menu():
-    assert is_no_supplement("没有")
-    assert is_no_supplement("没有了。")
-    assert is_no_supplement("不用补充")
-    assert not is_no_supplement("说话温柔一点")
     assert clean_supplement("  说话温柔一点。 ") == "说话温柔一点"
     menu = persona_menu(TEMPLATES)
     assert menu.startswith("接下来选一个性格。一，湾湾小何。二，星际游子。")
@@ -337,6 +505,7 @@ def test_first_skill_skip_is_spoken_later_failure_is_silent():
             self.skills_pending = False
 
     conn = _Conn()
+    conn.llm = _FakeConn('{"intent":"skip","rebind":false}')
     session = VoiceActivationSession(conn, stage="skills")
     conn.voice_activation_handler = session
 
@@ -389,6 +558,7 @@ def test_user_asked_skill_bind_announces_failure_during_quiet_retry():
             self.config = {}
 
     conn = _Conn()
+    conn.llm = _FakeConn('{"intent":"bind"}')
     session = VoiceActivationSession(conn, stage="skills")
     conn.voice_activation_handler = session
     started = asyncio.Event()
@@ -492,6 +662,7 @@ def test_user_request_during_quiet_bind_starts_authorization():
     said = []
     auth_started = []
     conn = _skill_conn("skills_quiet")
+    conn.llm = _FakeConn('{"intent":"bind"}')
     session = VoiceActivationSession(conn, stage="skills", include_auth=False)
     conn.voice_activation_handler = session
     started = asyncio.Event()

@@ -36,11 +36,11 @@ CN_DIGITS = {
     "玖": "9",
 }
 
-CONFIRM_WORDS = {"对", "是", "好", "嗯", "行", "确认", "对的", "是的", "没错", "正确", "可以", "好的"}
-REJECT_WORDS = ("不对", "不是", "不行", "错", "重说", "重来", "重新", "不要")
-SKIP_SKILLS_WORDS = ("稍后再说", "以后再说", "先聊天", "跳过", "不用了", "算了", "取消")
-SKILLS_COMMAND_WORDS = ("绑定技能", "配置技能", "技能绑定", "设置技能")
-REBIND_SKILLS_WORDS = ("重新绑定", "重新开通", "再绑一次", "重新授权", "再开通一次")
+class _RepeatRequest:
+    """模型判断：用户没听清，要设备把刚才的问题再说一遍。"""
+
+
+REPEAT = _RepeatRequest()
 
 
 def compact_text(text):
@@ -93,56 +93,38 @@ def extract_code(text):
     return None
 
 
-def is_reject(text):
-    compact = compact_text(text)
-    return any(word in compact for word in REJECT_WORDS)
-
-
-def is_confirm(text):
-    compact = compact_text(text)
-    if not compact or is_reject(compact):
-        return False
-    return compact in CONFIRM_WORDS
-
-
-def is_resend(text):
-    compact = compact_text(text)
-    return any(word in compact for word in ("重发", "再发", "没收到", "重新发送"))
-
-
-def is_rebind_skills(text):
+def spoken_digits_only(text):
+    """整句只有数字。带了别的字就交给模型，不用词表判断。"""
     compact = compact_text(unwrap_user_text(text))
-    return any(word in compact for word in REBIND_SKILLS_WORDS)
-
-
-def is_skills_command(text):
-    compact = compact_text(unwrap_user_text(text))
-    return any(word in compact for word in SKILLS_COMMAND_WORDS) or is_rebind_skills(text)
-
-
-def is_skip_skills(text):
-    compact = compact_text(text)
     if not compact:
         return False
-    # 「不要跳过」表示继续，不当作放弃
-    if "不要跳过" in compact or "别跳过" in compact:
-        return False
-    return any(word in compact for word in SKIP_SKILLS_WORDS)
+    return all(char.isdigit() or char in CN_DIGITS for char in compact)
+
+
+def isolated_code(text):
+    """整句就是一串验证码。夹了别的意思时返回 None。"""
+    code = extract_code(text)
+    if not code or not spoken_digits_only(text):
+        return None
+    return code
 
 
 _NICKNAME_SYSTEM_PROMPT = (
     "你在语音引导里，从用户原话中提取助手昵称。"
     "只输出一个 JSON 对象，不要解释，不要使用 markdown。"
-    '格式：{"nickname":"小智"}。听不出昵称时输出 {"nickname":""}。\n'
+    '{"intent":"answer","nickname":"小智"}。'
+    "没听清、要你把问题再说一遍时输出 "
+    '{"intent":"repeat","nickname":""}。'
+    "听不出昵称时输出 "
+    '{"intent":"unclear","nickname":""}。\n'
     "规则：\n"
     "1. 用户可能直接说昵称，也可能说整句，例如「你的昵称是小智」「我想叫你豆豆吧」「就叫小美」。只保留真实昵称。\n"
     "2. 昵称 1 到 12 个字，不要带语气词。\n"
-    "3. 只是在确认或否定，例如「对」「确认」「不对」「重说」，nickname 留空。\n"
-    "4. 否定里如果带了新昵称，例如「不对，你的昵称是小美」，取出小美。\n"
-    "5. 听不清或不是在起名时，nickname 留空。"
+    "3. 只是在确认或否定，例如「对」「确认」「不对」「重说」，intent 为 unclear，nickname 留空。\n"
+    "4. 否定里如果带了新昵称，例如「不对，你的昵称是小美」，intent 为 answer，取出小美。\n"
+    "5. 「没听清」「你再说一遍」「刚才说什么」是 repeat。用户自己要重说答案，例如「我重说」，是 unclear。\n"
+    "6. 听不清或不是在起名时，intent 为 unclear，nickname 留空。"
 )
-# 这些字出现时，原话更像句子而不是昵称本身，交给模型判断。
-_NICKNAME_SENTENCE_CUES = ("昵称", "名字", "叫", "是", "的", "你", "您", "我", "不", "重", "该", "什么", "怎么")
 _SPEECH_TAILS = (
     "可以吗",
     "好不好",
@@ -171,78 +153,92 @@ _SPEECH_TAILS = (
 _OWNER_SYSTEM_PROMPT = (
     "你在语音引导里，从用户原话中提取助手该怎么称呼用户。"
     "只输出一个 JSON 对象，不要解释，不要使用 markdown。"
-    '格式：{"title":"老板"}。听不出称呼时输出 {"title":""}。\n'
+    '{"intent":"answer","title":"老板"}。'
+    "没听清、要你把问题再说一遍时输出 "
+    '{"intent":"repeat","title":""}。'
+    "听不出称呼时输出 "
+    '{"intent":"unclear","title":""}。\n'
     "规则：\n"
     "1. 用户可能直接说称呼，也可能说整句，例如「叫我老板」「你可以称呼我为张先生」「我是小王」。只保留真实称呼。\n"
     "2. 称呼 1 到 12 个字，不要带语气词。\n"
-    "3. 只是在确认或否定，例如「对」「确认」「不对」「重说」，title 留空。\n"
-    "4. 否定里如果带了新称呼，例如「不对，叫我妈妈」，取出妈妈。\n"
-    "5. 没给出称呼，例如「我该怎么称呼您」，title 留空。"
+    "3. 只是在确认或否定，例如「对」「确认」「不对」「重说」，intent 为 unclear，title 留空。\n"
+    "4. 否定里如果带了新称呼，例如「不对，叫我妈妈」，intent 为 answer，取出妈妈。\n"
+    "5. 「没听清」「你再说一遍」是 repeat。用户自己要重说，是 unclear。\n"
+    "6. 没给出称呼，例如「我该怎么称呼您」，intent 为 unclear，title 留空。"
 )
-_OWNER_SENTENCE_CUES = ("称呼", "叫", "喊", "是", "的", "你", "您", "我", "不", "怎么", "什么", "如何", "怎样")
 _SUPPLEMENT_SYSTEM_PROMPT = (
     "用户刚被问还有没有要补充的角色设定。没有的话会说没有。"
     "判断这句是在拒绝补充，还是在说出补充内容。"
-    '只输出一个 JSON 对象：{"decline":true} 或 {"decline":false}。不要解释。\n'
-    "「没有」「不用了」「没什么要补充的」「先不用」是拒绝，decline 为 true。\n"
-    "「说话温柔一点」「少讲道理」是补充，decline 为 false。"
+    '{"action":"decline"}、{"action":"content"}、{"action":"repeat"} 或 {"action":"unclear"}。不要解释。\n'
+    "decline：整句是在推辞。例如「没有」「不用了」「没什么要补充的」「算了吧」「先这样就可以了」「能不补充吗」。\n"
+    "content：说出了具体要求。例如「说话温柔一点」「少讲道理」。先说没有、后面又给了具体要求，例如「没有，说话温柔一点」，也是 content。\n"
+    "repeat：没听清，让你把问题再说一遍。\n"
+    "不要因为句子里出现「没有」「不用」「算了」就当成 decline，要看整句是不是还提出了要求。"
 )
-_SUPPLEMENT_DECLINE_CUES = ("没", "不用", "不需要", "不补", "算了", "跳过", "先不", "别")
-_NO_SUPPLEMENT = {
-    "没有",
-    "没有了",
-    "没了",
-    "没有啦",
-    "没啦",
-    "没有啊",
-    "没有呀",
-    "没有哦",
-    "没有吧",
-    "没有呢",
-    "不用",
-    "不用了",
-    "不用啦",
-    "不用啊",
-    "不用呀",
-    "不用吧",
-    "不要",
-    "不要了",
-    "不要啦",
-    "别",
-    "别了",
-    "不补充",
-    "没有补充",
-    "不用补充",
-    "不用补充了",
-    "不需要",
-    "不需要了",
-    "无需",
-    "无",
-    "跳过",
-    "就这样",
-    "就这样吧",
-    "算了",
-    "没有要补充的",
-    "先不用",
-    "没补充",
-    "无补充",
-}
-_ORDINAL_RE = re.compile(
-    r"^(?:我就|我想要|我要|我选|就用|那就|就|用|选|那)?第?([0-9]{1,2}|[一二两三四五六七八九十])(?:个|号)?$"
+_CONFIRM_INTENTS = {"accept", "decline", "repeat", "correct", "unclear"}
+_CONFIRM_SYSTEM_PROMPT = (
+    "你在语音引导里判断用户有没有同意刚才的确认。用户消息里会给出刚才的问题和用户原话。"
+    "只输出一个 JSON 对象，不要解释，不要使用 markdown。"
+    '{"intent":"accept","value":""}、{"intent":"decline","value":""}、{"intent":"repeat","value":""}、'
+    '{"intent":"correct","value":""} 或 {"intent":"unclear","value":""}。\n'
+    "accept：整句是在明确同意。例如「对」「是的」「没错」「确认」「就这样」「好，重启吧」。value 留空。\n"
+    "decline：拒绝、推辞，或用户要自己重答。例如「不对」「不要」「先别」「能不重启吗」「不想重启」「不用了」「重说」「我重说」。value 留空。\n"
+    "repeat：没听清刚才的话，让你再说一遍。例如「没听清」「你再说一遍」「刚才说什么」。这不是 decline。\n"
+    "correct：改口并给出了新内容。value 只放新的昵称、称呼或模板名。\n"
+    "unclear：反问、犹豫，或在问原因。例如「必须重启吗」「为什么要重启」「是吗」「再想想」。\n"
+    "句子里出现问题里的词，不等于同意。否定和反问里提到同一个词，按否定或反问判断。"
 )
-_ORDINAL_VALUE = {
-    "一": 1,
-    "二": 2,
-    "两": 2,
-    "三": 3,
-    "四": 4,
-    "五": 5,
-    "六": 6,
-    "七": 7,
-    "八": 8,
-    "九": 9,
-    "十": 10,
-}
+_SKILL_REQUEST_PROMPT = (
+    "判断用户是不是在要求现在绑定技能。"
+    "只输出一个 JSON 对象，不要解释，不要使用 markdown。"
+    '{"intent":"bind"}、{"intent":"rebind"} 或 {"intent":"none"}。\n'
+    "bind：明确要现在绑定、配置或设置技能。\n"
+    "rebind：明确要重新绑定、重新开通、再绑一次。\n"
+    "none：提问、否定、闲聊或反问。例如「不要绑定技能」「绑定技能是什么意思」「能不绑定吗」「先别开通」。\n"
+    "出现「绑定技能」「重新绑定」不等于要执行。"
+)
+_RETRY_PROMPT = (
+    "技能绑定失败了。用户可以现在重试，也可以稍后再说。"
+    "只输出一个 JSON 对象，不要解释，不要使用 markdown。"
+    '{"intent":"retry","rebind":false}、{"intent":"skip","rebind":false}、{"intent":"repeat","rebind":false} 或 {"intent":"unclear","rebind":false}。\n'
+    "retry：同意现在再试，或说不要跳过。明确要重新绑定、重新开通时，intent 仍是 retry，并把 rebind 设为 true。\n"
+    "skip：稍后再说、先不用、算了、取消、先聊天，或不想再试。\n"
+    "repeat：没听清，让你把问题再说一遍。\n"
+    "「不要重试」「先别试了」「能不再试吗」不是 retry。「不要跳过」「先别跳过」是 retry。\n"
+    "句子里出现「重试」「再试」「绑定」不等于同意。"
+)
+_SMS_PROMPT = (
+    "用户被要求说出短信验证码。也可以要求重发，或表示手机号错了要重新报手机号。"
+    "只输出一个 JSON 对象，不要解释，不要使用 markdown。"
+    '{"intent":"code"}、{"intent":"resend"}、{"intent":"restart"}、{"intent":"repeat"} 或 {"intent":"unclear"}。\n'
+    "code：这句是在报验证码。前面带了「不对」，只要给出了验证码，仍是 code。\n"
+    "resend：没收到或要求重发，而且没有在报一串新的验证码。\n"
+    "restart：手机号错了，要重新说手机号。用户说「重说」但没说手机号错了，不是 restart。\n"
+    "repeat：没听清你刚才的话，让你再说一遍。不是 restart。\n"
+    "unclear：听不清用户想做什么。\n"
+    "不要因为出现「不对」「重说」就重新收集手机号，要看整句。"
+)
+_AUTH_PROMPT = (
+    "用户正在开通一项技能，被要求说出短信验证码。也可以跳过、要求重发，或重新绑定。"
+    "只输出一个 JSON 对象，不要解释，不要使用 markdown。"
+    '{"intent":"code"}、{"intent":"skip"}、{"intent":"resend"}、{"intent":"rebind"}、{"intent":"repeat"} 或 {"intent":"unclear"}。\n'
+    "code：在报验证码。前面带「不对」但给出了验证码，仍是 code。\n"
+    "skip：明确放弃这次开通。例如「跳过」「不用了」「算了」。\n"
+    "「不要跳过」「能不跳过吗」「先别跳过」不是 skip。\n"
+    "resend：没收到或请重发，且没有报出验证码。又说没收到又报了验证码时是 code。\n"
+    "rebind：要重新绑定或重新开通。\n"
+    "repeat：没听清，让你把问题再说一遍。不是 skip。\n"
+    "出现「跳过」「重发」「绑定」不等于要执行对应动作。"
+)
+_PHONE_ASIDE_PROMPT = (
+    "用户正在报手机号，这句里没有数字。"
+    "只输出一个 JSON 对象，不要解释，不要使用 markdown。"
+    '{"intent":"restart"}、{"intent":"repeat"}、{"intent":"ignore"} 或 {"intent":"unclear"}。\n'
+    "restart：明确说错了、要清空、重新报号码。\n"
+    "repeat：没听清，让你把刚才的问题再说一遍。\n"
+    "ignore：语气词、等一下，或「能不重说吗」这种并不是在要求清空。\n"
+    "出现「重说」「不对」不等于一定要清空，要看整句是不是在要求重来。"
+)
 _SHORT_NAME_LIMIT = 12
 _SUPPLEMENT_LIMIT = 80
 
@@ -261,23 +257,9 @@ def _strip_speech_tails(text):
 
 
 def _valid_short_name(name, limit=_SHORT_NAME_LIMIT):
-    if not name or name in set("吧啊呀呢哦哈嘛了") or is_confirm(name) or is_reject(name):
+    if not name or name in set("吧啊呀呢哦哈嘛了"):
         return False
     return 1 <= len(name) <= limit
-
-
-def is_pure_reject(text):
-    """整句只是否定，没有带出一个新名字。"""
-    compact = compact_text(unwrap_user_text(text))
-    if not compact or not is_reject(compact):
-        return False
-    for word in sorted(REJECT_WORDS, key=len, reverse=True):
-        if word not in compact:
-            continue
-        rest = _strip_speech_tails(compact.replace(word, "", 1))
-        if not rest:
-            return True
-    return False
 
 
 def _strip_bare_leads(compact):
@@ -296,18 +278,116 @@ def _plain_name(compact):
     return _strip_speech_tails(_strip_bare_leads(compact)).replace("「", "").replace("」", "")
 
 
-def _is_bare_name(compact, cues):
-    name = _plain_name(compact)
-    if not _valid_short_name(name):
-        return False
-    return not any(cue in compact for cue in cues)
-
-
 def _log_guide(conn, level, message):
     logger = getattr(conn, "logger", None)
     if logger is None:
         return
     getattr(logger.bind(tag=TAG), level)(message)
+
+
+def _intent_of(data, allowed):
+    if not data:
+        return None
+    intent = str(data.get("intent") or "").strip()
+    if intent not in allowed:
+        return None
+    return intent
+
+
+def _flag_true(value):
+    return value is True or str(value).lower() == "true"
+
+
+async def confirm_turn(conn, text, subject):
+    """同意、拒绝、改口，或让设备把问题再说一遍。模型失败时不当成同意。"""
+    raw = unwrap_user_text(text).strip()
+    if not compact_text(raw):
+        return "unclear", ""
+    asked = f"刚才的问题：{subject}\n用户原话：{raw}"
+    data = await _ask_llm_json(conn, _CONFIRM_SYSTEM_PROMPT, asked, "确认意图")
+    intent = _intent_of(data, _CONFIRM_INTENTS) or "unclear"
+    value = _plain_name(compact_text((data or {}).get("value") or ""))
+    if not _valid_short_name(value):
+        value = ""
+    if intent == "correct" and not value:
+        intent = "unclear"
+    _log_guide(conn, "info", f"确认意图: {raw} -> {intent} {value}")
+    return intent, value
+
+
+async def confirm_intent(conn, text, subject):
+    intent, _value = await confirm_turn(conn, text, subject)
+    return intent
+
+
+async def resolve_skills_request(conn, text):
+    """每句话都问模型是不是在要求绑定。问不出来就不绑定。"""
+    raw = unwrap_user_text(text).strip()
+    if not compact_text(raw):
+        return None
+    data = await _ask_llm_json(conn, _SKILL_REQUEST_PROMPT, raw, "技能指令")
+    intent = _intent_of(data, {"bind", "rebind", "none"})
+    _log_guide(conn, "info", f"技能指令: {raw} -> {intent or ''}")
+    if intent in ("bind", "rebind"):
+        return intent
+    return None
+
+
+async def resolve_skill_retry(conn, text):
+    """重试、稍后再说，或让设备把问题再说一遍。"""
+    raw = unwrap_user_text(text).strip()
+    if not compact_text(raw):
+        return "unclear", False
+    data = await _ask_llm_json(conn, _RETRY_PROMPT, raw, "重试意图")
+    intent = _intent_of(data, {"retry", "skip", "repeat", "unclear"}) or "unclear"
+    rebind = bool(data) and _flag_true(data.get("rebind"))
+    if rebind and intent == "unclear":
+        intent = "retry"
+    _log_guide(conn, "info", f"重试意图: {raw} -> {intent} rebind={rebind}")
+    return intent, rebind
+
+
+async def resolve_sms_reply(conn, text):
+    """纯数字验证码直接收下。其余问模型。"""
+    code = isolated_code(text)
+    if code:
+        return "code", code
+    raw = unwrap_user_text(text).strip()
+    if not compact_text(raw):
+        return "unclear", None
+    data = await _ask_llm_json(conn, _SMS_PROMPT, raw, "验证码意图")
+    intent = _intent_of(data, {"code", "resend", "restart", "repeat", "unclear"}) or "unclear"
+    _log_guide(conn, "info", f"验证码意图: {raw} -> {intent}")
+    if intent == "code":
+        return "code", extract_code(text)
+    return intent, None
+
+
+async def resolve_auth_reply(conn, text):
+    """纯数字验证码直接收下。跳过、重发、重听都问模型。"""
+    code = isolated_code(text)
+    if code:
+        return "code", code
+    raw = unwrap_user_text(text).strip()
+    if not compact_text(raw):
+        return "unclear", None
+    data = await _ask_llm_json(conn, _AUTH_PROMPT, raw, "授权验证码意图")
+    intent = _intent_of(data, {"code", "skip", "resend", "rebind", "repeat", "unclear"}) or "unclear"
+    _log_guide(conn, "info", f"授权验证码意图: {raw} -> {intent}")
+    if intent == "code":
+        return "code", extract_code(text)
+    return intent, None
+
+
+async def resolve_phone_aside(conn, text):
+    """报号时这句没有数字。清空、重听还是忽略，都问模型。"""
+    raw = unwrap_user_text(text).strip()
+    if not compact_text(raw):
+        return "ignore"
+    data = await _ask_llm_json(conn, _PHONE_ASIDE_PROMPT, raw, "报号意图")
+    intent = _intent_of(data, {"restart", "repeat", "ignore", "unclear"}) or "unclear"
+    _log_guide(conn, "info", f"报号意图: {raw} -> {intent}")
+    return intent
 
 
 def parse_json_object(text):
@@ -355,26 +435,14 @@ async def _ask_llm_json(conn, system_prompt, user_text, label):
     return parse_json_object(reply)
 
 
-def same_name_agreement(text, current):
-    """「是小智」「对的小智」在已经听到这个名字时，当作确认。"""
-    if not current:
-        return False
-    compact = compact_text(unwrap_user_text(text))
-    for word in ("对的", "是的", "没错", "确认", "可以", "好的", "对", "是", "行", "嗯"):
-        if compact == word + current:
-            return True
-    return False
-
-
 async def extract_nickname(conn, text):
-    """用当前对话模型从原话里抽出昵称。单独一个短名字不调用模型。"""
+    """每句都问模型。返回昵称、REPEAT，或 None。"""
     raw = unwrap_user_text(text).strip()
-    compact = compact_text(raw)
-    if not compact or is_confirm(compact) or is_pure_reject(compact):
+    if not compact_text(raw):
         return None
-    if _is_bare_name(compact, _NICKNAME_SENTENCE_CUES):
-        return _plain_name(compact)
     data = await _ask_llm_json(conn, _NICKNAME_SYSTEM_PROMPT, raw, "提取昵称")
+    if _intent_of(data, {"answer", "repeat", "unclear"}) == "repeat":
+        return REPEAT
     nickname = parse_nickname_reply(json.dumps(data, ensure_ascii=False) if data else "")
     _log_guide(conn, "info", f"昵称识别: {raw} -> {nickname or ''}")
     return nickname
@@ -393,53 +461,21 @@ def parse_owner_reply(text):
 
 
 async def extract_owner_title(conn, text):
-    """用当前对话模型从原话里抽出主人称呼。单独一个短称呼不调用模型。"""
+    """每句都问模型。返回称呼、REPEAT，或 None。"""
     raw = unwrap_user_text(text).strip()
-    compact = compact_text(raw)
-    if not compact or is_confirm(compact) or is_pure_reject(compact):
+    if not compact_text(raw):
         return None
-    if _is_bare_name(compact, _OWNER_SENTENCE_CUES):
-        return _plain_name(compact)
     data = await _ask_llm_json(conn, _OWNER_SYSTEM_PROMPT, raw, "提取称呼")
+    if _intent_of(data, {"answer", "repeat", "unclear"}) == "repeat":
+        return REPEAT
     title = parse_owner_reply(json.dumps(data, ensure_ascii=False) if data else "")
     _log_guide(conn, "info", f"称呼识别: {raw} -> {title or ''}")
     return title
 
 
-def is_no_supplement(text):
-    return compact_text(unwrap_user_text(text)) in _NO_SUPPLEMENT
-
-
 def clean_supplement(text):
     raw = unwrap_user_text(text).strip()
     return raw.strip("，。,.!！?？、 \n\t")
-
-
-def _ordinal_value(token):
-    if token.isdigit():
-        return int(token)
-    return _ORDINAL_VALUE.get(token)
-
-
-def match_persona(text, names):
-    """用序号或模板名匹配性格。否定句不选中。"""
-    if not names:
-        return None
-    compact = compact_text(unwrap_user_text(text))
-    if not compact or is_confirm(compact) or is_reject(compact):
-        return None
-    hits = [name for name in names if compact_text(name) and compact_text(name) in compact]
-    if hits:
-        hits.sort(key=lambda name: len(compact_text(name)), reverse=True)
-        return hits[0]
-    stripped = _strip_speech_tails(compact)
-    match = _ORDINAL_RE.fullmatch(stripped)
-    if not match:
-        return None
-    index = _ordinal_value(match.group(1))
-    if index is None or index < 1 or index > len(names):
-        return None
-    return names[index - 1]
 
 
 def _persona_system_prompt(names):
@@ -448,13 +484,17 @@ def _persona_system_prompt(names):
         "你在语音引导里，根据用户原话从给定性格模板中选一个。"
         f"可选模板只有这些：{listed}。"
         "只输出一个 JSON 对象，不要解释，不要使用 markdown。"
-        '{"template":"英语老师"}。没选中时输出 {"template":""}。\n'
+        '{"intent":"answer","template":"英语老师"}。'
+        "没听清、让你再说一遍时输出 "
+        '{"intent":"repeat","template":""}。'
+        "没选中时输出 "
+        '{"intent":"unclear","template":""}。\n'
         "规则：\n"
         "1. template 必须是列表中的原文，不能自造。\n"
-        "2. 用户说序号、名字或描述，都要对应到列表中的一个。\n"
-        "3. 只是确认，或只是否定而没有改选，template 留空。\n"
-        "4. 否定里改选了另一个，例如「不要英语老师，我要星际游子」，选出星际游子。\n"
-        "5. 听不清或对不上任何一个，template 留空。"
+        "2. 用户说序号、名字或描述，都要对应到列表中的一个，intent 为 answer。\n"
+        "3. 只是确认，或只是否定而没有改选，intent 为 unclear，template 留空。\n"
+        "4. 否定里改选了另一个，例如「不要英语老师，我要星际游子」，intent 为 answer，选出星际游子。\n"
+        "5. 「没听清」「你再说一遍」是 repeat。听不清或对不上任何一个，是 unclear。"
     )
 
 
@@ -470,35 +510,39 @@ def parse_persona_reply(text, names):
 
 
 async def resolve_persona(conn, text, names):
-    """模板名或序号直接匹配。其余说法交给模型，从给定模板里选。"""
-    if not names or is_confirm(compact_text(unwrap_user_text(text))) or is_pure_reject(text):
-        return None
-    matched = match_persona(text, names)
-    if matched:
-        return matched
+    """每句都问模型，从给定模板里选。返回模板名、REPEAT，或 None。"""
     raw = unwrap_user_text(text).strip()
-    if not compact_text(raw):
+    if not names or not compact_text(raw):
         return None
     data = await _ask_llm_json(conn, _persona_system_prompt(names), raw, "选择性格")
+    if _intent_of(data, {"answer", "repeat", "unclear"}) == "repeat":
+        chosen = parse_persona_reply(json.dumps(data, ensure_ascii=False) if data else "", names)
+        if not chosen:
+            _log_guide(conn, "info", f"性格识别: {raw} -> repeat")
+            return REPEAT
     chosen = parse_persona_reply(json.dumps(data, ensure_ascii=False) if data else "", names)
     _log_guide(conn, "info", f"性格识别: {raw} -> {chosen or ''}")
     return chosen
 
 
 async def supplement_text(conn, text):
-    """拒绝补充时返回空字符串。听不清时返回 None。其余保留用户原话。"""
-    if is_confirm(compact_text(unwrap_user_text(text))):
-        return None
-    if is_no_supplement(text) or is_pure_reject(text):
-        return ""
+    """每句都问模型。拒绝时返回空字符串，重听时返回 REPEAT，听不清时返回 None。"""
     raw = unwrap_user_text(text).strip()
-    compact = compact_text(raw)
-    if any(cue in compact for cue in _SUPPLEMENT_DECLINE_CUES):
-        data = await _ask_llm_json(conn, _SUPPLEMENT_SYSTEM_PROMPT, raw, "判断补充")
-        if not data or "decline" not in data:
-            return None
-        if data.get("decline") is True or str(data.get("decline")).lower() == "true":
-            return ""
+    if not compact_text(raw):
+        return None
+    data = await _ask_llm_json(conn, _SUPPLEMENT_SYSTEM_PROMPT, raw, "判断补充")
+    action = str((data or {}).get("action") or "").strip()
+    if action == "repeat":
+        return REPEAT
+    declined = action == "decline" or _flag_true((data or {}).get("decline"))
+    if action == "content":
+        declined = False
+    if not data or (action not in ("decline", "content", "repeat", "unclear") and "decline" not in data):
+        return None
+    if declined:
+        return ""
+    if action == "unclear":
+        return None
     cleaned = clean_supplement(text)
     if not cleaned or len(cleaned) > _SUPPLEMENT_LIMIT:
         return cleaned or None
@@ -807,11 +851,15 @@ class VoiceActivationSession:
     async def _on_phone(self, text):
         self._invalidate_phone_wait()
         digits = digits_from_text(text)
-        if not digits and is_reject(text):
-            self.phone_digits = ""
-            await self._ask_for_phone("好的，请重新按顺序说出十一位手机号。")
-            return
         if not digits:
+            aside = await resolve_phone_aside(self.conn, text)
+            if aside == "repeat":
+                await self._repeat_prompt()
+                return
+            if aside == "restart":
+                self.phone_digits = ""
+                await self._ask_for_phone("好的，请重新按顺序说出十一位手机号。")
+                return
             self._schedule_phone_wait()
             return
 
@@ -838,26 +886,24 @@ class VoiceActivationSession:
 
     async def _on_confirm_phone(self, text):
         echoed = digits_from_text(text)
-        if (
-            echoed
-            and self.phone
-            and self.phone.startswith(echoed)
-            and not is_confirm(text)
-            and not is_reject(text)
-        ):
+        if echoed and self.phone and self.phone.startswith(echoed) and spoken_digits_only(text):
             return
         corrected = extract_phone(text)
         if corrected and corrected != self.phone:
             self.phone = corrected
             await self._say(f"您的手机号是，{spoken_digits(self.phone)}。对吗？")
             return
-        if is_reject(text):
+        intent = await confirm_intent(self.conn, text, "刚才报的手机号对不对")
+        if intent == "repeat":
+            await self._repeat_prompt()
+            return
+        if intent == "decline":
             self.phone = None
             self.phone_digits = ""
             self.state = self.ASK_PHONE
             await self._ask_for_phone("好的，请重新按顺序说出十一位手机号。")
             return
-        if not is_confirm(text):
+        if intent != "accept":
             await self._say("请说确认，或者说重说。")
             return
         await self._send_sms()
@@ -877,18 +923,21 @@ class VoiceActivationSession:
         await self._say("验证码已发送。请说出短信里的验证码。没收到可以说重发。")
 
     async def _on_code(self, text):
-        if is_resend(text):
+        action, code = await resolve_sms_reply(self.conn, text)
+        if action == "repeat":
+            await self._repeat_prompt()
+            return
+        if action == "resend":
             self.state = self.CONFIRM_PHONE
             await self._send_sms()
             return
-        if is_reject(text):
+        if action == "restart":
             self.phone = None
             self.phone_digits = ""
             self.state = self.ASK_PHONE
             await self._ask_for_phone("好的，请重新按顺序说出十一位手机号。")
             return
-        code = extract_code(text)
-        if not code:
+        if action != "code" or not code:
             await self._say("没有听清验证码，请再说一遍。")
             return
         try:
@@ -916,6 +965,9 @@ class VoiceActivationSession:
 
     async def _on_nickname(self, text):
         nickname = await extract_nickname(self.conn, text)
+        if nickname is REPEAT:
+            await self._repeat_prompt()
+            return
         if not nickname:
             await self._say("没有听清昵称，请再说一次。")
             return
@@ -924,23 +976,18 @@ class VoiceActivationSession:
         await self._say(f"助手的昵称是{nickname}，对吗？")
 
     async def _on_confirm_nickname(self, text):
-        if same_name_agreement(text, self.nickname) or is_confirm(text):
-            await self._commit_nickname()
+        intent, nickname = await confirm_turn(self.conn, text, f"助手昵称是不是{self.nickname}")
+        if intent == "repeat":
+            await self._repeat_prompt()
             return
-        if is_pure_reject(text):
-            self.nickname = None
-            self.state = self.ASK_NICKNAME
-            await self._say("好的，请重新说出助手昵称。")
-            return
-        corrected = await extract_nickname(self.conn, text)
-        if corrected and corrected != self.nickname:
-            self.nickname = corrected
+        if nickname and nickname != self.nickname:
+            self.nickname = nickname
             await self._say(f"助手的昵称是{self.nickname}，对吗？")
             return
-        if corrected == self.nickname:
+        if intent == "accept" or nickname == self.nickname:
             await self._commit_nickname()
             return
-        if is_reject(text):
+        if intent == "decline":
             self.nickname = None
             self.state = self.ASK_NICKNAME
             await self._say("好的，请重新说出助手昵称。")
@@ -969,6 +1016,9 @@ class VoiceActivationSession:
 
     async def _on_owner(self, text):
         title = await extract_owner_title(self.conn, text)
+        if title is REPEAT:
+            await self._repeat_prompt()
+            return
         if not title:
             await self._say("没有听清。您希望我怎么称呼您？")
             return
@@ -977,23 +1027,18 @@ class VoiceActivationSession:
         await self._say(f"我称呼您为{title}，对吗？")
 
     async def _on_confirm_owner(self, text):
-        if same_name_agreement(text, self.owner_title) or is_confirm(text):
-            await self._begin_persona()
+        intent, title = await confirm_turn(self.conn, text, f"是不是称呼用户为{self.owner_title}")
+        if intent == "repeat":
+            await self._repeat_prompt()
             return
-        if is_pure_reject(text):
-            self.owner_title = None
-            self.state = self.ASK_OWNER
-            await self._say("好的，我该怎么称呼您呢？")
-            return
-        corrected = await extract_owner_title(self.conn, text)
-        if corrected and corrected != self.owner_title:
-            self.owner_title = corrected
+        if title and title != self.owner_title:
+            self.owner_title = title
             await self._say(f"我称呼您为{self.owner_title}，对吗？")
             return
-        if corrected == self.owner_title:
+        if intent == "accept" or title == self.owner_title:
             await self._begin_persona()
             return
-        if is_reject(text):
+        if intent == "decline":
             self.owner_title = None
             self.state = self.ASK_OWNER
             await self._say("好的，我该怎么称呼您呢？")
@@ -1035,42 +1080,45 @@ class VoiceActivationSession:
         self.conn.logger.bind(tag=TAG).info(f"性格模板 {name} 切换音色: {voice}")
 
     async def _on_persona(self, text):
-        loaded_now = False
         if not self.persona_templates:
             if not await self._load_persona_templates():
                 return
-            loaded_now = True
-        matched = None
-        if not is_confirm(text):
-            matched = await resolve_persona(self.conn, text, self.persona_templates)
+        matched = await resolve_persona(self.conn, text, self.persona_templates)
+        if matched is REPEAT:
+            await self._repeat_prompt()
+            return
         if matched:
             self.persona_name = matched
             self.state = self.CONFIRM_PERSONA
             self._use_persona_voice(matched)
             await self._say(f"性格用{matched}，对吗？")
             return
-        if loaded_now or is_confirm(text) or is_reject(text):
-            await self._say(self._persona_menu())
-            return
         await self._say("没有听清。请说序号，或者说模板名字。")
 
     async def _on_confirm_persona(self, text):
-        if is_confirm(text):
+        listed = "、".join(self.persona_templates)
+        intent, value = await confirm_turn(
+            self.conn,
+            text,
+            f"性格是不是用{self.persona_name}。可选模板：{listed}",
+        )
+        if intent == "repeat":
+            await self._repeat_prompt()
+            return
+        chosen = None
+        for name in self.persona_templates:
+            if value and (value == name or compact_text(value) == compact_text(name)):
+                chosen = name
+                break
+        if chosen and chosen != self.persona_name:
+            self.persona_name = chosen
+            self._use_persona_voice(chosen)
+            await self._say(f"性格用{chosen}，对吗？")
+            return
+        if intent == "accept" or chosen == self.persona_name:
             await self._ask_supplement()
             return
-        if is_pure_reject(text):
-            await self._reask_persona()
-            return
-        switched = await resolve_persona(self.conn, text, self.persona_templates)
-        if switched and switched != self.persona_name:
-            self.persona_name = switched
-            self._use_persona_voice(switched)
-            await self._say(f"性格用{switched}，对吗？")
-            return
-        if switched == self.persona_name:
-            await self._ask_supplement()
-            return
-        if is_reject(text):
+        if intent == "decline":
             await self._reask_persona()
             return
         await self._say("请说确认，或者说重说。")
@@ -1086,6 +1134,9 @@ class VoiceActivationSession:
 
     async def _on_supplement(self, text):
         supplement = await supplement_text(self.conn, text)
+        if supplement is REPEAT:
+            await self._repeat_prompt()
+            return
         if supplement is None:
             await self._say("没有听清。请补充，或者说没有。")
             return
@@ -1127,12 +1178,15 @@ class VoiceActivationSession:
 
     async def _speak_if_user_requests_skills(self, text):
         """静默重试进行中，用户又说了绑定技能：这次失败要说出来。"""
-        if self.stage != "skills" or not is_skills_command(text):
+        if self.stage != "skills":
+            return False
+        request = await resolve_skills_request(self.conn, text)
+        if not request:
             return False
         if getattr(self.conn, "voice_onboarding", None) != "skills_quiet":
             return False
         self.include_auth = True
-        if is_rebind_skills(text):
+        if request == "rebind":
             self.rebind_auth = True
         self._announce_skill_failure = True
         self.conn.speak_skill_failure = True
@@ -1369,23 +1423,26 @@ class VoiceActivationSession:
 
     async def _on_auth_code(self, text):
         label = self.auth_label or "技能"
-        if is_rebind_skills(text):
+        action, code = await resolve_auth_reply(self.conn, text)
+        if action == "repeat":
+            await self._repeat_prompt()
+            return
+        if action == "rebind":
             self.rebind_auth = True
             await self._cancel_auth_task()
             self.auth_queue = list(self.AUTH_QUEUE)
             await self._say("好的，重新绑定授权技能。")
             await self._run_next_auth()
             return
-        if is_skip_skills(text) or is_reject(text):
+        if action == "skip":
             await self._cancel_auth_task()
             await self._say(f"好的，已跳过{label}。")
             await self._run_next_auth()
             return
-        if is_resend(text):
+        if action == "resend":
             await self._say("验证码由服务方发送，请留意短信。收到后直接说出验证码。")
             return
-        code = extract_code(text)
-        if not code:
+        if action != "code" or not code:
             await self._say("没有听清验证码，请再说一遍。或者说跳过。")
             return
         if not self.auth_task_id:
@@ -1441,7 +1498,11 @@ class VoiceActivationSession:
     async def _on_retry_skills(self, text):
         if self._skills_quiet():
             return
-        if is_skip_skills(text):
+        intent, rebind = await resolve_skill_retry(self.conn, text)
+        if intent == "repeat":
+            await self._repeat_prompt()
+            return
+        if intent == "skip":
             self.conn.voice_activation_handler = None
             # 记下已经跳过。下次唤醒只重试通用绑定，授权技能要用户再说「绑定技能」。
             self.conn.voice_onboarding = None
@@ -1455,27 +1516,23 @@ class VoiceActivationSession:
                 self.conn.logger.bind(tag=TAG).warning(f"记录跳过技能绑定失败: {exc}")
             await self._say("好的。之后想绑定技能，可以说绑定技能。现在可以开始聊天了。")
             return
-        compact = compact_text(text)
-        if is_rebind_skills(text):
-            self.rebind_auth = True
-        if (
-            is_confirm(text)
-            or is_skills_command(text)
-            or "重试" in compact
-            or "再试" in compact
-            or "不要跳过" in compact
-        ):
+        if intent == "retry":
+            if rebind:
+                self.rebind_auth = True
             await self._bind_skills()
             return
         await self._say("请说确认重试，或者说稍后再说。")
 
     async def _on_ask_reboot(self, text):
-        if is_reject(text):
-            await self._finish_without_reboot()
+        intent = await confirm_intent(self.conn, text, "是否现在重启设备")
+        if intent == "repeat":
+            await self._repeat_prompt()
             return
-        compact = compact_text(text)
-        if is_confirm(text) or "重启" in compact:
+        if intent == "accept":
             await self._reboot_device()
+            return
+        if intent == "decline":
+            await self._finish_without_reboot()
             return
         await self._say("请说确认重启设备，或者说不要。")
 
