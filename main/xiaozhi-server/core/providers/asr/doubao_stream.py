@@ -42,6 +42,10 @@ def merge_replay(recent, unsent, limit=_SPEECH_BUFFER_FRAMES):
 _PLAYBACK_TAIL_SECONDS = 1.0
 # 约 60ms 一帧。连续几帧都像人声，才当成用户在打断，避免扬声器余音误触发。
 _BARGE_IN_FRAMES = 5
+# 打断后设备会停麦再重新开麦，这段时间云端收不到结尾静音。
+# 麦还在送时，人声停这么久就补静音。麦断了就再多等一会儿，躲开重新开麦的空档。
+_BARGE_QUIET_SECONDS = 0.6
+_BARGE_GAP_SECONDS = 1.5
 
 
 def should_commit_definite(text, manual, voice_stop, frame_count):
@@ -54,9 +58,14 @@ def should_commit_definite(text, manual, voice_stop, frame_count):
     return True
 
 
-def playback_blocks_upload(speaking, aec, manual, now, resume_at, hold_tail, tail_seconds=_PLAYBACK_TAIL_SECONDS):
-    """没有回声消除时，播放期间不上送麦克风。聊天再多留一小段，避开设备里还没播完的声音。"""
-    if aec or manual:
+def playback_blocks_upload(
+    speaking, aec, manual, now, resume_at, hold_tail, tail_seconds=_PLAYBACK_TAIL_SECONDS, realtime=False
+):
+    """没有回声消除时，播放期间不上送麦克风。聊天再多留一小段，避开设备里还没播完的声音。
+
+    实时模式设备自己消了回声，麦在播放时也开着，这段必须上送，否则用户第一句既不停播也识别不到。
+    """
+    if aec or manual or realtime:
         return False, resume_at
     if speaking:
         if hold_tail:
@@ -91,6 +100,10 @@ class ASRProvider(ASRProviderBase):
         self._barge_frames = 0
         self._barge_in = False
         self._barge_abort_sent = False
+        self._barge_voice_at = 0.0
+        self._barge_audio_at = 0.0
+        self._barge_close_task = None
+        self._barge_silence_sent = False
         # 播放期间先攒着的人声。凑够连续几帧再整段送上，避免只补发触发那一帧。
         self._barge_preroll = []
         # 还没送到当前连接上的 PCM。换连接时整段补发，不依赖只剩 10 帧的 asr_audio。
@@ -328,8 +341,10 @@ class ASRProvider(ASRProviderBase):
             task.cancel()
 
     async def _silence_before_packet_timeout(self, ws):
-        """距上次发包满 6 秒就补 200ms 静音。只在断流时发送，不铺满整段等待。"""
-        frame = b"\x00" * int(self.rate * 2 * 0.2)
+        """距上次发包满 6 秒就补一段静音。只在断流时发送，不铺满整段等待。"""
+        # 保活静音要盖过 end_window，否则半句会一直开着，直到用户再说一句。
+        seconds = max(0.2, (int(self.end_window_size or 0) + 200) / 1000.0)
+        frame = b"\x00" * int(self.rate * 2 * seconds)
         try:
             while self.asr_ws is ws and not self._is_stopping:
                 await asyncio.sleep(1)
@@ -348,10 +363,13 @@ class ASRProvider(ASRProviderBase):
         except asyncio.CancelledError:
             return
 
+    def _realtime(self, conn):
+        return getattr(conn, "client_listen_mode", "auto") == "realtime"
+
     def _playback_guard(self, conn):
         """正在播，或设备缓冲区那一小段尾巴。这段时间麦里多半是扬声器。"""
         manual = getattr(conn, "client_listen_mode", "auto") == "manual"
-        if manual or getattr(conn, "client_aec", False):
+        if manual or getattr(conn, "client_aec", False) or self._realtime(conn):
             return False
         if bool(getattr(conn, "client_is_speaking", False)):
             return True
@@ -385,8 +403,9 @@ class ASRProvider(ASRProviderBase):
             self._stash(conn, frame, True)
 
     def _note_barge_in(self, conn, audio_have_voice):
-        """播放中用户持续出声：开始上送，并打断当前这句。手动模式和回声消除不走这里。"""
-        if not self._playback_guard(conn) or not self._barge_in_allowed(conn):
+        """播放中用户持续出声就打断。实时模式麦已经在上送，这里只负责停播。"""
+        speaking = bool(getattr(conn, "client_is_speaking", False))
+        if not self._barge_in_allowed(conn) or not (self._playback_guard(conn) or (self._realtime(conn) and speaking)):
             self._barge_frames = 0
             return False
         if not audio_have_voice:
@@ -397,6 +416,75 @@ class ASRProvider(ASRProviderBase):
             return False
         self._barge_in = True
         return self._barge_frames == _BARGE_IN_FRAMES
+
+    def _arm_barge_close(self, conn):
+        """人声停够一会儿就补静音。不再来音频时也要收口，不能只靠下一帧。"""
+        now = time.monotonic()
+        self._barge_voice_at = now
+        self._barge_audio_at = now
+        task = self._barge_close_task
+        if task is not None and not task.done():
+            return
+        self._barge_close_task = asyncio.create_task(self._close_barge_when_quiet(conn))
+
+    def _cancel_barge_close(self):
+        self._barge_silence_sent = False
+        task = self._barge_close_task
+        self._barge_close_task = None
+        if task is not None and not task.done():
+            task.cancel()
+
+    def _touch_barge_voice(self, conn):
+        if not self._barge_in:
+            return
+        self._barge_voice_at = time.monotonic()
+        if self._barge_silence_sent:
+            self._barge_silence_sent = False
+            self._arm_barge_close(conn)
+
+    def _push_closing_silence(self):
+        if not self._barge_in:
+            return False
+        ms = max(int(self.end_window_size or 0), 800) + 200
+        frame = b"\x00" * int(self.rate * 2 * 0.2)
+        count = max(1, (ms + 199) // 200)
+        if not self._barge_in:
+            return False
+        for _ in range(count):
+            stash_unsent(self._unsent, frame, True)
+        return True
+
+    async def _close_barge_when_quiet(self, conn):
+        quiet = getattr(self, "_barge_quiet_seconds", _BARGE_QUIET_SECONDS)
+        gap = getattr(self, "_barge_gap_seconds", _BARGE_GAP_SECONDS)
+        try:
+            while not self._is_stopping:
+                stop = getattr(conn, "stop_event", None)
+                if stop is not None and stop.is_set():
+                    return
+                await asyncio.sleep(0.05)
+                if not self._barge_in or self._barge_silence_sent:
+                    return
+                now = time.monotonic()
+                voice_age = now - self._barge_voice_at
+                if voice_age < quiet:
+                    continue
+                # 麦还在送静音，说明人已经停了。麦整段断掉时，留出重新开麦的空档。
+                stream_alive = now - self._barge_audio_at < 0.25
+                if not stream_alive and voice_age < gap:
+                    continue
+                if not self._push_closing_silence():
+                    return
+                self._barge_silence_sent = True
+                logger.bind(tag=TAG).info("打断后已停顿，补静音让识别收口")
+                self._kick_uploader(conn, connect=not self._session_alive())
+                return
+        except asyncio.CancelledError:
+            return
+        finally:
+            current = asyncio.current_task()
+            if self._barge_close_task is current:
+                self._barge_close_task = None
 
     def _schedule_abort(self, conn):
         if self._barge_abort_sent:
@@ -425,6 +513,7 @@ class ASRProvider(ASRProviderBase):
             time.monotonic(),
             self._resume_upload_at,
             hold_tail,
+            realtime=self._realtime(conn),
         )
         if blocked and not self._playback_drop_logged:
             self._playback_drop_logged = True
@@ -444,6 +533,11 @@ class ASRProvider(ASRProviderBase):
                 self._push_preroll(pcm_frame)
                 if self._note_barge_in(conn, True):
                     self._commit_preroll(conn)
+                    # 先放开麦，避免停播回包还没到时，尾巴把后面的话丢掉。
+                    self._resume_upload_at = 0.0
+                    conn.client_is_speaking = False
+                    self._barge_silence_sent = False
+                    self._arm_barge_close(conn)
                     self._schedule_abort(conn)
                     self._kick_uploader(conn, connect=not self._session_alive())
                 elif self._barge_frames == 0:
@@ -457,6 +551,19 @@ class ASRProvider(ASRProviderBase):
             return
 
         self._barge_preroll.clear()
+        # 实时模式播放时麦没有被丢掉。连续人声就停播，这一句继续上送，等用户自己说完再收口。
+        if (
+            self._realtime(conn)
+            and audio_have_voice
+            and getattr(conn, "client_is_speaking", False)
+            and self._barge_in_allowed(conn)
+            and self._note_barge_in(conn, True)
+        ):
+            self._schedule_abort(conn)
+        if self._barge_in:
+            self._barge_audio_at = time.monotonic()
+            if audio_have_voice:
+                self._touch_barge_voice(conn)
         self._stash(conn, pcm_frame, audio_have_voice)
         connect = bool(
             audio_have_voice
@@ -605,6 +712,7 @@ class ASRProvider(ASRProviderBase):
         self._recent = []
         self._unsent = []
         self._hold_replay = False
+        self._cancel_barge_close()
         self._barge_frames = 0
         self._barge_in = False
         self._barge_abort_sent = False
@@ -617,6 +725,7 @@ class ASRProvider(ASRProviderBase):
         self._drop_replay = True
         self._cancel_keepalive()
         self._cancel_uploader()
+        self._cancel_barge_close()
         self._recent = []
         self._unsent = []
         self._barge_preroll = []
@@ -783,6 +892,7 @@ class ASRProvider(ASRProviderBase):
         self._drop_replay = True
         self._cancel_keepalive()
         self._cancel_uploader()
+        self._cancel_barge_close()
         self._recent = []
         self._unsent = []
         self._barge_preroll = []

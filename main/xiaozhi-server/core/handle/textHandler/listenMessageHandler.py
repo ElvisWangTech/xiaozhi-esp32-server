@@ -41,17 +41,18 @@ class ListenTextMessageHandler(TextMessageHandler):
                 return
 
             conn.client_voice_stop = True
-            if conn.asr.interface_type == InterfaceType.STREAM and conn.client_listen_mode == "manual":
-                # 按键松开才结束这一段。自动模式保持同一条识别连接。
-                asyncio.create_task(conn.asr._send_stop_request())
-            else:
-                # 非流式模式：直接触发ASR识别
-                if len(conn.asr_audio) > 0:
-                    asr_audio_task = conn.asr_audio.copy()
-                    conn.reset_audio_states()
+            if conn.asr.interface_type == InterfaceType.STREAM:
+                if conn.client_listen_mode == "manual":
+                    # 按键松开才结束这一段。自动模式靠云端断句，不能在这里把还没送完的音频清掉。
+                    asyncio.create_task(conn.asr._send_stop_request())
+                return
+            # 非流式模式：直接触发ASR识别
+            if len(conn.asr_audio) > 0:
+                asr_audio_task = conn.asr_audio.copy()
+                conn.reset_audio_states()
 
-                    if len(asr_audio_task) > 0:
-                        await conn.asr.handle_voice_stop(conn, asr_audio_task)
+                if len(asr_audio_task) > 0:
+                    await conn.asr.handle_voice_stop(conn, asr_audio_task)
         elif msg_json["state"] == "detect":
             conn.client_have_voice = False
             conn.reset_audio_states()

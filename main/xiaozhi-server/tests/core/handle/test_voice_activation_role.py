@@ -160,6 +160,8 @@ def test_utterance_end_keeps_asr_socket():
     assert blocked is False
     blocked, _ = playback_blocks_upload(True, True, False, 10.0, 0.0, True)
     assert blocked is False
+    blocked, _ = playback_blocks_upload(True, False, False, 10.0, 0.0, True, realtime=True)
+    assert blocked is False
     blocked, resume_at = playback_blocks_upload(True, False, False, 10.0, 0.0, False)
     assert blocked is True
     assert resume_at == 10.0
@@ -972,6 +974,105 @@ def test_barge_in_uploads_preroll_without_waiting_for_send():
             release.set()
             provider._is_stopping = True
             provider._unsent = []
+            provider._cancel_barge_close()
+            task = provider._upload_task
+            if task is not None and not task.done():
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+
+    asyncio.run(_run())
+
+
+def test_realtime_keeps_the_utterance_while_stopping_playback():
+    """实时模式播放中不能丢麦。第一句就要上送，并在持续人声时停播。"""
+    from core.providers.asr.doubao_stream import ASRProvider, _BARGE_IN_FRAMES
+
+    provider = ASRProvider({}, True)
+    conn = _speaking_conn(provider)
+    conn.client_listen_mode = "realtime"
+    provider.asr_ws = object()
+    provider.is_processing = True
+    sent = []
+
+    async def _send(_ws, frame, remember=True):
+        sent.append(frame)
+
+    provider._send_pcm = _send
+
+    async def _run():
+        import core.handle.abortHandle as abort_mod
+
+        aborted = []
+
+        async def _abort(_conn):
+            aborted.append(True)
+
+        original = abort_mod.handleAbortMessage
+        abort_mod.handleAbortMessage = _abort
+        try:
+            frames = [bytes([index + 1]) for index in range(_BARGE_IN_FRAMES + 3)]
+            for frame in frames:
+                await provider.receive_audio(conn, frame, True)
+            await asyncio.sleep(0)
+            assert provider._barge_close_task is None
+            assert aborted == [True]
+            uploaded = list(sent) + list(provider._unsent)
+            for frame in frames:
+                assert frame in uploaded
+        finally:
+            abort_mod.handleAbortMessage = original
+            provider._is_stopping = True
+            provider._cancel_barge_close()
+            task = provider._upload_task
+            if task is not None and not task.done():
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+
+    asyncio.run(_run())
+
+
+def test_barge_in_sends_silence_when_the_mic_goes_quiet():
+    """打断后麦停了也要补静音，不能干等下一句或 6 秒保活才识别。"""
+    from core.providers.asr.doubao_stream import ASRProvider, _BARGE_IN_FRAMES
+
+    provider = ASRProvider({}, True)
+    provider._barge_quiet_seconds = 0.05
+    provider._barge_gap_seconds = 0.05
+    conn = _speaking_conn(provider)
+    provider.asr_ws = object()
+    provider.is_processing = True
+    sent = []
+
+    async def _send(_ws, frame, remember=True):
+        sent.append(frame)
+
+    provider._send_pcm = _send
+
+    async def _run():
+        import core.handle.abortHandle as abort_mod
+
+        async def _abort(_conn):
+            return None
+
+        original = abort_mod.handleAbortMessage
+        abort_mod.handleAbortMessage = _abort
+        try:
+            for index in range(_BARGE_IN_FRAMES):
+                await provider.receive_audio(conn, bytes([index + 1]), True)
+            await asyncio.sleep(0.2)
+            silence = b"\x00" * int(provider.rate * 2 * 0.2)
+            assert provider._barge_silence_sent is True
+            assert silence in sent or silence in provider._unsent
+        finally:
+            abort_mod.handleAbortMessage = original
+            provider._is_stopping = True
+            provider._cancel_barge_close()
             task = provider._upload_task
             if task is not None and not task.done():
                 task.cancel()
@@ -1020,6 +1121,7 @@ def test_reconnect_flush_does_not_block_the_mic_thread():
             provider._is_stopping = True
             provider._want_connect = False
             provider._unsent = []
+            provider._cancel_barge_close()
             release.set()
             task = provider._upload_task
             if task is not None and not task.done():
