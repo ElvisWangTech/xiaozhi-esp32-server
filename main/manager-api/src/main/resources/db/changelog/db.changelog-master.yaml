@@ -809,3 +809,24 @@ databaseChangeLog:
         - sqlFile:
             encoding: utf8
             path: classpath:db/changelog/202610281410.sql
+  - changeSet:
+      id: 202611021240
+      author: qiniu
+      changes:
+        - sqlFile:
+            encoding: utf8
+            path: classpath:db/changelog/202611021240.sql
+  - changeSet:
+      id: 202611021410
+      author: qiniu
+      changes:
+        - sqlFile:
+            encoding: utf8
+            path: classpath:db/changelog/202611021410.sql
+  - changeSet:
+      id: 202611021515
+      author: qiniu
+      changes:
+        - sqlFile:
+            encoding: utf8
+            path: classpath:db/changelog/202611021515.sql
