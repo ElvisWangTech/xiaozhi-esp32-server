@@ -4,6 +4,7 @@ import asyncio
 
 from core.handle.voice_activation import (
     REPEAT,
+    SKIP,
     VoiceActivationSession,
     apply_persona_voice,
     clean_supplement,
@@ -81,6 +82,63 @@ def test_extract_nickname_always_asks_the_model():
     assert asyncio.run(extract_nickname(failed, "就叫小美")) is None
     repeated = _FakeConn('{"intent":"repeat","nickname":""}')
     assert asyncio.run(extract_nickname(repeated, "没听清")) is REPEAT
+
+    skipped = _FakeConn('{"intent":"skip","nickname":""}')
+    assert asyncio.run(extract_nickname(skipped, "不想设置了")) is SKIP
+
+
+def _nickname_session(conn):
+    session = VoiceActivationSession(conn, stage="nickname")
+    session.state = session.ASK_NICKNAME
+    said = []
+
+    async def _say(text):
+        said.append(text)
+
+    async def _send(_text):
+        return None
+
+    session._say = _say
+    session._send_recognized_text = _send
+    return session, said
+
+
+def test_nickname_retries_give_progressively_clearer_hints():
+    conn = _FakeConn('{"intent":"unclear","nickname":""}')
+    session, said = _nickname_session(conn)
+    for _ in range(3):
+        asyncio.run(session.handle_text("嗯。"))
+    assert session.state == session.ASK_NICKNAME
+    assert len(said) == 3
+    assert len(set(said)) == 3  # 不再原样重复「没有听清昵称，请再说一次。」
+    assert any("比如" in text for text in said)
+    assert any("默认昵称" in text for text in said)
+
+
+def test_misheard_short_name_is_corrected_in_one_turn():
+    conn = _FakeConn('{"intent":"answer","nickname":"初期"}')
+    session, said = _nickname_session(conn)
+    # ASR 把「初五」听成「初期」：模型按宽松候选返回 answer，直接进入确认。
+    asyncio.run(session.handle_text("初期。"))
+    assert session.state == session.CONFIRM_NICKNAME
+    assert session.nickname == "初期"
+    assert said == ["助手的昵称是初期，对吗？"]
+
+    # 用户一句改口即可纠正。
+    session.conn = _FakeConn('{"intent":"correct","value":"初五"}')
+    asyncio.run(session.handle_text("不对，是初五"))
+    assert session.nickname == "初五"
+    assert session.state == session.CONFIRM_NICKNAME
+    assert said[-1] == "助手的昵称是初五，对吗？"
+
+
+def test_nickname_skip_uses_default():
+    conn = _FakeConn('{"intent":"skip","nickname":""}')
+    session, said = _nickname_session(conn)
+    asyncio.run(session.handle_text("算了"))
+    assert session.state == session.CONFIRM_NICKNAME
+    assert session.nickname == "助手"
+    assert "助手" in said[-1]
 
 
 def test_extract_owner_title():
@@ -341,7 +399,7 @@ def test_did_not_hear_repeats_the_current_question():
     asyncio.run(session.handle_text("没听清"))
     assert session.state == session.ASK_NICKNAME
     assert session.nickname is None
-    assert said == ["请说出助手的昵称。"]
+    assert len(said) == 1 and "请说出助手的昵称" in said[0] and "比如" in said[0]
     assert conn.calls
 
     said.clear()

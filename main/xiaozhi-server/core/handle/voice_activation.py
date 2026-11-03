@@ -43,6 +43,13 @@ class _RepeatRequest:
 REPEAT = _RepeatRequest()
 
 
+class _SkipRequest:
+    """模型判断：用户明确不想设置昵称，想跳过或用默认。"""
+
+
+SKIP = _SkipRequest()
+
+
 def compact_text(text):
     if not text:
         return ""
@@ -112,18 +119,23 @@ def isolated_code(text):
 _NICKNAME_SYSTEM_PROMPT = (
     "你在语音引导里，从用户原话中提取助手昵称。"
     "只输出一个 JSON 对象，不要解释，不要使用 markdown。"
-    '{"intent":"answer","nickname":"小智"}。'
+    '{"intent":"answer","nickname":"豆豆"}。'
     "没听清、要你把问题再说一遍时输出 "
     '{"intent":"repeat","nickname":""}。'
-    "听不出昵称时输出 "
-    '{"intent":"unclear","nickname":""}。\n'
+    "用户明确不想设置昵称、想跳过或用默认时输出 "
+    '{"intent":"skip","nickname":""}。\n'
     "规则：\n"
-    "1. 用户可能直接说昵称，也可能说整句，例如「你的昵称是小智」「我想叫你豆豆吧」「就叫小美」。只保留真实昵称。\n"
+    "1. 用户可能直接说昵称，也可能说整句，例如「你的昵称是旺财」「我想叫你豆豆吧」「就叫小美」。只保留真实昵称。\n"
     "2. 昵称 1 到 12 个字，不要带语气词。\n"
-    "3. 只是在确认或否定，例如「对」「确认」「不对」「重说」，intent 为 unclear，nickname 留空。\n"
-    "4. 否定里如果带了新昵称，例如「不对，你的昵称是小美」，intent 为 answer，取出小美。\n"
-    "5. 「没听清」「你再说一遍」「刚才说什么」是 repeat。用户自己要重说答案，例如「我重说」，是 unclear。\n"
-    "6. 听不清或不是在起名时，intent 为 unclear，nickname 留空。"
+    "3. 语音识别经常把名字听错，例如用户想叫「初五」可能被识别成「初期」。"
+    "只要原话读起来像是一个名字（通常很短、没有句子结构），即使可能听错了，"
+    "也把它原样填进 nickname 并输出 answer——下一步会向用户复述确认，说错了可以当场改口。"
+    "不要因为拿不准就输出 unclear，那会让用户陷入反复重说。\n"
+    "4. 只有整句是语气词（例如「嗯」「啊」）、纯确认或纯否定（例如「对」「确认」「不对」）、"
+    "或与起名完全无关的话时，才输出 unclear，nickname 留空。\n"
+    "5. 否定里如果带了新昵称，例如「不对，你的昵称是小美」，intent 为 answer，取出小美。\n"
+    "6. 「没听清」「你再说一遍」「刚才说什么」是 repeat。用户自己要重说答案，例如「我重说」，是 unclear。\n"
+    "7. 用户表达放弃设置的意图，例如不想起、算了、先跳过、用默认的，intent 为 skip，nickname 留空。"
 )
 _SPEECH_TAILS = (
     "可以吗",
@@ -241,6 +253,17 @@ _PHONE_ASIDE_PROMPT = (
 )
 _SHORT_NAME_LIMIT = 12
 _SUPPLEMENT_LIMIT = 80
+# 跳过设置时的兜底昵称。后端 saveNickname 拒绝空值且负责推进 onboarding 阶段，
+# 所以跳过也必须提交一个昵称；用中性的「助手」，与 _begin_owner 的既有兜底一致。
+_NICKNAME_DEFAULT = "助手"
+# 首次提问就给例子，减少用户不知道该说多短而反复失败。
+_ASK_NICKNAME_PROMPT = "请说出助手的昵称，比如豆豆、小美。"
+# 模型判 unclear 时逐级给出更具体的引导，不重复同一句话。
+_NICKNAME_RETRY_HINTS = (
+    "没听清。请只说一个简短的名字，比如豆豆、小美。",
+    "还是没听清。请靠近一点，直接说名字，不要加别的字。",
+    "一直没听清。也可以说不想设置了，先用默认昵称。",
+)
 
 
 def _strip_speech_tails(text):
@@ -436,13 +459,17 @@ async def _ask_llm_json(conn, system_prompt, user_text, label):
 
 
 async def extract_nickname(conn, text):
-    """每句都问模型。返回昵称、REPEAT，或 None。"""
+    """每句都问模型。返回昵称、REPEAT、SKIP，或 None。"""
     raw = unwrap_user_text(text).strip()
     if not compact_text(raw):
         return None
     data = await _ask_llm_json(conn, _NICKNAME_SYSTEM_PROMPT, raw, "提取昵称")
-    if _intent_of(data, {"answer", "repeat", "unclear"}) == "repeat":
+    intent = _intent_of(data, {"answer", "repeat", "unclear", "skip"})
+    if intent == "repeat":
         return REPEAT
+    if intent == "skip":
+        _log_guide(conn, "info", f"昵称识别: {raw} -> 跳过")
+        return SKIP
     nickname = parse_nickname_reply(json.dumps(data, ensure_ascii=False) if data else "")
     _log_guide(conn, "info", f"昵称识别: {raw} -> {nickname or ''}")
     return nickname
@@ -705,6 +732,8 @@ class VoiceActivationSession:
         self.phone = None
         self.phone_digits = ""
         self.nickname = None
+        # 模型连续判 unclear 的次数。用于切换引导话术，避免重复同一句提示。
+        self._nickname_misses = 0
         self.owner_title = None
         self.persona_name = None
         self.persona_templates = []
@@ -737,7 +766,7 @@ class VoiceActivationSession:
             return
         if self.state == self.ASK_NICKNAME:
             prefix = "绑定成功。" if self.announce_bind_success else ""
-            await self._say(prefix + "请说出助手的昵称。")
+            await self._say(prefix + _ASK_NICKNAME_PROMPT)
             return
         if self.state == self.ASK_OWNER:
             await self._say("我该怎么称呼您呢？")
@@ -968,12 +997,32 @@ class VoiceActivationSession:
         if nickname is REPEAT:
             await self._repeat_prompt()
             return
-        if not nickname:
-            await self._say("没有听清昵称，请再说一次。")
+        if nickname is SKIP:
+            await self._skip_nickname()
             return
+        if not nickname:
+            self._nickname_misses += 1
+            await self._say(self._nickname_retry_hint())
+            return
+        self._nickname_misses = 0
         self.nickname = nickname
         self.state = self.CONFIRM_NICKNAME
         await self._say(f"助手的昵称是{nickname}，对吗？")
+
+    def _nickname_retry_hint(self):
+        index = min(self._nickname_misses, len(_NICKNAME_RETRY_HINTS)) - 1
+        return _NICKNAME_RETRY_HINTS[max(index, 0)]
+
+    async def _skip_nickname(self):
+        """用户明确放弃设置时给一个出口：默认昵称走确认，仍可当场改口。
+
+        后端靠 saveNickname 把 onboarding 从 nickname 推进到 role，
+        所以必须走确认再提交，不能直接切到下一步，否则重连会退回本步。
+        """
+        self._nickname_misses = 0
+        self.nickname = _NICKNAME_DEFAULT
+        self.state = self.CONFIRM_NICKNAME
+        await self._say(f"好的，昵称先用{self.nickname}。对吗？说确认继续，或者说新的名字。")
 
     async def _on_confirm_nickname(self, text):
         intent, nickname = await confirm_turn(self.conn, text, f"助手昵称是不是{self.nickname}")
@@ -989,8 +1038,9 @@ class VoiceActivationSession:
             return
         if intent == "decline":
             self.nickname = None
+            self._nickname_misses = 0
             self.state = self.ASK_NICKNAME
-            await self._say("好的，请重新说出助手昵称。")
+            await self._say("好的，请重新说出助手昵称，比如豆豆、小美。")
             return
         await self._say("请说确认，或者说重说。")
 
@@ -1645,7 +1695,7 @@ class VoiceActivationSession:
         elif self.state == self.ASK_CODE:
             await self._say("请说出短信验证码。")
         elif self.state == self.ASK_NICKNAME:
-            await self._say("请说出助手的昵称。")
+            await self._say(_ASK_NICKNAME_PROMPT)
         elif self.state == self.CONFIRM_NICKNAME:
             await self._say(f"助手的昵称是{self.nickname}，对吗？")
         elif self.state == self.ASK_OWNER:
