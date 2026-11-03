@@ -18,7 +18,8 @@ from core.handle.voice_activation import (
     resolve_persona,
     resolve_skill_retry,
     resolve_skills_request,
-    supplement_text,
+    resolve_supplement_confirm,
+    resolve_supplement_turn,
 )
 
 
@@ -295,15 +296,157 @@ def test_resolve_persona_always_asks_the_model():
 
 
 def test_supplement_always_asks_the_model():
-    declined = _FakeConn('{"action":"decline"}')
-    assert asyncio.run(supplement_text(declined, "没有")) == ""
-    assert declined.calls
-    direct = _FakeConn('{"action":"content"}')
-    assert asyncio.run(supplement_text(direct, "说话温柔一点")) == "说话温柔一点"
+    ended = _FakeConn('{"action":"end"}')
+    assert asyncio.run(resolve_supplement_turn(ended, "没有")) == ("end", "")
+    assert ended.calls
+    assert "没有" in ended.calls[0][1]
+    direct = _FakeConn('{"action":"content","text":"说话温柔一点"}')
+    assert asyncio.run(resolve_supplement_turn(direct, "说话温柔一点")) == ("content", "说话温柔一点")
     assert direct.calls
-    sentence = _FakeConn('{"action":"decline"}')
-    assert asyncio.run(supplement_text(sentence, "没什么要补充的")) == ""
-    assert asyncio.run(supplement_text(_FakeConn('{"action":"repeat"}'), "没听清")) is REPEAT
+    # 先说没有、后面又给了要求：仍然算补充内容
+    mixed = _FakeConn('{"action":"content","text":"说话温柔一点"}')
+    assert asyncio.run(resolve_supplement_turn(mixed, "没有，说话温柔一点")) == ("content", "说话温柔一点")
+    assert asyncio.run(resolve_supplement_turn(_FakeConn('{"action":"repeat"}'), "没听清")) == ("repeat", "")
+    assert asyncio.run(resolve_supplement_turn(_FakeConn('{"action":"unclear"}'), "嗯")) == ("unclear", "")
+    failed = _FakeConn(RuntimeError("down"))
+    assert asyncio.run(resolve_supplement_turn(failed, "少讲道理")) == ("unclear", "")
+
+
+def test_supplement_confirm_asks_the_model():
+    accepted = _FakeConn('{"intent":"accept"}')
+    assert asyncio.run(resolve_supplement_confirm(accepted, "对", "说话温柔一点")) == ("accept", "")
+    assert accepted.calls
+    assert "说话温柔一点" in accepted.calls[0][1]
+    more = _FakeConn('{"intent":"more","text":"少讲道理"}')
+    assert asyncio.run(resolve_supplement_confirm(more, "还要加一句，少讲道理", "说话温柔一点")) == (
+        "more",
+        "少讲道理",
+    )
+    assert asyncio.run(resolve_supplement_confirm(_FakeConn('{"intent":"restart"}'), "不对", "说话温柔一点")) == (
+        "restart",
+        "",
+    )
+
+
+def _supplement_session(conn):
+    session = VoiceActivationSession(conn, stage="role")
+    session.state = session.ASK_SUPPLEMENT
+    said = []
+    saved = []
+
+    async def _say(text):
+        said.append(text)
+
+    async def _send(_text):
+        return None
+
+    async def _save(supplement):
+        saved.append(supplement)
+
+    session._say = _say
+    session._send_recognized_text = _send
+    session._save_role = _save
+    return session, said, saved
+
+
+def test_supplement_collects_several_sentences_until_end():
+    """用户一句一句补充，说「没有了」之前不提交。"""
+    conn = _FakeConn('{"action":"content","text":"说话温柔一点"}')
+    session, said, saved = _supplement_session(conn)
+    asyncio.run(session.handle_text("说话温柔一点"))
+    assert session.supplement_parts == ["说话温柔一点"]
+    assert session.state == session.ASK_SUPPLEMENT
+    assert saved == []
+    assert said[-1].startswith("好的，记下了")
+
+    session.conn = _FakeConn('{"action":"content","text":"少讲道理"}')
+    asyncio.run(session.handle_text("还有，少讲道理"))
+    assert session.supplement_parts == ["说话温柔一点", "少讲道理"]
+    assert saved == []
+
+    session.conn = _FakeConn('{"action":"end"}')
+    asyncio.run(session.handle_text("没有了"))
+    assert session.state == session.CONFIRM_SUPPLEMENT
+    assert saved == []
+    assert said[-1] == "记下的补充是：说话温柔一点。少讲道理。对吗？"
+
+    session.conn = _FakeConn('{"intent":"accept"}')
+    asyncio.run(session.handle_text("对"))
+    assert saved == ["说话温柔一点。少讲道理"]
+
+
+def test_supplement_end_without_content_saves_empty():
+    conn = _FakeConn('{"action":"end"}')
+    session, said, saved = _supplement_session(conn)
+    asyncio.run(session.handle_text("没有"))
+    assert saved == [""]
+    assert session.state == session.ASK_SUPPLEMENT
+
+
+def test_supplement_confirm_can_add_more_and_restart():
+    conn = _FakeConn('{"action":"content","text":"说话温柔一点"}')
+    session, said, saved = _supplement_session(conn)
+    asyncio.run(session.handle_text("说话温柔一点"))
+    asyncio.run(session._finish_supplement())
+    assert session.state == session.CONFIRM_SUPPLEMENT
+
+    session.conn = _FakeConn('{"intent":"more","text":"少讲道理"}')
+    asyncio.run(session.handle_text("还要加一句，少讲道理"))
+    assert session.state == session.ASK_SUPPLEMENT
+    assert session.supplement_parts == ["说话温柔一点", "少讲道理"]
+    assert saved == []
+
+    asyncio.run(session._finish_supplement())
+    session.conn = _FakeConn('{"intent":"restart"}')
+    asyncio.run(session.handle_text("不对，重说"))
+    assert session.state == session.ASK_SUPPLEMENT
+    assert session.supplement_parts == []
+    assert saved == []
+
+
+def test_supplement_stops_at_the_eighty_char_limit():
+    long_text = "一" * 79
+    conn = _FakeConn('{"action":"content","text":"' + long_text + '"}')
+    session, said, saved = _supplement_session(conn)
+    asyncio.run(session.handle_text(long_text))
+    assert session.supplement_parts == [long_text]
+
+    over = _FakeConn('{"action":"content","text":"再多一句"}')
+    session.conn = over
+    asyncio.run(session.handle_text("再多一句"))
+    assert session.supplement_parts == [long_text]
+    assert any("八十个字" in text for text in said)
+
+
+def test_supplement_silence_submits_what_was_collected():
+    """用户说完就不再开口：先再问一次，仍无回应就提交已记下的内容。"""
+    import core.handle.voice_activation as voice_activation
+
+    conn = _FakeConn('{"action":"content","text":"说话温柔一点"}')
+    session, said, saved = _supplement_session(conn)
+    asyncio.run(session.handle_text("说话温柔一点"))
+    task = session._supplement_wait_task
+    assert task is not None
+
+    async def _run():
+        await session._supplement_timeout()
+        await session._supplement_timeout()
+
+    asyncio.run(_run())
+    assert any("还有要补充的吗" in text for text in said)
+    assert saved == ["说话温柔一点"]
+    assert session._supplement_wait_task is None
+
+
+def test_supplement_repeat_keeps_what_was_collected():
+    conn = _FakeConn('{"action":"repeat"}')
+    session, said, saved = _supplement_session(conn)
+    session.supplement_parts = ["说话温柔一点"]
+    asyncio.run(session.handle_text("你再说一遍"))
+    assert session.state == session.ASK_SUPPLEMENT
+    assert session.supplement_parts == ["说话温柔一点"]
+    assert saved == []
+    assert "已经记下的补充是：说话温柔一点" in said[-1]
 
 
 def test_reboot_question_is_not_acceptance():

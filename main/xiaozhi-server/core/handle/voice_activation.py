@@ -183,13 +183,31 @@ _OWNER_SYSTEM_PROMPT = (
     "7. 用户表达放弃设置的意图，例如不想设置、算了、先跳过、用默认的，intent 为 skip，title 留空。"
 )
 _SUPPLEMENT_SYSTEM_PROMPT = (
-    "用户刚被问还有没有要补充的角色设定。没有的话会说没有。"
-    "判断这句是在拒绝补充，还是在说出补充内容。"
-    '{"action":"decline"}、{"action":"content"}、{"action":"repeat"} 或 {"action":"unclear"}。不要解释。\n'
-    "decline：整句是在推辞。例如「没有」「不用了」「没什么要补充的」「算了吧」「先这样就可以了」「能不补充吗」。\n"
-    "content：说出了具体要求。例如「说话温柔一点」「少讲道理」。先说没有、后面又给了具体要求，例如「没有，说话温柔一点」，也是 content。\n"
-    "repeat：没听清，让你把问题再说一遍。\n"
-    "不要因为句子里出现「没有」「不用」「算了」就当成 decline，要看整句是不是还提出了要求。"
+    "用户在补充角色设定，常常一次只说一句，说完会示意结束。"
+    "判断这一句是在继续补充、示意结束、要求重听，还是听不清。"
+    "只输出一个 JSON 对象，不要解释，不要使用 markdown。"
+    '{"action":"content","text":"说话温柔一点"}、{"action":"end","text":""}、'
+    '{"action":"repeat","text":""} 或 {"action":"unclear","text":""}。\n'
+    "content：这一句提出了新的具体要求。text 写这个要求本身，去掉「还有」「然后」「再补充」这类连接词。\n"
+    "end：整句都在表示补充说完了、没有了。\n"
+    "repeat：没听清，让你把刚才的问题再说一遍。\n"
+    "unclear：语气词、纯确认、反问，或听不清在说什么。\n"
+    "先说没有、后面又给了具体要求时，是 content，不是 end。不要因为出现「没有」「不用」「算了」就判成 end，"
+    "要看整句是不是还在提要求。"
+)
+_SUPPLEMENT_ACTIONS = ("content", "end", "repeat", "unclear")
+_SUPPLEMENT_CONFIRM_INTENTS = ("accept", "more", "restart", "repeat", "unclear")
+_SUPPLEMENT_CONFIRM_PROMPT = (
+    "你在语音引导里，刚把收集到的补充设定复述给用户，等用户确认。"
+    "只输出一个 JSON 对象，不要解释，不要使用 markdown。"
+    '{"intent":"accept","text":""}、{"intent":"more","text":""}、{"intent":"restart","text":""}、'
+    '{"intent":"repeat","text":""} 或 {"intent":"unclear","text":""}。\n'
+    "accept：同意，就按这些补充保存。\n"
+    "more：还要继续补充。text 写这一句新的要求；用户只说「还有」「等一下」而没给内容时，text 留空。\n"
+    "restart：不要这些补充，要重新说，或者说得不对要改。用户自己要重说，例如「重说」「我说错了」，也是 restart。\n"
+    "repeat：没听清，让你把刚才复述的内容再说一遍。例如「你再说一遍」「没听清」。\n"
+    "unclear：反问、犹豫，或在问原因。\n"
+    "句子里出现复述过的词，不等于同意。"
 )
 _CONFIRM_INTENTS = {"accept", "decline", "repeat", "correct", "unclear"}
 _CONFIRM_SYSTEM_PROMPT = (
@@ -257,6 +275,8 @@ _PHONE_ASIDE_PROMPT = (
 )
 _SHORT_NAME_LIMIT = 12
 _SUPPLEMENT_LIMIT = 80
+# 补充可以分几句说。记下一句后先等用户继续，这段静音内没有新内容就当作说完了。
+SUPPLEMENT_PAUSE_SECONDS = 6
 # 跳过设置时的兜底昵称。后端 saveNickname 拒绝空值且负责推进 onboarding 阶段，
 # 所以跳过也必须提交一个昵称；用中性的「助手」，与 _begin_owner 的既有兜底一致。
 _NICKNAME_DEFAULT = "助手"
@@ -570,28 +590,39 @@ async def resolve_persona(conn, text, names):
     return chosen
 
 
-async def supplement_text(conn, text):
-    """每句都问模型。拒绝时返回空字符串，重听时返回 REPEAT，听不清时返回 None。"""
+async def resolve_supplement_turn(conn, text, collected=""):
+    """判断这一句是继续补充、示意结束、要求重听，还是听不清。
+
+    返回 (action, content)。action 为 content 时 content 是这一句的要求。
+    """
     raw = unwrap_user_text(text).strip()
     if not compact_text(raw):
-        return None
-    data = await _ask_llm_json(conn, _SUPPLEMENT_SYSTEM_PROMPT, raw, "判断补充")
+        return "unclear", ""
+    asked = f"已经记下的补充：{collected or '暂无'}\n用户这一句：{raw}"
+    data = await _ask_llm_json(conn, _SUPPLEMENT_SYSTEM_PROMPT, asked, "判断补充")
     action = str((data or {}).get("action") or "").strip()
-    if action == "repeat":
-        return REPEAT
-    declined = action == "decline" or _flag_true((data or {}).get("decline"))
+    if action not in _SUPPLEMENT_ACTIONS:
+        return "unclear", ""
+    content = ""
     if action == "content":
-        declined = False
-    if not data or (action not in ("decline", "content", "repeat", "unclear") and "decline" not in data):
-        return None
-    if declined:
-        return ""
-    if action == "unclear":
-        return None
-    cleaned = clean_supplement(text)
-    if not cleaned or len(cleaned) > _SUPPLEMENT_LIMIT:
-        return cleaned or None
-    return cleaned
+        content = clean_supplement((data or {}).get("text") or "") or clean_supplement(raw)
+    _log_guide(conn, "info", f"补充识别: {raw} -> {action} {content}")
+    return action, content
+
+
+async def resolve_supplement_confirm(conn, text, collected):
+    """复述完补充后等确认。同意、还要补充、重说、重听，或听不清。"""
+    raw = unwrap_user_text(text).strip()
+    if not compact_text(raw):
+        return "unclear", ""
+    asked = f"刚才复述的补充：{collected}\n用户原话：{raw}"
+    data = await _ask_llm_json(conn, _SUPPLEMENT_CONFIRM_PROMPT, asked, "确认补充")
+    intent = str((data or {}).get("intent") or "").strip()
+    if intent not in _SUPPLEMENT_CONFIRM_INTENTS:
+        return "unclear", ""
+    content = clean_supplement((data or {}).get("text") or "")
+    _log_guide(conn, "info", f"确认补充: {raw} -> {intent} {content}")
+    return intent, content
 
 
 def parse_persona_catalog(payload):
@@ -724,6 +755,7 @@ class VoiceActivationSession:
     ASK_PERSONA = "ask_persona"
     CONFIRM_PERSONA = "confirm_persona"
     ASK_SUPPLEMENT = "ask_supplement"
+    CONFIRM_SUPPLEMENT = "confirm_supplement"
     RETRY_SKILLS = "retry_skills"
     ASK_AUTH_CODE = "ask_auth_code"
     ASK_REBOOT = "ask_reboot"
@@ -757,6 +789,11 @@ class VoiceActivationSession:
         self.persona_name = None
         self.persona_templates = []
         self.persona_voices = {}
+        # 补充设定可以分几句说，逐句记下来，最后一起提交。
+        self.supplement_parts = []
+        self._supplement_epoch = 0
+        self._supplement_wait_task = None
+        self._supplement_nudges = 0
         self.announce_bind_success = announce_bind_success
         self.auth_queue = []
         self.auth_service = None
@@ -843,6 +880,8 @@ class VoiceActivationSession:
             await self._on_confirm_persona(text)
         elif self.state == self.ASK_SUPPLEMENT:
             await self._on_supplement(text)
+        elif self.state == self.CONFIRM_SUPPLEMENT:
+            await self._on_confirm_supplement(text)
         elif self.state == self.RETRY_SKILLS:
             await self._on_retry_skills(text)
         elif self.state == self.ASK_AUTH_CODE:
@@ -1219,21 +1258,152 @@ class VoiceActivationSession:
         await self._say("好的。" + self._persona_menu())
 
     async def _ask_supplement(self):
+        """补充常常不止一句。先说清结束方式：说完请说「没有了」。"""
         self.state = self.ASK_SUPPLEMENT
-        await self._say("还有要补充的吗？直接说就行。没有的话请说没有。")
+        self.supplement_parts = []
+        self._supplement_nudges = 0
+        await self._say(
+            "还有要补充的吗？可以一句一句说，比如说话温柔一点、少讲道理。"
+            "说完请说没有了。不想补充也说没有。"
+        )
+        self._schedule_supplement_wait()
+
+    def _supplement_text(self):
+        return "。".join(self.supplement_parts)
+
+    def _add_supplement(self, content):
+        """后端最多收八十个字，超了就不记这一句。"""
+        if not content or len("。".join(self.supplement_parts + [content])) > _SUPPLEMENT_LIMIT:
+            return False
+        self.supplement_parts.append(content)
+        self._supplement_nudges = 0
+        return True
+
+    def _invalidate_supplement_wait(self):
+        self._supplement_epoch += 1
+        task = self._supplement_wait_task
+        self._supplement_wait_task = None
+        if task is not None and not task.done():
+            task.cancel()
+
+    def _schedule_supplement_wait(self):
+        self._invalidate_supplement_wait()
+        epoch = self._supplement_epoch
+        self._supplement_wait_task = asyncio.create_task(self._supplement_wait(epoch))
+
+    def _voice_active(self):
+        """麦克风这边还有人声。自己的提示音不算。"""
+        if getattr(self.conn, "client_have_voice", False):
+            return True
+        last_voice_ms = getattr(self.conn, "vad_last_voice_time", 0) or 0
+        return bool(last_voice_ms and time.time() * 1000 - last_voice_ms < 1000)
+
+    async def _supplement_wait(self, epoch):
+        """记下一句后等用户继续。安静够久没有新内容，就当作说完了。"""
+        try:
+            for _ in range(120):
+                if epoch != self._supplement_epoch or self.state != self.ASK_SUPPLEMENT:
+                    return
+                if not self._playback_active() and not getattr(self.conn, "client_is_speaking", False):
+                    break
+                await asyncio.sleep(0.1)
+            quiet_since = None
+            while True:
+                await asyncio.sleep(0.2)
+                if epoch != self._supplement_epoch or self.state != self.ASK_SUPPLEMENT:
+                    return
+                if self._voice_active():
+                    quiet_since = None
+                    continue
+                now = time.monotonic()
+                if quiet_since is None:
+                    quiet_since = now
+                    continue
+                if now - quiet_since >= SUPPLEMENT_PAUSE_SECONDS:
+                    break
+        except asyncio.CancelledError:
+            return
+        if epoch != self._supplement_epoch or self.state != self.ASK_SUPPLEMENT or self._giving_up:
+            return
+        self._supplement_wait_task = None
+        await self._supplement_timeout()
+
+    async def _supplement_timeout(self):
+        """沉默也算说完。第一次先再问一遍，还是没回应就按已记下的提交。"""
+        if self._voice_active():
+            self._schedule_supplement_wait()
+            return
+        if self._supplement_nudges < 1:
+            self._supplement_nudges += 1
+            if self.supplement_parts:
+                await self._say("还有要补充的吗？没有的话请说没有了。")
+            else:
+                await self._say("还有要补充的吗？直接说就行，没有的话请说没有。")
+            self._schedule_supplement_wait()
+            return
+        self._invalidate_supplement_wait()
+        await self._save_role(self._supplement_text())
+
+    def _supplement_hint(self):
+        if self.supplement_parts:
+            return "没有听清。请继续补充，说完请说没有了。"
+        return "没有听清。请说出要补充的设定，没有的话请说没有。"
 
     async def _on_supplement(self, text):
-        supplement = await supplement_text(self.conn, text)
-        if supplement is REPEAT:
+        self._invalidate_supplement_wait()
+        action, content = await resolve_supplement_turn(self.conn, text, self._supplement_text())
+        if action == "repeat":
+            await self._repeat_prompt()
+            self._schedule_supplement_wait()
+            return
+        if action == "end":
+            await self._finish_supplement()
+            return
+        if action != "content" or not content:
+            await self._say(self._supplement_hint())
+            self._schedule_supplement_wait()
+            return
+        if not self._add_supplement(content):
+            await self._say("补充已经到八十个字的上限了，先记这些。请说没有了，结束补充。")
+            self._schedule_supplement_wait()
+            return
+        await self._say("好的，记下了。还有吗？说完请说没有了。")
+        self._schedule_supplement_wait()
+
+    async def _finish_supplement(self):
+        """用户示意说完了。没记到内容就直接提交，记到了先复述确认。"""
+        self._invalidate_supplement_wait()
+        if not self.supplement_parts:
+            await self._save_role("")
+            return
+        self.state = self.CONFIRM_SUPPLEMENT
+        await self._say(f"记下的补充是：{self._supplement_text()}。对吗？")
+
+    async def _on_confirm_supplement(self, text):
+        intent, content = await resolve_supplement_confirm(self.conn, text, self._supplement_text())
+        if intent == "repeat":
             await self._repeat_prompt()
             return
-        if supplement is None:
-            await self._say("没有听清。请补充，或者说没有。")
+        if intent == "accept":
+            await self._save_role(self._supplement_text())
             return
-        if len(supplement) > _SUPPLEMENT_LIMIT:
-            await self._say("补充有点长，请控制在八十个字以内。或者说没有。")
+        if intent == "restart":
+            self.supplement_parts = []
+            self.state = self.ASK_SUPPLEMENT
+            await self._say("好的，请重新说要补充的设定。说完请说没有了。")
+            self._schedule_supplement_wait()
             return
-        await self._save_role(supplement)
+        if intent == "more":
+            self.state = self.ASK_SUPPLEMENT
+            if not content:
+                await self._say("好的，请继续补充。说完请说没有了。")
+            elif not self._add_supplement(content):
+                await self._say("补充已经到八十个字的上限了，先记这些。请说没有了，结束补充。")
+            else:
+                await self._say("好的，记下了。还有吗？说完请说没有了。")
+            self._schedule_supplement_wait()
+            return
+        await self._say("请说确认，或者说不对重新补充。")
 
     async def _save_role(self, supplement):
         try:
@@ -1750,7 +1920,14 @@ class VoiceActivationSession:
         elif self.state == self.CONFIRM_PERSONA:
             await self._say(f"性格用{self.persona_name}，对吗？")
         elif self.state == self.ASK_SUPPLEMENT:
-            await self._say("还有要补充的吗？直接说就行。没有的话请说没有。")
+            if self.supplement_parts:
+                await self._say(
+                    f"已经记下的补充是：{self._supplement_text()}。还有要补充的吗？说完请说没有了。"
+                )
+            else:
+                await self._say("还有要补充的吗？可以一句一句说。说完请说没有了，不想补充也说没有。")
+        elif self.state == self.CONFIRM_SUPPLEMENT:
+            await self._say(f"记下的补充是：{self._supplement_text()}。对吗？")
         elif self.state == self.RETRY_SKILLS:
             if self._skills_quiet():
                 return
@@ -1828,6 +2005,7 @@ class VoiceActivationSession:
         self._giving_up = True
         self.conn.close_after_chat = True
         self._invalidate_phone_wait()
+        self._invalidate_supplement_wait()
         ready = self._asr_ready_task
         if ready is not None and not ready.done():
             ready.cancel()
