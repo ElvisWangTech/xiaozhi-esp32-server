@@ -449,12 +449,17 @@ def test_supplement_repeat_keeps_what_was_collected():
     assert "已经记下的补充是：说话温柔一点" in said[-1]
 
 
-def test_reboot_question_is_not_acceptance():
-    conn = _FakeConn('{"intent":"decline"}')
-    session = VoiceActivationSession(conn, stage="skills")
-    session.state = session.ASK_REBOOT
+def test_config_finished_reboots_without_asking():
+    """配置完毕不再确认：播报「配置完毕，设备即将重启」后直接重启。"""
     said = []
+    posts = []
     rebooted = []
+    conn = _skill_conn("skills")
+    session = VoiceActivationSession(conn, stage="skills")
+    conn.voice_activation_handler = session
+
+    async def _post(path, payload):
+        posts.append(path)
 
     async def _say(text):
         said.append(text)
@@ -462,39 +467,65 @@ def test_reboot_question_is_not_acceptance():
     async def _reboot():
         rebooted.append(True)
 
+    session._post = _post
     session._say = _say
     session._reboot_device = _reboot
-    asyncio.run(session._on_ask_reboot("能不重启吗？"))
-    assert rebooted == []
-    assert conn.calls
-    assert "能不重启吗？" in conn.calls[0][1]
-    assert any("聊天" in text for text in said)
-
-    plain = _FakeConn('{"intent":"accept","value":""}')
-    session.conn = plain
-    asyncio.run(session._on_ask_reboot("确认"))
+    asyncio.run(session._finish_skills_and_reboot("瑞幸咖啡已开通。"))
+    assert posts == ["/device/voice-activation/skills/complete"]
+    assert said == ["瑞幸咖啡已开通。配置完毕，设备即将重启。"]
+    assert "是否重启" not in "".join(said)
     assert rebooted == [True]
-    assert plain.calls
+    assert session.state == session.REBOOTING
+    assert conn.voice_onboarding is None
+    assert conn.skills_pending is False
 
 
-def test_restart_word_alone_still_asks_the_model():
-    conn = _FakeConn('{"intent":"unclear"}')
+def test_complete_failure_still_reboots():
+    conn = _skill_conn("skills")
     session = VoiceActivationSession(conn, stage="skills")
-    session.state = session.ASK_REBOOT
     said = []
+    rebooted = []
+
+    async def _post(path, payload):
+        raise RuntimeError("API返回错误: complete 失败")
 
     async def _say(text):
         said.append(text)
 
     async def _reboot():
-        raise AssertionError("不应重启")
+        rebooted.append(True)
 
+    session._post = _post
     session._say = _say
     session._reboot_device = _reboot
-    session._finish_without_reboot = _reboot
-    asyncio.run(session._on_ask_reboot("必须重启吗"))
-    assert conn.calls
-    assert any("确认" in text for text in said)
+    asyncio.run(session._finish_skills_and_reboot())
+    assert said == ["技能引导已结束。配置完毕，设备即将重启。"]
+    assert rebooted == [True]
+
+
+def test_empty_auth_queue_goes_straight_to_reboot():
+    conn = _skill_conn("skills")
+    session = VoiceActivationSession(conn, stage="skills", include_auth=True)
+    session.auth_queue = []
+    session.auth_done = ["瑞幸咖啡"]
+    finished = []
+
+    async def _finish(prefix):
+        finished.append(prefix)
+
+    session._finish_skills_and_reboot = _finish
+    asyncio.run(session._run_next_auth())
+    assert finished == ["瑞幸咖啡已开通。"]
+
+
+def test_rebooting_state_ignores_user_text():
+    """播报「即将重启」后到重启下发之间，用户输入不再触发任何提问。"""
+    conn = _FakeConn('{"intent":"accept","value":""}')
+    session, said = _guided_session(conn, "skills", VoiceActivationSession.REBOOTING)
+    asyncio.run(session.handle_text("不要重启"))
+    assert conn.calls == []
+    assert said == []
+    assert session.state == session.REBOOTING
 
 
 def test_skill_command_ignores_negation_and_questions():
@@ -601,25 +632,16 @@ def test_did_not_hear_repeats_the_current_question():
     assert session.state == session.ASK_PHONE
     assert any("重新" in text for text in said)
 
-    asked = _FakeConn('{"intent":"repeat","value":""}')
-    session.conn = asked
-    session.state = session.ASK_REBOOT
-    said.clear()
-    asyncio.run(session.handle_text("能再说一遍吗"))
-    assert asked.calls
-    assert session.state == session.ASK_REBOOT
-    assert any("重启" in text for text in said)
-
 
 def test_confirm_intent_asks_the_model():
     local = _FakeConn('{"intent":"accept","value":""}')
-    assert asyncio.run(confirm_intent(local, "没错", "是否现在重启设备")) == "accept"
+    assert asyncio.run(confirm_intent(local, "没错", "助手昵称是不是豆豆")) == "accept"
     assert local.calls
     asked = _FakeConn('{"intent":"decline","value":""}')
-    assert asyncio.run(confirm_intent(asked, "能不重启吗", "是否现在重启设备")) == "decline"
+    assert asyncio.run(confirm_intent(asked, "不对", "助手昵称是不是豆豆")) == "decline"
     assert asked.calls
     failed = _FakeConn(RuntimeError("down"))
-    assert asyncio.run(confirm_intent(failed, "必须重启吗", "是否现在重启设备")) == "unclear"
+    assert asyncio.run(confirm_intent(failed, "必须设置吗", "助手昵称是不是豆豆")) == "unclear"
 
 
 def test_supplement_and_menu():
@@ -1032,6 +1054,105 @@ def test_submitted_code_does_not_repeat_prompt_and_announces_success():
     assert "验证码已提交，正在登录。" in spoken
     assert "瑞幸咖啡已开通。" in spoken
     assert replies == []
+
+
+def _auth_poll_session(reply):
+    """只跑 _poll_auth 的会话：post 只回状态，say / wait / next 都记顺序。"""
+    import core.handle.voice_activation as voice_activation
+
+    conn = _skill_conn("skills")
+    session = VoiceActivationSession(conn, stage="skills", include_auth=True)
+    session.auth_label = "瑞幸咖啡"
+    session.auth_task_id = "t1"
+    order = []
+    polls = []
+
+    async def _post(path, payload):
+        if path.endswith("/auth/status"):
+            polls.append(path)
+        return reply
+
+    async def _say(text):
+        order.append(("say", text))
+
+    async def _wait_spoken():
+        order.append(("wait", ""))
+
+    async def _run_next_auth():
+        order.append(("next", ""))
+
+    session._post = _post
+    session._say = _say
+    session._wait_spoken = _wait_spoken
+    session._run_next_auth = _run_next_auth
+    return session, voice_activation, order, polls
+
+
+def _run_poll(session, voice_activation, after_code):
+    original_sleep = voice_activation.asyncio.sleep
+
+    async def _sleep(_seconds):
+        return None
+
+    voice_activation.asyncio.sleep = _sleep
+    try:
+        asyncio.run(session._poll_auth(after_code=after_code))
+    finally:
+        voice_activation.asyncio.sleep = original_sleep
+
+
+def test_code_wait_timeout_announces_failure_before_next_auth():
+    """提交验证码后一直没结果：先播报开通失败并等它说完，再切下一项。"""
+    session, voice_activation, order, polls = _auth_poll_session(
+        {"status": "pending", "taskId": "t1"}
+    )
+    _run_poll(session, voice_activation, after_code=True)
+
+    assert [text for kind, text in order if kind == "say"] == [
+        "瑞幸咖啡开通失败，没有收到授权结果。"
+    ]
+    assert "瑞幸咖啡" in session.auth_failed
+    assert [kind for kind, _ in order] == ["say", "wait", "next"]
+    # 15 秒 / 1.5 秒 = 10 次查询，不再干等 90 秒
+    assert len(polls) == 10
+
+
+def test_automation_without_code_keeps_the_longer_wait():
+    """没有验证码环节的自动化登录仍按 90 秒等，别跟着缩短。"""
+    session, voice_activation, _order, polls = _auth_poll_session(
+        {"status": "pending", "taskId": "t1"}
+    )
+    _run_poll(session, voice_activation, after_code=False)
+    assert len(polls) == 60
+
+
+def test_failed_auth_waits_for_prompt_before_next_auth():
+    """服务端明确返回失败时，也要等失败提示播完再开下一项。"""
+    conn = _skill_conn("skills")
+    session = VoiceActivationSession(conn, stage="skills", include_auth=True)
+    session.auth_label = "瑞幸咖啡"
+    order = []
+
+    async def _say(text):
+        order.append(("say", text))
+
+    async def _wait_spoken():
+        order.append(("wait", ""))
+
+    async def _run_next_auth():
+        order.append(("next", ""))
+
+    session._say = _say
+    session._wait_spoken = _wait_spoken
+    session._run_next_auth = _run_next_auth
+
+    asyncio.run(session._handle_auth_result({"status": "failed", "message": "未收到短信"}))
+    assert order == [
+        ("say", "瑞幸咖啡开通失败：未收到短信。"),
+        ("wait", ""),
+        ("next", ""),
+    ]
+    assert session.auth_failed == ["瑞幸咖啡"]
 
 
 def test_short_definite_text_is_committed():

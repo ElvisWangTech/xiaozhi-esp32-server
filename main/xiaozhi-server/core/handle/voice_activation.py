@@ -9,6 +9,13 @@ from core.providers.tts.dto.dto import ContentType, TTSMessageDTO, SentenceType
 TAG = __name__
 # 报号中间常有停顿。这段静音内不播报，避免把用户后面的数字打断。
 PHONE_PAUSE_SECONDS = 3
+# 提交验证码后最多等多久（秒）。超时按失败处理，播报后接着开下一项。
+# 用户说完验证码就听不到任何反馈，不能让他干等两分钟。
+AUTH_CODE_WAIT_SECONDS = 15
+# 没有验证码环节时（纯服务端自动化登录）可以等更久。
+AUTH_POLL_WAIT_SECONDS = 90
+# 轮询间隔（秒）。等结果期间一直按这个间隔查状态接口。
+AUTH_POLL_INTERVAL_SECONDS = 1.5
 _CN_COUNT = ["零", "一", "两", "三", "四", "五", "六", "七", "八", "九", "十"]
 
 CN_DIGITS = {
@@ -758,7 +765,8 @@ class VoiceActivationSession:
     CONFIRM_SUPPLEMENT = "confirm_supplement"
     RETRY_SKILLS = "retry_skills"
     ASK_AUTH_CODE = "ask_auth_code"
-    ASK_REBOOT = "ask_reboot"
+    # 配置完毕到重启下发之间的终态：不再接收用户输入，避免误触发上一步的提问。
+    REBOOTING = "rebooting"
 
     # 方案 B：默认依次开通；瑞幸先于滴滴（滴滴常需实名/免密支付）
     # 不询问「要开通吗」；仅 waiting_code 时打断要验证码。
@@ -835,6 +843,9 @@ class VoiceActivationSession:
     async def handle_text(self, text):
         if self._busy:
             return
+        # 已播报「即将重启」，等待下发重启工具期间不再处理任何输入。
+        if self.state == self.REBOOTING:
+            return
         # 报号、报验证码时不接收，避免提示音和中间停顿被当成新的一句话。
         # 确认类问题（对不对、有没有补充）允许打断，否则「对」会在播报尾巴里被丢掉。
         if self._playback_active() or getattr(self.conn, "client_is_speaking", False):
@@ -886,8 +897,6 @@ class VoiceActivationSession:
             await self._on_retry_skills(text)
         elif self.state == self.ASK_AUTH_CODE:
             await self._on_auth_code(text)
-        elif self.state == self.ASK_REBOOT:
-            await self._on_ask_reboot(text)
 
     def _invalidate_phone_wait(self):
         self._phone_epoch += 1
@@ -933,7 +942,7 @@ class VoiceActivationSession:
         self.phone_digits = ""
         self.phone = phone
         self.state = self.CONFIRM_PHONE
-        await self._say(f"您的手机号是，{spoken_digits(phone)}。对吗？对的话请说确认，不对请说重说。")
+        await self._say(f"您的手机号是，{spoken_digits(phone)}。对吗？")
 
     async def _on_phone(self, text):
         self._invalidate_phone_wait()
@@ -1540,7 +1549,7 @@ class VoiceActivationSession:
 
     async def _run_next_auth(self):
         if not self.auth_queue:
-            await self._finish_skills_and_ask_reboot(self._auth_finish_prefix())
+            await self._finish_skills_and_reboot(self._auth_finish_prefix())
             return
         service, label = self.auth_queue.pop(0)
         self.auth_service = service
@@ -1560,10 +1569,12 @@ class VoiceActivationSession:
             reason = api_error_text(exc)
             self._mark_auth_failed(label, reason)
             await self._say(f"{label}开通失败：{reason}。")
+            await self._wait_spoken()
             await self._run_next_auth()
             return
         if str((result or {}).get("status") or "") == "already_bound":
             await self._say(f"{label}已经开通。")
+            await self._wait_spoken()
             await self._run_next_auth()
             return
         await self._say(f"正在开通{label}。")
@@ -1577,9 +1588,11 @@ class VoiceActivationSession:
         """登录往往还停在 waiting_code。提交验证码后要继续查，直到成功、失败或验证码被拒。"""
         label = self.auth_label or "技能"
         self._auth_polling = True
+        wait_seconds = AUTH_CODE_WAIT_SECONDS if after_code else AUTH_POLL_WAIT_SECONDS
+        rounds = max(1, int(wait_seconds / AUTH_POLL_INTERVAL_SECONDS))
         try:
-            for _ in range(60):
-                await asyncio.sleep(1.5)
+            for _ in range(rounds):
+                await asyncio.sleep(AUTH_POLL_INTERVAL_SECONDS)
                 if not self.auth_task_id:
                     break
                 try:
@@ -1592,6 +1605,7 @@ class VoiceActivationSession:
                     reason = api_error_text(exc)
                     self._mark_auth_failed(label, reason)
                     await self._say(f"{label}开通失败：{reason}。")
+                    await self._wait_spoken()
                     await self._run_next_auth()
                     return
                 polled_status = str((polled or {}).get("status") or "")
@@ -1608,9 +1622,11 @@ class VoiceActivationSession:
         finally:
             self._auth_polling = False
 
+        # 超时：先把失败播报完，再切下一项，否则「正在开通滴滴出行」会盖掉这句。
         await self._cancel_auth_task()
         self._mark_auth_failed(label, "等待超时")
-        await self._say(f"{label}开通失败：等待超时。")
+        await self._say(f"{label}开通失败，没有收到授权结果。")
+        await self._wait_spoken()
         await self._run_next_auth()
 
     async def _wait_spoken(self):
@@ -1641,9 +1657,9 @@ class VoiceActivationSession:
             self.state = self.ASK_AUTH_CODE
             self.conn.last_activity_time = time.time() * 1000
             if after_code:
-                await self._say("验证码不正确或尚未生效，请再说一遍，或者说跳过。")
+                await self._say("验证码不正确或尚未生效，请再说一遍。")
             else:
-                await self._say(f"请说出{label}短信里的验证码。不要可以说跳过。")
+                await self._say(f"请说出{label}短信里的验证码。")
             return
 
         if status == "done":
@@ -1664,6 +1680,8 @@ class VoiceActivationSession:
                     await self._say(f"{label}开通失败：{reason}。")
                 else:
                     await self._say(f"{label}开通失败。")
+            # 等这句播完再开下一项，否则失败提示会被「正在开通…」盖掉。
+            await self._wait_spoken()
             await self._run_next_auth()
             return
 
@@ -1692,22 +1710,25 @@ class VoiceActivationSession:
             await self._cancel_auth_task()
             self.auth_queue = list(self.AUTH_QUEUE)
             await self._say("好的，重新绑定授权技能。")
+            await self._wait_spoken()
             await self._run_next_auth()
             return
         if action == "skip":
             await self._cancel_auth_task()
             await self._say(f"好的，已跳过{label}。")
+            await self._wait_spoken()
             await self._run_next_auth()
             return
         if action == "resend":
             await self._say("验证码由服务方发送，请留意短信。收到后直接说出验证码。")
             return
         if action != "code" or not code:
-            await self._say("没有听清验证码，请再说一遍。或者说跳过。")
+            await self._say("没有听清验证码，请再说一遍。")
             return
         if not self.auth_task_id:
             self._mark_auth_failed(label, "任务已失效")
             await self._say(f"{label}开通失败：任务已失效。")
+            await self._wait_spoken()
             await self._run_next_auth()
             return
         try:
@@ -1721,7 +1742,7 @@ class VoiceActivationSession:
             )
         except Exception as exc:
             self.conn.logger.bind(tag=TAG).warning(f"{label}提交验证码失败: {exc}")
-            await self._say(api_error_text(exc) + "。请再说一遍验证码，或者说跳过。")
+            await self._say(api_error_text(exc) + "。请再说一遍验证码。")
             return
         status = str((result or {}).get("status") or "")
         if status == "done":
@@ -1729,7 +1750,7 @@ class VoiceActivationSession:
             return
         if status == "waiting_code" and self._auth_code_rejected(result):
             self.state = self.ASK_AUTH_CODE
-            await self._say("验证码不正确或尚未生效，请再说一遍，或者说跳过。")
+            await self._say("验证码不正确或尚未生效，请再说一遍。")
             return
         if status in ("failed", "skipped"):
             await self._handle_auth_result(result or {})
@@ -1738,7 +1759,8 @@ class VoiceActivationSession:
         await self._say("验证码已提交，正在登录。")
         await self._handle_auth_result(result or {}, after_code=True)
 
-    async def _finish_skills_and_ask_reboot(self, prefix=""):
+    async def _finish_skills_and_reboot(self, prefix=""):
+        """配置完毕不再询问：不重启设备 MCP 工具无法加载，播报后直接重启。"""
         try:
             await self._post(
                 "/device/voice-activation/skills/complete",
@@ -1746,14 +1768,15 @@ class VoiceActivationSession:
             )
         except Exception as exc:
             self.conn.logger.bind(tag=TAG).warning(f"完成技能引导失败: {exc}")
-            # 即使 complete 失败，也允许进入重启询问，避免卡在引导
+            # complete 失败也要继续重启，否则配置不生效、引导卡住
         self.conn.voice_onboarding = None
         self.conn.skills_pending = False
-        self.state = self.ASK_REBOOT
+        self.state = self.REBOOTING
         summary = (prefix or "").strip() or "技能引导已结束。"
         if not summary.endswith("。"):
             summary += "。"
-        await self._say(summary + "是否重启设备？")
+        await self._say(summary + "配置完毕，设备即将重启。")
+        await self._reboot_device()
 
     async def _on_retry_skills(self, text):
         if self._skills_quiet():
@@ -1783,31 +1806,9 @@ class VoiceActivationSession:
             return
         await self._say("请说确认重试，或者说稍后再说。")
 
-    async def _on_ask_reboot(self, text):
-        intent = await confirm_intent(self.conn, text, "是否现在重启设备")
-        if intent == "repeat":
-            await self._repeat_prompt()
-            return
-        if intent == "accept":
-            await self._reboot_device()
-            return
-        if intent == "decline":
-            await self._finish_without_reboot()
-            return
-        await self._say("请说确认重启设备，或者说不要。")
-
-    async def _finish_without_reboot(self):
-        self.conn.voice_activation_handler = None
-        self.conn.voice_onboarding = None
-        self.conn.skills_pending = False
-        await self._say("好的，我们可以开始聊天了。")
-
     async def _reboot_device(self):
-        await self._say("好的，正在重启设备。")
-        for _ in range(50):
-            if not self._playback_active():
-                break
-            await asyncio.sleep(0.2)
+        # 等「配置完毕，设备即将重启」播完再下发，别把提示音掐掉。
+        await self._wait_spoken()
         # 工具列表可能还在异步拉取，稍等再匹配
         tool_name = None
         for _ in range(20):
@@ -1828,7 +1829,7 @@ class VoiceActivationSession:
             self.conn.voice_activation_handler = None
             self.conn.voice_onboarding = None
             self.conn.skills_pending = False
-            await self._say("暂时无法自动重启，请手动重启设备。")
+            await self._say("自动重启没成功，请手动重启设备，否则技能用不了。")
             return
         try:
             from core.providers.tools.device_mcp.mcp_handler import call_mcp_tool
@@ -1934,9 +1935,7 @@ class VoiceActivationSession:
             await self._say("技能绑定还未完成，请说确认重试，或者说稍后再说。")
         elif self.state == self.ASK_AUTH_CODE:
             label = self.auth_label or "技能"
-            await self._say(f"请说出{label}短信验证码。或者说跳过。")
-        elif self.state == self.ASK_REBOOT:
-            await self._say("技能已经绑定好了。是否重启设备？")
+            await self._say(f"请说出{label}短信验证码。")
 
     async def _send_recognized_text(self, text):
         """把识别文本回给设备。不发 tts start，避免还在收号时设备退出录音。"""
