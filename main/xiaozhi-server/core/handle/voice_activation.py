@@ -168,15 +168,19 @@ _OWNER_SYSTEM_PROMPT = (
     '{"intent":"answer","title":"老板"}。'
     "没听清、要你把问题再说一遍时输出 "
     '{"intent":"repeat","title":""}。'
-    "听不出称呼时输出 "
-    '{"intent":"unclear","title":""}。\n'
+    "用户明确不想设置称呼、想跳过或用默认时输出 "
+    '{"intent":"skip","title":""}。\n'
     "规则：\n"
     "1. 用户可能直接说称呼，也可能说整句，例如「叫我老板」「你可以称呼我为张先生」「我是小王」。只保留真实称呼。\n"
     "2. 称呼 1 到 12 个字，不要带语气词。\n"
-    "3. 只是在确认或否定，例如「对」「确认」「不对」「重说」，intent 为 unclear，title 留空。\n"
-    "4. 否定里如果带了新称呼，例如「不对，叫我妈妈」，intent 为 answer，取出妈妈。\n"
-    "5. 「没听清」「你再说一遍」是 repeat。用户自己要重说，是 unclear。\n"
-    "6. 没给出称呼，例如「我该怎么称呼您」，intent 为 unclear，title 留空。"
+    "3. 语音识别经常把称呼听错。只要原话读起来像一个称呼（通常很短、没有句子结构），"
+    "即使可能听错了，也把它原样填进 title 并输出 answer——下一步会向用户复述确认，说错了可以当场改口。"
+    "不要因为拿不准就输出 unclear，那会让用户陷入反复重说。\n"
+    "4. 只有整句是语气词（例如「嗯」「啊」）、纯确认或纯否定（例如「对」「确认」「不对」）、"
+    "反问（例如「我该怎么称呼您」）、或与称呼完全无关的话时，才输出 unclear，title 留空。\n"
+    "5. 否定里如果带了新称呼，例如「不对，叫我妈妈」，intent 为 answer，取出妈妈。\n"
+    "6. 「没听清」「你再说一遍」是 repeat。用户自己要重说，是 unclear。\n"
+    "7. 用户表达放弃设置的意图，例如不想设置、算了、先跳过、用默认的，intent 为 skip，title 留空。"
 )
 _SUPPLEMENT_SYSTEM_PROMPT = (
     "用户刚被问还有没有要补充的角色设定。没有的话会说没有。"
@@ -263,6 +267,16 @@ _NICKNAME_RETRY_HINTS = (
     "没听清。请只说一个简短的名字，比如豆豆、小美。",
     "还是没听清。请靠近一点，直接说名字，不要加别的字。",
     "一直没听清。也可以说不想设置了，先用默认昵称。",
+)
+# 跳过称呼设置时的兜底。owner_title 不单独提交，而是与性格模板一起在 /role
+# 一次性提交，后端 normalizeOwnerTitle 拒绝空值，所以跳过也必须给出称呼；
+# 「主人」是该类设备的通用默认称呼。
+_OWNER_DEFAULT = "主人"
+_ASK_OWNER_PROMPT = "我该怎么称呼您呢？比如老板、张先生。"
+_OWNER_RETRY_HINTS = (
+    "没听清。请直接说一个称呼，比如老板、张先生。",
+    "还是没听清。请靠近一点，直接说称呼，不要加别的字。",
+    "一直没听清。也可以说不想设置了，先用默认称呼。",
 )
 
 
@@ -488,13 +502,17 @@ def parse_owner_reply(text):
 
 
 async def extract_owner_title(conn, text):
-    """每句都问模型。返回称呼、REPEAT，或 None。"""
+    """每句都问模型。返回称呼、REPEAT、SKIP，或 None。"""
     raw = unwrap_user_text(text).strip()
     if not compact_text(raw):
         return None
     data = await _ask_llm_json(conn, _OWNER_SYSTEM_PROMPT, raw, "提取称呼")
-    if _intent_of(data, {"answer", "repeat", "unclear"}) == "repeat":
+    intent = _intent_of(data, {"answer", "repeat", "unclear", "skip"})
+    if intent == "repeat":
         return REPEAT
+    if intent == "skip":
+        _log_guide(conn, "info", f"称呼识别: {raw} -> 跳过")
+        return SKIP
     title = parse_owner_reply(json.dumps(data, ensure_ascii=False) if data else "")
     _log_guide(conn, "info", f"称呼识别: {raw} -> {title or ''}")
     return title
@@ -734,6 +752,7 @@ class VoiceActivationSession:
         self.nickname = None
         # 模型连续判 unclear 的次数。用于切换引导话术，避免重复同一句提示。
         self._nickname_misses = 0
+        self._owner_misses = 0
         self.owner_title = None
         self.persona_name = None
         self.persona_templates = []
@@ -1062,19 +1081,39 @@ class VoiceActivationSession:
         self.state = self.ASK_OWNER
         self.conn.voice_onboarding = "role"
         name = self.nickname or "助手"
-        await self._say(f"好的，我是{name}。我该怎么称呼您呢？")
+        await self._say(f"好的，我是{name}。{_ASK_OWNER_PROMPT}")
 
     async def _on_owner(self, text):
         title = await extract_owner_title(self.conn, text)
         if title is REPEAT:
             await self._repeat_prompt()
             return
-        if not title:
-            await self._say("没有听清。您希望我怎么称呼您？")
+        if title is SKIP:
+            await self._skip_owner()
             return
+        if not title:
+            self._owner_misses += 1
+            await self._say(self._owner_retry_hint())
+            return
+        self._owner_misses = 0
         self.owner_title = title
         self.state = self.CONFIRM_OWNER
         await self._say(f"我称呼您为{title}，对吗？")
+
+    def _owner_retry_hint(self):
+        index = min(self._owner_misses, len(_OWNER_RETRY_HINTS)) - 1
+        return _OWNER_RETRY_HINTS[max(index, 0)]
+
+    async def _skip_owner(self):
+        """用户明确放弃设置时给一个出口：默认称呼走确认，仍可当场改口。
+
+        owner_title 与性格模板一起在 /role 提交，后端拒绝空值，
+        所以跳过也必须有称呼，不能留空跳到下一步。
+        """
+        self._owner_misses = 0
+        self.owner_title = _OWNER_DEFAULT
+        self.state = self.CONFIRM_OWNER
+        await self._say(f"好的，先称呼您为{self.owner_title}。对吗？说确认继续，或者说新的称呼。")
 
     async def _on_confirm_owner(self, text):
         intent, title = await confirm_turn(self.conn, text, f"是不是称呼用户为{self.owner_title}")
@@ -1090,8 +1129,9 @@ class VoiceActivationSession:
             return
         if intent == "decline":
             self.owner_title = None
+            self._owner_misses = 0
             self.state = self.ASK_OWNER
-            await self._say("好的，我该怎么称呼您呢？")
+            await self._say(f"好的。{_ASK_OWNER_PROMPT}")
             return
         await self._say("请说确认，或者说重说。")
 
@@ -1699,7 +1739,7 @@ class VoiceActivationSession:
         elif self.state == self.CONFIRM_NICKNAME:
             await self._say(f"助手的昵称是{self.nickname}，对吗？")
         elif self.state == self.ASK_OWNER:
-            await self._say("我该怎么称呼您呢？")
+            await self._say(_ASK_OWNER_PROMPT)
         elif self.state == self.CONFIRM_OWNER:
             await self._say(f"我称呼您为{self.owner_title}，对吗？")
         elif self.state == self.ASK_PERSONA:

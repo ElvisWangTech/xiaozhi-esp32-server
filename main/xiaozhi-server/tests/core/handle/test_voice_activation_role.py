@@ -87,9 +87,9 @@ def test_extract_nickname_always_asks_the_model():
     assert asyncio.run(extract_nickname(skipped, "不想设置了")) is SKIP
 
 
-def _nickname_session(conn):
-    session = VoiceActivationSession(conn, stage="nickname")
-    session.state = session.ASK_NICKNAME
+def _guided_session(conn, stage, state):
+    session = VoiceActivationSession(conn, stage=stage)
+    session.state = state
     said = []
 
     async def _say(text):
@@ -105,7 +105,7 @@ def _nickname_session(conn):
 
 def test_nickname_retries_give_progressively_clearer_hints():
     conn = _FakeConn('{"intent":"unclear","nickname":""}')
-    session, said = _nickname_session(conn)
+    session, said = _guided_session(conn, "nickname", VoiceActivationSession.ASK_NICKNAME)
     for _ in range(3):
         asyncio.run(session.handle_text("嗯。"))
     assert session.state == session.ASK_NICKNAME
@@ -117,7 +117,7 @@ def test_nickname_retries_give_progressively_clearer_hints():
 
 def test_misheard_short_name_is_corrected_in_one_turn():
     conn = _FakeConn('{"intent":"answer","nickname":"初期"}')
-    session, said = _nickname_session(conn)
+    session, said = _guided_session(conn, "nickname", VoiceActivationSession.ASK_NICKNAME)
     # ASR 把「初五」听成「初期」：模型按宽松候选返回 answer，直接进入确认。
     asyncio.run(session.handle_text("初期。"))
     assert session.state == session.CONFIRM_NICKNAME
@@ -134,11 +134,49 @@ def test_misheard_short_name_is_corrected_in_one_turn():
 
 def test_nickname_skip_uses_default():
     conn = _FakeConn('{"intent":"skip","nickname":""}')
-    session, said = _nickname_session(conn)
+    session, said = _guided_session(conn, "nickname", VoiceActivationSession.ASK_NICKNAME)
     asyncio.run(session.handle_text("算了"))
     assert session.state == session.CONFIRM_NICKNAME
     assert session.nickname == "助手"
     assert "助手" in said[-1]
+
+
+def test_owner_retries_give_progressively_clearer_hints():
+    conn = _FakeConn('{"intent":"unclear","title":""}')
+    session, said = _guided_session(conn, "role", VoiceActivationSession.ASK_OWNER)
+    for _ in range(3):
+        asyncio.run(session.handle_text("嗯。"))
+    assert session.state == session.ASK_OWNER
+    assert len(said) == 3
+    assert len(set(said)) == 3  # 不再原样重复「没有听清。您希望我怎么称呼您？」
+    assert any("比如" in text for text in said)
+    assert any("默认称呼" in text for text in said)
+
+
+def test_misheard_owner_title_is_corrected_in_one_turn():
+    conn = _FakeConn('{"intent":"answer","title":"一维"}')
+    session, said = _guided_session(conn, "role", VoiceActivationSession.ASK_OWNER)
+    # ASR 误识别的称呼：模型按宽松候选返回 answer，直接进入确认。
+    asyncio.run(session.handle_text("一维。"))
+    assert session.state == session.CONFIRM_OWNER
+    assert session.owner_title == "一维"
+    assert said == ["我称呼您为一维，对吗？"]
+
+    # 用户一句改口即可纠正。
+    session.conn = _FakeConn('{"intent":"correct","value":"李工"}')
+    asyncio.run(session.handle_text("不对，叫我李工"))
+    assert session.owner_title == "李工"
+    assert session.state == session.CONFIRM_OWNER
+    assert said[-1] == "我称呼您为李工，对吗？"
+
+
+def test_owner_skip_uses_default():
+    conn = _FakeConn('{"intent":"skip","title":""}')
+    session, said = _guided_session(conn, "role", VoiceActivationSession.ASK_OWNER)
+    asyncio.run(session.handle_text("算了"))
+    assert session.state == session.CONFIRM_OWNER
+    assert session.owner_title == "主人"
+    assert "主人" in said[-1]
 
 
 def test_extract_owner_title():
@@ -156,6 +194,9 @@ def test_extract_owner_title():
     assert asyncio.run(extract_owner_title(corrected, "不对，叫我妈妈")) == "妈妈"
     assert asyncio.run(extract_owner_title(_FakeConn('{"title":""}'), "我该怎么称呼您呢")) is None
     assert asyncio.run(extract_owner_title(_FakeConn(RuntimeError("down")), "叫我老板")) is None
+
+    skipped = _FakeConn('{"intent":"skip","title":""}')
+    assert asyncio.run(extract_owner_title(skipped, "不想设置了")) is SKIP
 
 
 def test_persona_catalog_keeps_voice_codes():
