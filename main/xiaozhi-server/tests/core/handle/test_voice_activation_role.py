@@ -141,7 +141,7 @@ def test_activation_greets_before_asking_for_phone():
 
     asyncio.run(_run())
     assert session.state == session.GREET
-    assert asked == ["你好呀！我是x-atom！很高兴认识你，我该怎么称呼您呢？"]
+    assert asked == ["你好，我是 X-Atom，新一代物理AI智能体，让AI走进现实。第一次见面，我该怎么称呼您呢？"]
 
 
 def test_name_from_greeting_skips_the_owner_question_later():
@@ -802,7 +802,7 @@ def test_prompt_connects_asr_as_prompt_ends():
             pass
 
     asyncio.run(_run())
-    assert order == ["你好呀！我是x-atom！很高兴认识你，我该怎么称呼您呢？", "connect", "listen"]
+    assert order == ["你好，我是 X-Atom，新一代物理AI智能体，让AI走进现实。第一次见面，我该怎么称呼您呢？", "connect", "listen"]
 
     order.clear()
 

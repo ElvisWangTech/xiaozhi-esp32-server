@@ -313,7 +313,7 @@ _OWNER_RETRY_HINTS = (
 )
 # 开场先打招呼，顺手问称呼。用户答了就把「主人称呼」提前存下并确认，
 # 角色绑定时不再重复问；没答就接着报手机号，留到角色绑定再问。
-_GREETING_PROMPT = "你好呀！我是x-atom！很高兴认识你，我该怎么称呼您呢？"
+_GREETING_PROMPT = "你好，我是 X-Atom，新一代物理AI智能体，让AI走进现实。第一次见面，我该怎么称呼您呢？"
 
 
 def _strip_speech_tails(text):

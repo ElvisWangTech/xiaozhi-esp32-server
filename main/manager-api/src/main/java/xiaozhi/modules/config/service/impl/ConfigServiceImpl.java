@@ -66,11 +66,24 @@ public class ConfigServiceImpl implements ConfigService {
 
     @Override
     public Map<String, Object> getConfig(Boolean isCache) {
+        // 查询默认智能体
+        AgentTemplateEntity agent = agentTemplateService.getDefaultTemplate();
+        if (agent == null) {
+            throw new RenException(ErrorCode.AGENT_TEMPLATE_NOT_FOUND);
+        }
+        // 语音激活阶段还没有智能体，音色跟着默认模板走
+        String activationVoice = defaultTemplateVoice(agent);
+
         if (isCache) {
             // 先从Redis获取配置
             Object cachedConfig = redisUtils.get(RedisKeys.getServerConfigKey());
             if (cachedConfig != null) {
-                return JsonUtils.toStringObjectMap(cachedConfig);
+                Map<String, Object> cached = JsonUtils.toStringObjectMap(cachedConfig);
+                // 默认模板换过音色之后，老缓存会一直播旧声音，对不上就丢掉重建
+                if (Objects.equals(cachedActivationVoice(cached), activationVoice)) {
+                    return cached;
+                }
+                redisUtils.delete(RedisKeys.getServerConfigKey());
             }
         }
 
@@ -78,19 +91,14 @@ public class ConfigServiceImpl implements ConfigService {
         Map<String, Object> result = new HashMap<>();
         buildConfig(result);
 
-        // 查询默认智能体
-        AgentTemplateEntity agent = agentTemplateService.getDefaultTemplate();
-        if (agent == null) {
-            throw new RenException(ErrorCode.AGENT_TEMPLATE_NOT_FOUND);
-        }
-
-        // 未绑定设备没有智能体。语音激活固定用豆包语音识别2.0、deepseek-chat、豆包语音合成2.0，音色用模型自己的配置。
+        // 未绑定设备没有智能体。语音激活固定用豆包语音识别2.0、deepseek-chat、豆包语音合成2.0。
+        // 音色取默认模板绑定的音色，不沿用模型配置里的历史音色，否则开场问候会和默认性格对不上。
         // 构建模块配置
         buildModuleConfig(
                 null,
                 null,
                 null,
-                null,
+                activationVoice,
                 null,
                 null,
                 null,
@@ -113,6 +121,45 @@ public class ConfigServiceImpl implements ConfigService {
         redisUtils.set(RedisKeys.getServerConfigKey(), result);
 
         return result;
+    }
+
+    /**
+     * 取默认模板绑定的音色编码。语音激活阶段还没有智能体，用它的音色播报引导话术，
+     * 这样开场打招呼、报手机号和后面选中的默认性格是同一个声音。
+     *
+     * @param template 默认模板
+     * @return 音色编码，取不到时返回 null，由模型配置兜底
+     */
+    private String defaultTemplateVoice(AgentTemplateEntity template) {
+        if (template == null || StringUtils.isBlank(template.getTtsVoiceId())) {
+            return null;
+        }
+        TimbreDetailsVO timbre = timbreService.get(template.getTtsVoiceId());
+        if (timbre == null || StringUtils.isBlank(timbre.getTtsVoice())) {
+            return null;
+        }
+        return timbre.getTtsVoice().trim();
+    }
+
+    /**
+     * 读服务端配置里语音激活用的音色，判断缓存是不是还跟当前默认模板一致。
+     *
+     * @param config 缓存的服务端配置
+     * @return 音色编码，取不到时返回 null
+     */
+    private String cachedActivationVoice(Map<String, Object> config) {
+        if (config == null || !(config.get("TTS") instanceof Map<?, ?> tts)) {
+            return null;
+        }
+        if (!(tts.get("TTS_HSDSTTS_V2") instanceof Map<?, ?> provider)) {
+            return null;
+        }
+        // 有模板音色时写的是 private_voice，没有就由模型配置的 speaker 兜底
+        Object voice = provider.get("private_voice");
+        if (voice == null) {
+            voice = provider.get("speaker");
+        }
+        return voice == null ? null : String.valueOf(voice);
     }
 
     @Override
