@@ -325,9 +325,12 @@ class TTSProvider(TTSProviderBase):
                         )
                         future.result(timeout=self.tts_timeout)
                         self.before_stop_play_files.clear()
+                        self._note_tts_success()
                         logger.bind(tag=TAG).debug("TTS会话启动成功")
                     except Exception as e:
                         logger.bind(tag=TAG).error(f"启动TTS会话失败: {str(e)}")
+                        self._note_tts_failure("")
+                        self._maybe_failover_tts()
                         continue
 
                 elif ContentType.TEXT == message.content_type:
@@ -341,8 +344,11 @@ class TTSProvider(TTSProviderBase):
                                 loop=self.conn.loop,
                             )
                             future.result(timeout=self.tts_timeout)
+                            self._note_tts_success()
                         except Exception as e:
                             logger.bind(tag=TAG).error(f"发送TTS文本失败: {str(e)}")
+                            self._note_tts_failure(message.content_detail)
+                            self._maybe_failover_tts()
                             continue
 
                 elif ContentType.FILE == message.content_type:
@@ -360,8 +366,11 @@ class TTSProvider(TTSProviderBase):
                             loop=self.conn.loop,
                         )
                         future.result(timeout=self.tts_timeout)
+                        self._note_tts_success()
                     except Exception as e:
                         logger.bind(tag=TAG).error(f"结束TTS会话失败: {str(e)}")
+                        self._note_tts_failure("")
+                        self._maybe_failover_tts()
                         continue
 
             except queue.Empty:

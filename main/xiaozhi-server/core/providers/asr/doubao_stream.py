@@ -87,6 +87,8 @@ class ASRProvider(ASRProviderBase):
         self.is_processing = False  # 添加处理状态标志
         self._is_stopping = False  # 添加停止标志，防止竞态条件
         self._connect_lock = asyncio.Lock()
+        # 连续建连失败计数：服务不可用时由 receiveAudioHandle 的看门狗触发切换
+        self.connect_failures = 0
         # 提示音收尾时才建连。连上之后一直听，不在每句结束时断开。
         # 满 6 秒没有任何包时补一包静音，避开火山 8 秒等包超时（45000081，服务端固定，不能加长）。
         self._awaiting_listen = False
@@ -219,11 +221,13 @@ class ASRProvider(ASRProviderBase):
 
                 if flush_cache:
                     await self._flush_unsent(opened)
+                self.connect_failures = 0
                 return True
             except Exception as e:
                 logger.bind(tag=TAG).error(f"建立ASR连接失败: {str(e)}")
                 if hasattr(e, "__cause__") and e.__cause__:
                     logger.bind(tag=TAG).error(f"错误原因: {str(e.__cause__)}")
+                self.connect_failures += 1
                 if opened is not None:
                     try:
                         await opened.close()

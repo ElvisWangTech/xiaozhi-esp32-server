@@ -5,6 +5,12 @@ import time
 import uuid
 
 from core.providers.tts.dto.dto import ContentType, TTSMessageDTO, SentenceType
+from core.utils.provider_failover import (
+    TTSAudioProbe as _TTSAudioProbe,
+    failover_timeout as _failover_timeout,
+    mark_current_failed as _mark_current_failed,
+    swap_to_fallback as _swap_to_fallback,
+)
 
 TAG = __name__
 # 报号中间常有停顿。这段静音内不播报，避免把用户后面的数字打断。
@@ -487,16 +493,23 @@ def parse_nickname_reply(text):
 
 
 async def _ask_llm_json(conn, system_prompt, user_text, label):
-    llm = getattr(conn, "llm", None)
-    if llm is None or not hasattr(llm, "response_no_stream"):
-        _log_guide(conn, "warning", f"{label}时没有可用的对话模型")
-        return None
-    try:
-        reply = await asyncio.to_thread(llm.response_no_stream, system_prompt, user_text)
-    except Exception as exc:
-        _log_guide(conn, "warning", f"{label}失败: {exc}")
-        return None
-    return parse_json_object(reply)
+    timeout = _failover_timeout(conn, "LLM")
+    while True:
+        llm = getattr(conn, "llm", None)
+        if llm is None or not hasattr(llm, "response_no_stream"):
+            _log_guide(conn, "warning", f"{label}时没有可用的对话模型")
+            return None
+        try:
+            reply = await asyncio.wait_for(
+                asyncio.to_thread(llm.response_no_stream, system_prompt, user_text),
+                timeout=timeout,
+            )
+            return parse_json_object(reply)
+        except Exception as exc:
+            _log_guide(conn, "warning", f"{label}服务失败({exc})，尝试切换备用provider")
+            _mark_current_failed(conn, "LLM")
+            if not await _swap_to_fallback(conn, "LLM"):
+                return None
 
 
 async def extract_nickname(conn, text):
@@ -2073,16 +2086,24 @@ class VoiceActivationSession:
         return not tts.tts_text_queue.empty() or not tts.tts_audio_queue.empty()
 
     async def _connect_asr_before_prompt(self):
-        asr = getattr(self.conn, "asr", None)
-        ensure = getattr(asr, "ensure_connected", None)
-        if ensure is None:
-            return
-        try:
-            await ensure(self.conn)
-        except Exception as exc:
-            logger = getattr(self.conn, "logger", None)
-            if logger is not None:
-                logger.bind(tag=TAG).warning(f"询问手机号前连接ASR失败: {exc}")
+        timeout = _failover_timeout(self.conn, "ASR")
+        while True:
+            asr = getattr(self.conn, "asr", None)
+            ensure = getattr(asr, "ensure_connected", None)
+            if ensure is None:
+                # 非流式 ASR 没有预连接环节，视为可用。
+                return
+            try:
+                await asyncio.wait_for(ensure(self.conn), timeout=timeout)
+                return
+            except Exception as exc:
+                _log_guide(
+                    self.conn, "warning",
+                    f"连接ASR失败({exc})，尝试切换备用provider",
+                )
+                _mark_current_failed(self.conn, "ASR")
+                if not await _swap_to_fallback(self.conn, "ASR"):
+                    return
 
     async def _say(self, text):
         from core.handle.sendAudioHandle import send_tts_message
@@ -2094,7 +2115,37 @@ class VoiceActivationSession:
         except Exception as exc:
             self.conn.logger.bind(tag=TAG).warning(f"发送语音开始失败: {exc}")
         self.conn.client_is_speaking = True
-        speak(self.conn, text)
+        timeout = _failover_timeout(self.conn, "TTS")
+        while True:
+            tts = getattr(self.conn, "tts", None)
+            probe = _TTSAudioProbe(tts) if tts is not None else None
+            try:
+                await asyncio.wait_for(
+                    asyncio.to_thread(speak, self.conn, text), timeout=timeout
+                )
+                # 队列线程会吞掉合成异常，这里以“限定时间内是否产出音频”判活。
+                if probe is not None and not await probe.wait_first_audio(timeout):
+                    raise TimeoutError("TTS 未在限定时间内产出音频")
+                return
+            except Exception as exc:
+                _log_guide(
+                    self.conn, "warning",
+                    f"TTS服务失败({exc})，尝试切换备用provider",
+                )
+                _mark_current_failed(self.conn, "TTS")
+                if not await _swap_to_fallback(self.conn, "TTS"):
+                    break
+                # 换一个 sentence_id 重播，避免和刚才半失败的队列内容冲突。
+                self.conn.sentence_id = uuid.uuid4().hex
+                self.conn.client_is_speaking = True
+            finally:
+                if probe is not None:
+                    probe.restore(tts)
+        # 所有 provider 均失败：把文本推进字幕队列，避免流程彻底卡死。
+        try:
+            self.conn.tts.store_tts_text(self.conn.sentence_id, text)
+        except Exception:
+            pass
 
     def _mac(self):
         return self.conn.headers.get("device-id")

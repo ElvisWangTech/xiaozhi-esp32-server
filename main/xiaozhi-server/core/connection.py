@@ -1244,6 +1244,8 @@ class ConnectionHandler:
                 functions.append(DIRECT_ANSWER_TOOL)
 
         response_message = []
+        memory_str = None
+        speaker_for_system = None
 
         try:
             # 使用带记忆的对话
@@ -1281,7 +1283,35 @@ class ConnectionHandler:
                 )
         except Exception as e:
             self.logger.bind(tag=TAG).error(f"LLM 处理出错 {query}: {e}")
-            return None
+            # 主用 LLM 不可用：标记失败并切换到已配置的备用 provider，重试一次。
+            swapped = False
+            try:
+                from core.utils import provider_failover
+
+                swapped = bool(provider_failover.failover_module_sync(self, "LLM"))
+            except Exception as exc:
+                self.logger.bind(tag=TAG).error(f"LLM 切换备用provider失败: {exc}")
+            if not swapped:
+                return None
+            try:
+                if self.intent_type == "function_call" and functions is not None:
+                    llm_responses = self.llm.response_with_functions(
+                        self.session_id,
+                        self.dialogue.get_llm_dialogue_with_memory(
+                            memory_str, self.config.get("voiceprint", {}), speaker_for_system
+                        ),
+                        functions=functions,
+                    )
+                else:
+                    llm_responses = self.llm.response(
+                        self.session_id,
+                        self.dialogue.get_llm_dialogue_with_memory(
+                            memory_str, self.config.get("voiceprint", {}), speaker_for_system
+                        ),
+                    )
+            except Exception as e2:
+                self.logger.bind(tag=TAG).error(f"LLM 备用provider仍出错 {query}: {e2}")
+                return None
 
         # 处理流式响应
         tool_call_flag = False
@@ -1357,6 +1387,15 @@ class ConnectionHandler:
                         )
         except Exception as e:
             self.logger.bind(tag=TAG).error(f"LLM stream processing error: {e}")
+            # 中途断流：本轮文本已部分播出，不重放；只切换备用 provider，
+            # 保证下一轮对话立即可用。
+            try:
+                from core.utils import provider_failover
+
+                provider_failover.mark_current_failed(self, "LLM")
+                provider_failover.swap_from_thread(self, "LLM")
+            except Exception:
+                pass
             self.tts.tts_text_queue.put(
                 TTSMessageDTO(
                     sentence_id=current_sentence_id,
