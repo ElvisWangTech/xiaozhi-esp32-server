@@ -48,7 +48,7 @@ class _FakeConn:
             raise self.reply
         return self.reply
 
-TEMPLATES = ["湾湾小何", "星际游子", "英语老师", "好奇男孩", "汪汪队长"]
+TEMPLATES = ["甜美小源", "温婉珊珊", "星际游子", "英语老师"]
 
 
 def test_parse_nickname_reply():
@@ -102,6 +102,123 @@ def _guided_session(conn, stage, state):
     session._say = _say
     session._send_recognized_text = _send
     return session, said
+
+
+def _greet_session(reply):
+    """bind 开场的会话：把播报和「说完再连 ASR」都换成本地记录。"""
+    conn = _FakeConn(reply)
+    session = VoiceActivationSession(conn, stage="bind")
+    said = []
+    asked = []
+
+    async def _say(text):
+        said.append(text)
+
+    async def _prompt(text):
+        asked.append(text)
+
+    async def _send(_text):
+        return None
+
+    session._say = _say
+    session._prompt_and_listen = _prompt
+    session._send_recognized_text = _send
+    session.state = session.GREET
+    return session, conn, said, asked
+
+
+def test_activation_greets_before_asking_for_phone():
+    """一开始先打招呼并问称呼，不直接要手机号。"""
+    session, _conn, _said, asked = _greet_session('{"intent":"answer","title":"老板"}')
+
+    async def _run():
+        await session.start()
+        session._idle_task.cancel()
+        try:
+            await session._idle_task
+        except asyncio.CancelledError:
+            pass
+
+    asyncio.run(_run())
+    assert session.state == session.GREET
+    assert asked == ["你好呀！我是x-atom！很高兴认识你，我该怎么称呼您呢？"]
+
+
+def test_name_from_greeting_skips_the_owner_question_later():
+    session, _conn, said, asked = _greet_session('{"intent":"answer","title":"老王"}')
+
+    asyncio.run(session.handle_text("叫我老王"))
+    assert session.owner_title == "老王"
+    assert session.state == session.CONFIRM_GREET
+    assert said == ["我称呼您为老王，对吗？"]
+
+    session.conn = _FakeConn('{"intent":"accept","value":""}')
+    asyncio.run(session.handle_text("对"))
+    assert session.state == session.ASK_PHONE
+    assert asked == ["好的，老王。请说出您的手机号码，一共十一位。"]
+
+    # 角色绑定阶段不再重复问称呼，直接进性格选择。
+    began = []
+
+    async def _persona():
+        began.append(True)
+
+    session._begin_persona = _persona
+    session.nickname = "小源"
+    said.clear()
+    asyncio.run(session._begin_owner())
+    assert said == ["好的，我是小源。"]
+    assert began == [True]
+
+
+def test_greeting_without_a_name_falls_through_to_phone():
+    """开场没听出称呼就继续报手机号，称呼留到角色绑定再问。"""
+    session, _conn, said, asked = _greet_session('{"intent":"unclear","title":""}')
+
+    asyncio.run(session.handle_text("今天天气不错"))
+    assert session.owner_title is None
+    assert session.state == session.ASK_PHONE
+    assert asked == ["好的，请说出您的手机号码，一共十一位。"]
+
+    began = []
+
+    async def _persona():
+        began.append(True)
+
+    session._begin_persona = _persona
+    session.nickname = "小源"
+    asyncio.run(session._begin_owner())
+    assert session.state == session.ASK_OWNER
+    assert not began
+    assert any("我该怎么称呼您呢" in text for text in said)
+
+
+def test_denied_title_asks_once_more_then_goes_to_phone():
+    session, _conn, said, asked = _greet_session('{"intent":"answer","title":"老王"}')
+    asyncio.run(session.handle_text("叫我老王"))
+
+    session.conn = _FakeConn('{"intent":"decline","value":""}')
+    asyncio.run(session.handle_text("不对"))
+    assert session.owner_title is None
+    assert session.state == session.GREET
+    assert any("我该怎么称呼您呢" in text for text in said)
+
+    asyncio.run(session.handle_text("今天天气不错"))
+    assert session.state == session.ASK_PHONE
+    assert asked[-1] == "好的，请说出您的手机号码，一共十一位。"
+
+
+def test_keeping_the_current_persona_is_offered_and_worded_as_no_change():
+    conn = _FakeConn('{"intent":"answer","template":"甜美小源"}')
+    assert asyncio.run(resolve_persona(conn, "不用换了，就这样", TEMPLATES)) == "甜美小源"
+    assert "第一个" in conn.calls[0][0]
+
+    session, said = _guided_session(conn, "role", VoiceActivationSession.ASK_PERSONA)
+    session.persona_templates = TEMPLATES
+    asyncio.run(session.handle_text("不用换了，就这样"))
+    assert session.state == session.CONFIRM_PERSONA
+    assert session.persona_name == "甜美小源"
+    assert said == ["性格就保持甜美小源，不换了，对吗？"]
 
 
 def test_nickname_retries_give_progressively_clearer_hints():
@@ -284,14 +401,14 @@ def test_resolve_persona_always_asks_the_model():
     assert asyncio.run(resolve_persona(named, "英语老师", TEMPLATES)) == "英语老师"
     assert named.calls
     indexed = _FakeConn('{"intent":"answer","template":"星际游子"}')
-    assert asyncio.run(resolve_persona(indexed, "第二个", TEMPLATES)) == "星际游子"
+    assert asyncio.run(resolve_persona(indexed, "第三个", TEMPLATES)) == "星际游子"
     assert indexed.calls
 
-    described = _FakeConn('{"intent":"answer","template":"湾湾小何"}')
-    assert asyncio.run(resolve_persona(described, "我想要那个台湾女生", TEMPLATES)) == "湾湾小何"
+    described = _FakeConn('{"intent":"answer","template":"温婉珊珊"}')
+    assert asyncio.run(resolve_persona(described, "我想要那个杭州女生", TEMPLATES)) == "温婉珊珊"
     refused = _FakeConn('{"intent":"unclear","template":""}')
     assert asyncio.run(resolve_persona(refused, "不要英语老师", TEMPLATES)) is None
-    assert asyncio.run(resolve_persona(_FakeConn('{"intent":"unclear","template":"外星人不存在"}'), "随便来一个", TEMPLATES)) is None
+    assert asyncio.run(resolve_persona(_FakeConn('{"intent":"unclear","template":"外星人不存在"}'), "今天天气不错", TEMPLATES)) is None
     assert asyncio.run(resolve_persona(_FakeConn('{"intent":"repeat","template":""}'), "没听清", TEMPLATES)) is REPEAT
 
 
@@ -647,11 +764,12 @@ def test_confirm_intent_asks_the_model():
 def test_supplement_and_menu():
     assert clean_supplement("  说话温柔一点。 ") == "说话温柔一点"
     menu = persona_menu(TEMPLATES)
-    assert menu.startswith("接下来选一个性格。一，湾湾小何。二，星际游子。")
-    assert "五，汪汪队长" in menu
+    assert menu.startswith("接下来选一个性格。一，甜美小源，也就是现在的我，不换也可以。二，温婉珊珊。")
+    assert "四，英语老师" in menu
 
 
-def test_phone_prompt_connects_asr_as_prompt_ends():
+def test_prompt_connects_asr_as_prompt_ends():
+    """开场打招呼和报手机号都走同一条「播完再连 ASR」路径。"""
     order = []
 
     class _ASR:
@@ -684,7 +802,16 @@ def test_phone_prompt_connects_asr_as_prompt_ends():
             pass
 
     asyncio.run(_run())
-    assert order == ["请说出您的手机号码，一共十一位。", "connect", "listen"]
+    assert order == ["你好呀！我是x-atom！很高兴认识你，我该怎么称呼您呢？", "connect", "listen"]
+
+    order.clear()
+
+    async def _phone():
+        await session._start_phone()
+        await session._asr_ready_task
+
+    asyncio.run(_phone())
+    assert order == ["好的，请说出您的手机号码，一共十一位。", "connect", "listen"]
 
 
 def test_silence_packet_only_after_audio_gap():
@@ -1236,7 +1363,7 @@ def test_role_bind_announces_success_before_skills():
 
     session = VoiceActivationSession(_Conn(), stage="role")
     session.owner_title = "意为"
-    session.persona_name = "湾湾小何"
+    session.persona_name = "甜美小源"
 
     async def _post(_path, _payload):
         order.append("save")

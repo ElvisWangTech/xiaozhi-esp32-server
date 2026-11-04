@@ -311,6 +311,9 @@ _OWNER_RETRY_HINTS = (
     "还是没听清。请靠近一点，直接说称呼，不要加别的字。",
     "一直没听清。也可以说不想设置了，先用默认称呼。",
 )
+# 开场先打招呼，顺手问称呼。用户答了就把「主人称呼」提前存下并确认，
+# 角色绑定时不再重复问；没答就接着报手机号，留到角色绑定再问。
+_GREETING_PROMPT = "你好呀！我是x-atom！很高兴认识你，我该怎么称呼您呢？"
 
 
 def _strip_speech_tails(text):
@@ -565,9 +568,11 @@ def clean_supplement(text):
 
 def _persona_system_prompt(names):
     listed = "、".join(names)
+    current = names[0]
     return (
         "你在语音引导里，根据用户原话从给定性格模板中选一个。"
         f"可选模板只有这些：{listed}。"
+        f"列表第一个「{current}」是当前正在用的性格，用户不想换就选它。"
         "只输出一个 JSON 对象，不要解释，不要使用 markdown。"
         '{"intent":"answer","template":"英语老师"}。'
         "没听清、让你再说一遍时输出 "
@@ -579,7 +584,9 @@ def _persona_system_prompt(names):
         "2. 用户说序号、名字或描述，都要对应到列表中的一个，intent 为 answer。\n"
         "3. 只是确认，或只是否定而没有改选，intent 为 unclear，template 留空。\n"
         "4. 否定里改选了另一个，例如「不要英语老师，我要星际游子」，intent 为 answer，选出星际游子。\n"
-        "5. 「没听清」「你再说一遍」是 repeat。听不清或对不上任何一个，是 unclear。"
+        "5. 「没听清」「你再说一遍」是 repeat。听不清或对不上任何一个，是 unclear。\n"
+        f"6. 用户表示不换、保持现在的、就用现在的、随便、不想选任何模板，intent 为 answer，"
+        f"template 填「{current}」。\n"
     )
 
 
@@ -681,7 +688,13 @@ def spoken_ordinal(number):
 
 
 def persona_menu(names):
-    parts = [f"{spoken_ordinal(index)}，{name}" for index, name in enumerate(names, 1)]
+    """第一个模板是当前默认性格，用户说「不用换」等于选它。"""
+    parts = []
+    for index, name in enumerate(names, 1):
+        label = f"{spoken_ordinal(index)}，{name}"
+        if index == 1:
+            label += "，也就是现在的我，不换也可以"
+        parts.append(label)
     return "接下来选一个性格。" + "。".join(parts) + "。请说序号，或者说名字。"
 
 
@@ -765,6 +778,8 @@ def api_error_text(exc):
 
 
 class VoiceActivationSession:
+    GREET = "greet"
+    CONFIRM_GREET = "confirm_greet"
     ASK_PHONE = "ask_phone"
     CONFIRM_PHONE = "confirm_phone"
     ASK_CODE = "ask_code"
@@ -793,7 +808,7 @@ class VoiceActivationSession:
         self.conn = conn
         self.stage = stage
         if stage == "bind":
-            self.state = self.ASK_PHONE
+            self.state = self.GREET
         elif stage == "nickname":
             self.state = self.ASK_NICKNAME
         elif stage == "role":
@@ -807,6 +822,8 @@ class VoiceActivationSession:
         self._nickname_misses = 0
         self._owner_misses = 0
         self.owner_title = None
+        # 开场确认称呼被否掉后允许再问一次，再没结果就直接报手机号。
+        self._greet_misses = 0
         self.persona_name = None
         self.persona_templates = []
         self.persona_voices = {}
@@ -845,10 +862,13 @@ class VoiceActivationSession:
             prefix = "绑定成功。" if self.announce_bind_success else ""
             await self._say(prefix + _ASK_NICKNAME_PROMPT)
             return
-        if self.state == self.ASK_OWNER:
-            await self._say("我该怎么称呼您呢？")
+        if self.state == self.GREET:
+            await self._prompt_and_listen(_GREETING_PROMPT)
             return
-        await self._ask_for_phone("请说出您的手机号码，一共十一位。")
+        if self.state == self.ASK_OWNER:
+            await self._say(_ASK_OWNER_PROMPT)
+            return
+        await self._prompt_and_listen("请说出您的手机号码，一共十一位。")
 
     def _allow_barge_in(self):
         return self.state not in (self.ASK_PHONE, self.ASK_CODE, self.ASK_AUTH_CODE)
@@ -884,7 +904,11 @@ class VoiceActivationSession:
             self._busy = False
 
     async def _dispatch(self, text):
-        if self.state == self.ASK_PHONE:
+        if self.state == self.GREET:
+            await self._on_greet(text)
+        elif self.state == self.CONFIRM_GREET:
+            await self._on_confirm_greet(text)
+        elif self.state == self.ASK_PHONE:
             await self._on_phone(text)
         elif self.state == self.CONFIRM_PHONE:
             await self._on_confirm_phone(text)
@@ -945,10 +969,10 @@ class VoiceActivationSession:
         if epoch != self._phone_epoch or self.state != self.ASK_PHONE or self._giving_up:
             return
         if not self.phone_digits:
-            await self._ask_for_phone("没有听清手机号，请按顺序说出十一位手机号。")
+            await self._prompt_and_listen("没有听清手机号，请按顺序说出十一位手机号。")
             return
         missing = 11 - len(self.phone_digits)
-        await self._ask_for_phone(f"还差{spoken_count(missing)}位，请继续说。")
+        await self._prompt_and_listen(f"还差{spoken_count(missing)}位，请继续说。")
 
     async def _accept_phone(self, phone):
         self._invalidate_phone_wait()
@@ -956,6 +980,60 @@ class VoiceActivationSession:
         self.phone = phone
         self.state = self.CONFIRM_PHONE
         await self._say(f"您的手机号是，{spoken_digits(phone)}。对吗？")
+
+    async def _start_phone(self):
+        """打招呼没拿到称呼，直接报手机号；称呼留到角色绑定再问。"""
+        self.state = self.ASK_PHONE
+        self.phone_digits = ""
+        await self._prompt_and_listen("好的，请说出您的手机号码，一共十一位。")
+
+    async def _on_greet(self, text):
+        """开场这一句里带了称呼就先存下并确认，没带就继续报手机号。"""
+        phone = extract_phone(text)
+        if phone:
+            await self._accept_phone(phone)
+            return
+        title = await extract_owner_title(self.conn, text)
+        if title is REPEAT:
+            await self._repeat_prompt()
+            return
+        if title and title is not SKIP:
+            self._greet_misses = 0
+            self.owner_title = title
+            self.state = self.CONFIRM_GREET
+            await self._say(f"我称呼您为{title}，对吗？")
+            return
+        # 跳过、没听清、答非所问都往下走，不在开场卡住用户。
+        await self._start_phone()
+
+    async def _on_confirm_greet(self, text):
+        intent, title = await confirm_turn(
+            self.conn, text, f"是不是称呼用户为{self.owner_title}"
+        )
+        if intent == "repeat":
+            await self._repeat_prompt()
+            return
+        if title and title != self.owner_title:
+            self.owner_title = title
+            await self._say(f"我称呼您为{self.owner_title}，对吗？")
+            return
+        if intent == "accept" or title == self.owner_title:
+            self.state = self.ASK_PHONE
+            self.phone_digits = ""
+            await self._prompt_and_listen(
+                f"好的，{self.owner_title}。请说出您的手机号码，一共十一位。"
+            )
+            return
+        if intent == "decline":
+            self._greet_misses += 1
+            self.owner_title = None
+            if self._greet_misses <= 1:
+                self.state = self.GREET
+                await self._say(f"好的。{_ASK_OWNER_PROMPT}")
+                return
+            await self._start_phone()
+            return
+        await self._say("请说确认，或者说重说。")
 
     async def _on_phone(self, text):
         self._invalidate_phone_wait()
@@ -967,7 +1045,7 @@ class VoiceActivationSession:
                 return
             if aside == "restart":
                 self.phone_digits = ""
-                await self._ask_for_phone("好的，请重新按顺序说出十一位手机号。")
+                await self._prompt_and_listen("好的，请重新按顺序说出十一位手机号。")
                 return
             self._schedule_phone_wait()
             return
@@ -982,14 +1060,14 @@ class VoiceActivationSession:
         self.phone_digits += digits
         if len(self.phone_digits) > 11:
             self.phone_digits = ""
-            await self._ask_for_phone("位数超过十一位了，请重新按顺序说出手机号。")
+            await self._prompt_and_listen("位数超过十一位了，请重新按顺序说出手机号。")
             return
         if len(self.phone_digits) < 11:
             self._schedule_phone_wait()
             return
         if not is_mobile_phone(self.phone_digits):
             self.phone_digits = ""
-            await self._ask_for_phone("手机号需要是以1开头的十一位数字，请重新说。")
+            await self._prompt_and_listen("手机号需要是以1开头的十一位数字，请重新说。")
             return
         await self._accept_phone(self.phone_digits)
 
@@ -1010,7 +1088,7 @@ class VoiceActivationSession:
             self.phone = None
             self.phone_digits = ""
             self.state = self.ASK_PHONE
-            await self._ask_for_phone("好的，请重新按顺序说出十一位手机号。")
+            await self._prompt_and_listen("好的，请重新按顺序说出十一位手机号。")
             return
         if intent != "accept":
             await self._say("请说确认，或者说重说。")
@@ -1044,7 +1122,7 @@ class VoiceActivationSession:
             self.phone = None
             self.phone_digits = ""
             self.state = self.ASK_PHONE
-            await self._ask_for_phone("好的，请重新按顺序说出十一位手机号。")
+            await self._prompt_and_listen("好的，请重新按顺序说出十一位手机号。")
             return
         if action != "code" or not code:
             await self._say("没有听清验证码，请再说一遍。")
@@ -1139,9 +1217,14 @@ class VoiceActivationSession:
 
     async def _begin_owner(self):
         self.stage = "role"
-        self.state = self.ASK_OWNER
         self.conn.voice_onboarding = "role"
         name = self.nickname or "助手"
+        if self.owner_title:
+            # 开场打招呼时已经问过并确认过称呼，这里不再重复提问。
+            await self._say(f"好的，我是{name}。")
+            await self._begin_persona()
+            return
+        self.state = self.ASK_OWNER
         await self._say(f"好的，我是{name}。{_ASK_OWNER_PROMPT}")
 
     async def _on_owner(self, text):
@@ -1224,6 +1307,15 @@ class VoiceActivationSession:
     def _persona_menu(self):
         return persona_menu(self.persona_templates)
 
+    def _keeps_current_persona(self, name):
+        """列表第一个是当前默认性格，选它等于不换模板。"""
+        return bool(self.persona_templates) and name == self.persona_templates[0]
+
+    def _persona_confirm_text(self):
+        if self._keeps_current_persona(self.persona_name):
+            return f"性格就保持{self.persona_name}，不换了，对吗？"
+        return f"性格用{self.persona_name}，对吗？"
+
     def _use_persona_voice(self, name):
         voice = (self.persona_voices or {}).get(name)
         if not apply_persona_voice(getattr(self.conn, "tts", None), voice):
@@ -1242,7 +1334,7 @@ class VoiceActivationSession:
             self.persona_name = matched
             self.state = self.CONFIRM_PERSONA
             self._use_persona_voice(matched)
-            await self._say(f"性格用{matched}，对吗？")
+            await self._say(self._persona_confirm_text())
             return
         await self._say("没有听清。请说序号，或者说模板名字。")
 
@@ -1264,7 +1356,7 @@ class VoiceActivationSession:
         if chosen and chosen != self.persona_name:
             self.persona_name = chosen
             self._use_persona_voice(chosen)
-            await self._say(f"性格用{chosen}，对吗？")
+            await self._say(self._persona_confirm_text())
             return
         if intent == "accept" or chosen == self.persona_name:
             await self._ask_supplement()
@@ -1908,12 +2000,16 @@ class VoiceActivationSession:
         return last_empty > 0 and time.monotonic() - last_empty < 0.6
 
     async def _repeat_prompt(self):
-        if self.state == self.ASK_PHONE:
+        if self.state == self.GREET:
+            await self._prompt_and_listen(_GREETING_PROMPT)
+        elif self.state == self.CONFIRM_GREET:
+            await self._say(f"我称呼您为{self.owner_title}，对吗？")
+        elif self.state == self.ASK_PHONE:
             if self.phone_digits:
                 missing = 11 - len(self.phone_digits)
-                await self._ask_for_phone(f"还差{spoken_count(missing)}位，请继续说。")
+                await self._prompt_and_listen(f"还差{spoken_count(missing)}位，请继续说。")
             else:
-                await self._ask_for_phone("请按顺序说出十一位手机号。")
+                await self._prompt_and_listen("请按顺序说出十一位手机号。")
         elif self.state == self.CONFIRM_PHONE:
             await self._say(f"您的手机号是，{spoken_digits(self.phone or '')}。对吗？")
         elif self.state == self.ASK_CODE:
@@ -1932,7 +2028,7 @@ class VoiceActivationSession:
             else:
                 await self._say("请说出性格模板的序号或名字。")
         elif self.state == self.CONFIRM_PERSONA:
-            await self._say(f"性格用{self.persona_name}，对吗？")
+            await self._say(self._persona_confirm_text())
         elif self.state == self.ASK_SUPPLEMENT:
             if self.supplement_parts:
                 await self._say(
@@ -2030,7 +2126,7 @@ class VoiceActivationSession:
         self.conn.logger.bind(tag=TAG).info("语音激活长时间无回应，断开ASR并让设备休眠")
         await self._say("没有听到回应，我先休息了。唤醒我之后，我们再继续。")
 
-    async def _ask_for_phone(self, text):
+    async def _prompt_and_listen(self, text):
         """先播提示，等提示音快说完再连 ASR。不在整段提示音期间占着计费连接。"""
         if self._giving_up:
             return
