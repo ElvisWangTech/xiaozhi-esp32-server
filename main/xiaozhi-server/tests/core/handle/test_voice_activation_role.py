@@ -731,7 +731,7 @@ def test_did_not_hear_repeats_the_current_question():
     asyncio.run(session.handle_text("没听清"))
     assert session.state == session.ASK_NICKNAME
     assert session.nickname is None
-    assert len(said) == 1 and "请说出助手的昵称" in said[0] and "比如" in said[0]
+    assert len(said) == 1 and "给我起个名字吧" in said[0] and "比如" in said[0]
     assert conn.calls
 
     said.clear()

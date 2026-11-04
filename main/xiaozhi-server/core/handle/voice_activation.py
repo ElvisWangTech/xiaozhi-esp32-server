@@ -294,7 +294,7 @@ SUPPLEMENT_PAUSE_SECONDS = 6
 # 所以跳过也必须提交一个昵称；用中性的「助手」，与 _begin_owner 的既有兜底一致。
 _NICKNAME_DEFAULT = "助手"
 # 首次提问就给例子，减少用户不知道该说多短而反复失败。
-_ASK_NICKNAME_PROMPT = "请说出助手的昵称，比如豆豆、小美。"
+_ASK_NICKNAME_PROMPT = "给我起个名字吧，比如豆豆、小美。"
 # 模型判 unclear 时逐级给出更具体的引导，不重复同一句话。
 _NICKNAME_RETRY_HINTS = (
     "没听清。请只说一个简短的名字，比如豆豆、小美。",
