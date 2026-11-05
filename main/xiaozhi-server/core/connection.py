@@ -1319,100 +1319,136 @@ class ConnectionHandler:
         tool_calls_list = []  # 格式: [{"id": "", "name": "", "arguments": ""}]
         content_arguments = ""
         emotion_flag = True
-        try:
-            for response in llm_responses:
-                if self.client_abort:
-                    break
-                if self.intent_type == "function_call" and functions is not None:
-                    content, tools_call = response
-                    if "content" in response:
-                        content = response["content"]
-                        tools_call = None
-                    if content is not None and len(content) > 0:
-                        content_arguments += content
 
-                    if not tool_call_flag and content_arguments.startswith("<tool_call>"):
-                        # print("content_arguments", content_arguments)
-                        tool_call_flag = True
+        def _start_llm_stream():
+            """按当前 conn.llm 起一段新的流式回复（切换 provider 后重试用）。"""
+            history = self.dialogue.get_llm_dialogue_with_memory(
+                memory_str, self.config.get("voiceprint", {}), speaker_for_system
+            )
+            if self.intent_type == "function_call" and functions is not None:
+                return self.llm.response_with_functions(
+                    self.session_id, history, functions=functions
+                )
+            return self.llm.response(self.session_id, history)
 
-                    if tools_call is not None and len(tools_call) > 0:
-                        tool_call_flag = True
-                        self._merge_tool_calls(tool_calls_list, tools_call)
-
-                    # 流式提取 direct_answer 的 response 参数，实时送 TTS
-                    # 使用安全缓冲区，防止 JSON 闭合符号泄漏到 TTS
-                    _DA_STREAM_BUFFER = 5
-                    for tc in tool_calls_list:
-                        if tc["name"] == "direct_answer" and tc.get("arguments"):
-                            da_text = self._extract_direct_answer_response(tc["arguments"])
-                            sent_len = tc.get("_da_sent", 0)
-                            if da_text and len(da_text) > sent_len:
-                                safe_end = max(sent_len, len(da_text) - _DA_STREAM_BUFFER)
-                                if safe_end > sent_len:
-                                    new_part = da_text[sent_len:safe_end]
-                                    # 清理 delta 中可能泄漏的 JSON 闭合垃圾
-                                    new_part = self._clean_response_garbage(new_part)
-                                    if new_part:
-                                        tc["_da_sent"] = safe_end
-                                        self.tts.tts_text_queue.put(
-                                            TTSMessageDTO(
-                                                sentence_id=current_sentence_id,
-                                                sentence_type=SentenceType.MIDDLE,
-                                                content_type=ContentType.TEXT,
-                                                content_detail=new_part,
-                                            )
-                                        )
-                else:
-                    content = response
-
-                # 在llm回复中获取情绪表情，一轮对话只在开头获取一次
-                if emotion_flag and content is not None and content.strip():
-                    if (self.features or {}).get("emoji", True):
-                        asyncio.run_coroutine_threadsafe(
-                            textUtils.get_emotion(self, content),
-                            self.loop,
-                        )
-                    emotion_flag = False
-
-                if content is not None and len(content) > 0:
-                    if not tool_call_flag:
-                        response_message.append(content)
-                        self.tts.tts_text_queue.put(
-                            TTSMessageDTO(
-                                sentence_id=current_sentence_id,
-                                sentence_type=SentenceType.MIDDLE,
-                                content_type=ContentType.TEXT,
-                                content_detail=content,
-                            )
-                        )
-        except Exception as e:
-            self.logger.bind(tag=TAG).error(f"LLM stream processing error: {e}")
-            # 中途断流：本轮文本已部分播出，不重放；只切换备用 provider，
-            # 保证下一轮对话立即可用。
+        # 首 token 前失败（如 401/404、建连被拒）时，切换 provider 后重放一次；
+        # 已有内容播出则只切换不重放，避免重复朗读。
+        stream_retried = False
+        while True:
             try:
+                for response in llm_responses:
+                    if self.client_abort:
+                        break
+                    if self.intent_type == "function_call" and functions is not None:
+                        content, tools_call = response
+                        if "content" in response:
+                            content = response["content"]
+                            tools_call = None
+                        if content is not None and len(content) > 0:
+                            content_arguments += content
+
+                        if not tool_call_flag and content_arguments.startswith("<tool_call>"):
+                            # print("content_arguments", content_arguments)
+                            tool_call_flag = True
+
+                        if tools_call is not None and len(tools_call) > 0:
+                            tool_call_flag = True
+                            self._merge_tool_calls(tool_calls_list, tools_call)
+
+                        # 流式提取 direct_answer 的 response 参数，实时送 TTS
+                        # 使用安全缓冲区，防止 JSON 闭合符号泄漏到 TTS
+                        _DA_STREAM_BUFFER = 5
+                        for tc in tool_calls_list:
+                            if tc["name"] == "direct_answer" and tc.get("arguments"):
+                                da_text = self._extract_direct_answer_response(tc["arguments"])
+                                sent_len = tc.get("_da_sent", 0)
+                                if da_text and len(da_text) > sent_len:
+                                    safe_end = max(sent_len, len(da_text) - _DA_STREAM_BUFFER)
+                                    if safe_end > sent_len:
+                                        new_part = da_text[sent_len:safe_end]
+                                        # 清理 delta 中可能泄漏的 JSON 闭合垃圾
+                                        new_part = self._clean_response_garbage(new_part)
+                                        if new_part:
+                                            tc["_da_sent"] = safe_end
+                                            self.tts.tts_text_queue.put(
+                                                TTSMessageDTO(
+                                                    sentence_id=current_sentence_id,
+                                                    sentence_type=SentenceType.MIDDLE,
+                                                    content_type=ContentType.TEXT,
+                                                    content_detail=new_part,
+                                                )
+                                            )
+                    else:
+                        content = response
+
+                    # 在llm回复中获取情绪表情，一轮对话只在开头获取一次
+                    if emotion_flag and content is not None and content.strip():
+                        if (self.features or {}).get("emoji", True):
+                            asyncio.run_coroutine_threadsafe(
+                                textUtils.get_emotion(self, content),
+                                self.loop,
+                            )
+                        emotion_flag = False
+
+                    if content is not None and len(content) > 0:
+                        if not tool_call_flag:
+                            response_message.append(content)
+                            self.tts.tts_text_queue.put(
+                                TTSMessageDTO(
+                                    sentence_id=current_sentence_id,
+                                    sentence_type=SentenceType.MIDDLE,
+                                    content_type=ContentType.TEXT,
+                                    content_detail=content,
+                                )
+                            )
+                break
+            except Exception as e:
+                self.logger.bind(tag=TAG).error(f"LLM stream processing error: {e}")
                 from core.utils import provider_failover
 
-                provider_failover.mark_current_failed(self, "LLM")
-                provider_failover.swap_from_thread(self, "LLM")
-            except Exception:
-                pass
-            self.tts.tts_text_queue.put(
-                TTSMessageDTO(
-                    sentence_id=current_sentence_id,
-                    sentence_type=SentenceType.MIDDLE,
-                    content_type=ContentType.TEXT,
-                    content_detail=get_system_error_response(self.config),
-                )
-            )
-            if depth == 0:
+                emitted = bool(response_message or tool_calls_list or content_arguments)
+                if not emitted and not stream_retried and not self.client_abort:
+                    # 还没播出任何内容（401/404、建连被拒等）：切换 provider 后重放一次
+                    stream_retried = True
+                    swapped = False
+                    try:
+                        swapped = bool(provider_failover.failover_module_sync(self, "LLM"))
+                    except Exception as exc:
+                        self.logger.bind(tag=TAG).error(f"LLM 切换备用provider失败: {exc}")
+                    if swapped:
+                        try:
+                            llm_responses = _start_llm_stream()
+                            continue
+                        except Exception as exc:
+                            self.logger.bind(tag=TAG).error(
+                                f"LLM 备用provider启动失败: {exc}"
+                            )
+                            provider_failover.mark_current_failed(self, "LLM")
+                else:
+                    # 中途断流：本轮文本已部分播出，不重放；只切换备用 provider，
+                    # 保证下一轮对话立即可用。
+                    try:
+                        provider_failover.mark_current_failed(self, "LLM")
+                        provider_failover.swap_from_thread(self, "LLM")
+                    except Exception:
+                        pass
                 self.tts.tts_text_queue.put(
                     TTSMessageDTO(
                         sentence_id=current_sentence_id,
-                        sentence_type=SentenceType.LAST,
-                        content_type=ContentType.ACTION,
+                        sentence_type=SentenceType.MIDDLE,
+                        content_type=ContentType.TEXT,
+                        content_detail=get_system_error_response(self.config, self),
                     )
                 )
-            return
+                if depth == 0:
+                    self.tts.tts_text_queue.put(
+                        TTSMessageDTO(
+                            sentence_id=current_sentence_id,
+                            sentence_type=SentenceType.LAST,
+                            content_type=ContentType.ACTION,
+                        )
+                    )
+                return
         # 处理function call
         if tool_call_flag:
             bHasError = False

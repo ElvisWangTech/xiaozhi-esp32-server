@@ -240,14 +240,14 @@ def test_misheard_short_name_is_corrected_in_one_turn():
     asyncio.run(session.handle_text("初期。"))
     assert session.state == session.CONFIRM_NICKNAME
     assert session.nickname == "初期"
-    assert said == ["助手的昵称是初期，对吗？"]
+    assert said == ["我的名字是初期，对吗？"]
 
     # 用户一句改口即可纠正。
     session.conn = _FakeConn('{"intent":"correct","value":"初五"}')
     asyncio.run(session.handle_text("不对，是初五"))
     assert session.nickname == "初五"
     assert session.state == session.CONFIRM_NICKNAME
-    assert said[-1] == "助手的昵称是初五，对吗？"
+    assert said[-1] == "我的名字是初五，对吗？"
 
 
 def test_nickname_skip_uses_default():

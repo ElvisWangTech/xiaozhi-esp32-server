@@ -2,7 +2,9 @@ package xiaozhi.modules.config.service.impl;
 
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.Comparator;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -315,6 +317,31 @@ public class ConfigServiceImpl implements ConfigService {
         return items.stream()
                 .map(item -> item.getSourceWord() + "|" + item.getTargetWord())
                 .collect(Collectors.toList());
+    }
+
+    @Override
+    public Map<String, Object> getModelCandidates(String modelType) {
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("modelType", modelType);
+
+        // 模型配置只在这里做数据源，是否可用（密钥是否填过、是否本机地址）由
+        // xiaozhi-server 侧的切换策略判断，避免两处规则漂移。
+        Map<String, Object> providers = new LinkedHashMap<>();
+        List<ModelConfigEntity> models = modelConfigService.getEnabledModelsByType(modelType);
+        if (models != null) {
+            // 默认模型排最前，其余保持 sort 升序（DAO 已排序，稳定排序不打乱同序项）
+            List<ModelConfigEntity> sorted = new ArrayList<>(models);
+            sorted.sort(Comparator.comparingInt(
+                    (ModelConfigEntity m) -> m.getIsDefault() == null ? 0 : m.getIsDefault()).reversed());
+            for (ModelConfigEntity model : sorted) {
+                if (model.getConfigJson() == null || model.getConfigJson().isEmpty()) {
+                    continue;
+                }
+                providers.put(model.getId(), model.getConfigJson());
+            }
+        }
+        result.put("providers", providers);
+        return result;
     }
 
     /**

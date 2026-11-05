@@ -15,6 +15,7 @@ import xiaozhi.common.utils.Result;
 import xiaozhi.common.validator.ValidatorUtils;
 import xiaozhi.modules.config.dto.AgentModelsDTO;
 import xiaozhi.modules.config.dto.CorrectWordsDTO;
+import xiaozhi.modules.config.dto.ModelCandidatesDTO;
 import xiaozhi.modules.config.service.ConfigService;
 import xiaozhi.modules.device.dto.VoiceActivationMacDTO;
 import xiaozhi.modules.device.service.DeviceService;
@@ -46,6 +47,14 @@ public class ConfigController {
         ValidatorUtils.validateEntity(dto);
         Object models = configService.getAgentModels(dto.getMacAddress(), dto.getSelectedModule());
         return new Result<Object>().ok(models);
+    }
+
+    @PostMapping("model-candidates")
+    @Operation(summary = "获取同类型可用模型候选（服务端故障切换用）")
+    public Result<Object> getModelCandidates(@Valid @RequestBody ModelCandidatesDTO dto) {
+        ValidatorUtils.validateEntity(dto);
+        Object candidates = configService.getModelCandidates(dto.getModelType());
+        return new Result<Object>().ok(candidates);
     }
 
     @PostMapping("device-public-ip")

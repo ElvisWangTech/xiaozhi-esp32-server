@@ -264,6 +264,17 @@ async def get_agent_models(
     )
 
 
+@api_guard("获取模型候选失败")
+async def get_model_candidates(instance, model_type: str) -> Optional[Dict]:
+    """同类型所有启用中的模型配置，作为故障切换候选池。
+
+    数据来源是管理端的模型配置列表，管理员新增/启用 provider 后无需重启。
+    """
+    return await instance._execute_async_request(
+        "POST", "/config/model-candidates", json={"modelType": model_type}
+    )
+
+
 @api_guard("获取设备公网IP失败")
 async def get_device_public_ip(instance, mac_address: str) -> Optional[str]:
     """读取设备在 OTA 检查时上报的公网 IP。"""

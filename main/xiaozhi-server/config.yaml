@@ -219,8 +219,9 @@ prompt: |
 # 默认系统提示词模板文件
 prompt_template: agent-base-prompt.txt
 
-# 系统错误时的回复
-system_error_response: "主人，小智现在有点忙，我们稍后再试吧。"
+# 系统错误时的回复（{title} 会被替换成用户自己的称呼，未设置称呼时自动省略）
+# 直接说明后台服务出问题，不引导用户重复说或稍后重试：服务不可用时重试必然失败。
+system_error_response: "{title}抱歉，我的后台服务出了一点问题，暂时帮不了您。"
 
 # 结束语prompt
 end_prompt:

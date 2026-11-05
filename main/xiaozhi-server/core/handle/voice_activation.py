@@ -1165,7 +1165,7 @@ class VoiceActivationSession:
         self._nickname_misses = 0
         self.nickname = nickname
         self.state = self.CONFIRM_NICKNAME
-        await self._say(f"助手的昵称是{nickname}，对吗？")
+        await self._say(f"我的名字是{nickname}，对吗？")
 
     def _nickname_retry_hint(self):
         index = min(self._nickname_misses, len(_NICKNAME_RETRY_HINTS)) - 1
@@ -1189,7 +1189,7 @@ class VoiceActivationSession:
             return
         if nickname and nickname != self.nickname:
             self.nickname = nickname
-            await self._say(f"助手的昵称是{self.nickname}，对吗？")
+            await self._say(f"我的名字是{self.nickname}，对吗？")
             return
         if intent == "accept" or nickname == self.nickname:
             await self._commit_nickname()
@@ -2017,7 +2017,7 @@ class VoiceActivationSession:
         elif self.state == self.ASK_NICKNAME:
             await self._say(_ASK_NICKNAME_PROMPT)
         elif self.state == self.CONFIRM_NICKNAME:
-            await self._say(f"助手的昵称是{self.nickname}，对吗？")
+            await self._say(f"我的名字是{self.nickname}，对吗？")
         elif self.state == self.ASK_OWNER:
             await self._say(_ASK_OWNER_PROMPT)
         elif self.state == self.CONFIRM_OWNER:

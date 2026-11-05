@@ -28,4 +28,12 @@ public interface ConfigService {
      * @return 替换词列表，格式如 ["模板1|模板01", "模板2|模板02"]
      */
     List<String> getCorrectWords(String macAddress);
+
+    /**
+     * 获取同类型所有启用中的模型配置，供 xiaozhi-server 在故障切换时挑选备用 provider。
+     *
+     * @param modelType 模型类型(LLM/TTS/ASR等)
+     * @return {"modelType": 类型, "providers": {模型ID: 模型配置}}
+     */
+    Map<String, Object> getModelCandidates(String modelType);
 }

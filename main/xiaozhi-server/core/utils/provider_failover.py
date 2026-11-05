@@ -1,9 +1,10 @@
 """Provider 故障自动切换（ASR/LLM/TTS 通用，语音激活与正常对话共用）。
 
-任一模块访问失败或超时，自动切换到同模块下其他已配置的 provider
-（不限于 mimoAI）。切换前实时重读最新配置：管理员新配/改配 provider
-（含重新选定 selected_module）立即成为候选；已失败的 provider 若配置
-被管理员修改过，也会重新尝试。代码层只做状态记录与实例重建。
+任一模块访问失败或超时，自动切换到同模块下其他可用 provider
+（不限于 mimoAI）。候选池来自三处：连接时快照、智能体/服务器配置、
+以及管理端「同类型全部启用中的模型配置」——所以管理员在控制台新增
+或改用某个 provider 后，下一次失败即可被选中；已失败的 provider 若
+配置被改过也会重新尝试。代码层只做状态记录与实例重建。
 
 三个 provider 都是连接级实例（conn.asr / conn.tts / conn.llm），可在
 运行时热替换，无需重连设备：
@@ -52,6 +53,87 @@ def provider_conf_hash(conf):
         return hash(json.dumps(conf, sort_keys=True, ensure_ascii=False, default=str))
     except Exception:
         return None
+
+
+# 密钥类字段：任一为空或仍是模板占位符，说明这个 provider 没真正配过，不作为候选。
+# 管理端新建模型时默认写入 "你的api_key" 这类占位值，直接拿去切换只会白等一次失败。
+_CREDENTIAL_KEYS = (
+    "api_key",
+    "api_password",
+    "access_token",
+    "personal_access_token",
+    "token",
+    "appid",
+    "app_key",
+    "appkey",
+    "app_secret",
+    "bot_id",
+    "access_key_id",
+    "access_key_secret",
+    "secret",
+    "secret_key",
+    "authorization",
+)
+_PLACEHOLDER_MARKERS = ("你的", "请填写", "xxx")
+_EMPTY_MARKERS = ("", "none", "null", "nil")
+
+# 本机地址（Ollama / LM Studio / 本地 TTS 服务、本地模型目录等）排到最后，
+# 避免它们占用有限的尝试次数把真正的云端备用挤掉（本地模型加载还特别慢）。
+_LOCAL_HOSTS = ("localhost", "127.0.0.1", "0.0.0.0", "::1")
+_LOCAL_URL_KEYS = ("base_url", "url", "api_url", "ws_url")
+_LOCAL_PATH_KEYS = ("model_dir",)
+
+# 一次切换最多尝试几个候选：切 provider 要建连/握手，逐个试太慢。
+DEFAULT_MAX_CANDIDATES = 3
+
+
+def _iter_strings(value):
+    if isinstance(value, str):
+        yield value
+    elif isinstance(value, dict):
+        for item in value.values():
+            yield from _iter_strings(item)
+    elif isinstance(value, (list, tuple)):
+        for item in value:
+            yield from _iter_strings(item)
+
+
+def provider_is_configured(conf):
+    """密钥类字段都填了、且没有模板占位值才算可用（没有这类字段的 provider 视为可用）。"""
+    if not isinstance(conf, dict) or not conf:
+        return False
+    for text in _iter_strings(conf):
+        if any(marker in text for marker in _PLACEHOLDER_MARKERS):
+            return False
+    for key in _CREDENTIAL_KEYS:
+        if key not in conf:
+            continue
+        value = conf.get(key)
+        text = "" if value is None else str(value).strip()
+        if text.rstrip(";").strip().lower() == "bearer":
+            return False
+        if text.strip().lower() in _EMPTY_MARKERS:
+            return False
+    return True
+
+
+def _is_local_endpoint(conf):
+    for key in _LOCAL_URL_KEYS:
+        value = str(conf.get(key) or "").lower()
+        if any(host in value for host in _LOCAL_HOSTS):
+            return True
+    for key in _LOCAL_PATH_KEYS:
+        if conf.get(key):
+            return True
+    return False
+
+
+def _max_candidates(conn):
+    try:
+        return max(1, int(conn_config(conn).get("failover_max_candidates", DEFAULT_MAX_CANDIDATES)))
+    except Exception:
+        return DEFAULT_MAX_CANDIDATES
+
 
 
 class TTSAudioProbe:
@@ -135,48 +217,116 @@ def mark_current_failed(conn, module_type):
     state.setdefault("failed", {})[active] = provider_conf_hash(conf)
 
 
+# 候选池缓存：主用 provider 挂掉时所有连接会同时触发刷新，
+# 短 TTL 足以挡住这次风暴，又不影响管理员改配置后很快生效。
+_CANDIDATE_TTL = 20.0
+_candidate_cache = {}  # module_type -> (expire_at, providers)
+
+# 配置刷新是尽力而为：拿不到就沿用现有快照，不能把切换本身拖死
+_REFRESH_TIMEOUT = 5.0
+
+
+async def _fetch_model_candidates(conn, module_type):
+    """从管理端拉同类型所有启用中的模型配置，作为候选池。
+
+    管理端 /config/agent-models 只返回智能体选中的那一个 provider，
+    单靠它永远只有一个候选；候选池必须来自模型配置列表。
+    """
+    now = time.monotonic()
+    cached = _candidate_cache.get(module_type)
+    if cached is not None and cached[0] > now:
+        return cached[1]
+    try:
+        from config.manage_api_client import get_model_candidates
+
+        data = await get_model_candidates(module_type)
+    except Exception as exc:
+        _log(conn, "debug", f"获取{module_type}候选模型失败: {exc}")
+        return {}
+    providers = data.get("providers") if isinstance(data, dict) else None
+    providers = providers if isinstance(providers, dict) else {}
+    if providers:
+        _candidate_cache[module_type] = (now + _CANDIDATE_TTL, providers)
+    return providers
+
+
 async def refresh_module_providers(conn, module_type):
     """实时重读该模块的 provider 配置（管理员救场入口）。
 
-    优先取设备绑定的 agent 配置；设备未绑定或获取失败时回退到服务器级
-    配置。任一路失败都保持 conn.config 原状（旧配置仍可作为候选）。
-    本地 config.yaml 模式没有实时来源，维持连接时的快照。
+    合并三路来源，后写覆盖先写，但都不删除已有条目：
+    1. conn.config 里已有的 provider（连接建立时的快照、上一轮切换结果）；
+    2. 智能体/服务器配置里的主用 provider（管理员刚改过的配置）；
+    3. 管理端同类型全部启用中的模型配置（新增的备用 provider 立即成为候选）。
+
+    任一路失败都保持已有内容（旧配置仍可作为候选）。本地 config.yaml 模式
+    没有实时来源，维持连接时的快照。
     """
     if not getattr(conn, "read_config_from_api", False):
         return
     if not isinstance(getattr(conn, "config", None), dict):
         return
-    headers = getattr(conn, "headers", None) or {}
-    device_id = headers.get("device-id")
-    if not device_id:
-        return
-    fresh = None
-    try:
-        from config.config_loader import get_private_config_from_api
 
-        fresh = await get_private_config_from_api(
-            conn.config, device_id, headers.get("client-id", device_id)
+    cfg = conn.config
+    block = cfg.get(module_type)
+    merged = dict(block) if isinstance(block, dict) else {}
+
+    primary = None
+    try:
+        primary = await asyncio.wait_for(
+            _fetch_primary_block(conn, module_type), timeout=_REFRESH_TIMEOUT
         )
     except Exception as exc:
-        # 设备未绑定等拿不到 agent 配置，语音激活场景下属正常。
-        _log(conn, "debug", f"刷新{module_type}配置: agent配置不可用({exc})，改用服务器配置")
-        fresh = None
-    if not (fresh or {}).get(module_type):
-        try:
-            from config.manage_api_client import get_server_config
+        _log(conn, "debug", f"刷新{module_type}主用配置超时或失败: {exc}")
+    if isinstance(primary, dict) and primary:
+        merged.update(primary)
 
-            fresh = (await get_server_config()) or {}
-        except Exception as exc:
-            _log(conn, "debug", f"刷新{module_type}配置: 服务器配置获取失败({exc})")
-            return
-    block = (fresh or {}).get(module_type)
-    if not isinstance(block, dict) or not block:
+    try:
+        candidates = await asyncio.wait_for(
+            _fetch_model_candidates(conn, module_type), timeout=_REFRESH_TIMEOUT
+        )
+    except Exception:
+        candidates = {}
+    added = [name for name in candidates if name not in merged]
+    for name in added:
+        merged[name] = candidates[name]
+
+    if not merged:
         return
-    conn.config[module_type] = block
-    selected = ((fresh or {}).get("selected_module") or {}).get(module_type)
-    if selected in block:
-        conn.config.setdefault("selected_module", {})[module_type] = selected
-    _log(conn, "info", f"{module_type} 实时配置已刷新，候选provider: {list(block.keys())}")
+    cfg[module_type] = merged
+    _log(
+        conn, "info",
+        f"{module_type} 候选provider已刷新: 共{len(merged)}个"
+        f"（新增{len(added)}个），当前={active_provider_name(conn, module_type)}",
+    )
+
+
+async def _fetch_primary_block(conn, module_type):
+    """智能体配置优先；设备未绑定（语音激活常态）回退服务器级配置。"""
+    headers = getattr(conn, "headers", None) or {}
+    device_id = headers.get("device-id")
+    fresh = None
+    if device_id:
+        try:
+            from config.config_loader import get_private_config_from_api
+
+            fresh = await get_private_config_from_api(
+                conn.config, device_id, headers.get("client-id", device_id)
+            )
+        except Exception as exc:
+            # 设备未绑定等拿不到 agent 配置，语音激活场景下属正常。
+            _log(conn, "debug", f"刷新{module_type}配置: agent配置不可用({exc})，改用服务器配置")
+            fresh = None
+    block = (fresh or {}).get(module_type)
+    if isinstance(block, dict) and block:
+        return block
+    try:
+        from config.manage_api_client import get_server_config
+
+        server = (await get_server_config()) or {}
+    except Exception as exc:
+        _log(conn, "debug", f"刷新{module_type}配置: 服务器配置获取失败({exc})")
+        return None
+    return (server or {}).get(module_type)
 
 
 async def rebuild_provider(conn, module_type, provider_name):
@@ -207,12 +357,42 @@ async def rebuild_provider(conn, module_type, provider_name):
     return None
 
 
-async def swap_to_fallback(conn, module_type):
-    """切换到该模块下其他已配置 provider，逐个尝试。
+def _ranked_candidates(conn, module_type, block, active, failed):
+    """该模块下可尝试的备用 provider，按优先级排序并限制数量。
 
-    切换前先实时刷新配置。候选顺序：管理员最新选定的 provider 优先，
-    其余按配置顺序。已失败且配置未变的 provider 跳过；管理员改过配置的
-    会重新纳入。返回切换成功的 provider 名，全部不可用返回 None。
+    排序：failover_priority 显式指定 > 云端地址 > 本机地址，同分按配置顺序。
+    跳过：当前 active、已试过且配置未变、密钥未配置的 provider。
+    """
+    priority = (conn_config(conn).get("failover_priority") or {}).get(module_type) or []
+    if not isinstance(priority, (list, tuple)):
+        priority = []
+    prio_index = {name: i for i, name in enumerate(priority) if isinstance(name, str)}
+    unordered = len(prio_index) + len(block) + 1
+
+    scored = []
+    for order, (name, conf) in enumerate(block.items()):
+        if not isinstance(conf, dict) or not conf:
+            continue
+        if name == active:
+            continue
+        old = failed.get(name)
+        if old is not None and old == provider_conf_hash(conf):
+            continue  # 试过且配置没变
+        if not provider_is_configured(conf):
+            continue  # 没填密钥，切过去只会再失败一次
+        score = (prio_index.get(name, unordered), 1 if _is_local_endpoint(conf) else 0, order)
+        scored.append((score, name))
+    scored.sort(key=lambda item: item[0])
+    return [name for _, name in scored][: _max_candidates(conn)]
+
+
+async def swap_to_fallback(conn, module_type):
+    """切换到该模块下其他可用 provider，逐个尝试。
+
+    切换前先实时刷新配置。候选顺序：failover_priority 显式指定优先，
+    其余云端 provider 在前、本机地址在后，同分按配置顺序。已失败且配置
+    未变的 provider 跳过；管理员改过配置的会重新纳入。
+    返回切换成功的 provider 名，全部不可用返回 None。
     """
     await refresh_module_providers(conn, module_type)
     cfg = conn_config(conn)
@@ -222,28 +402,12 @@ async def swap_to_fallback(conn, module_type):
     state["active"] = active
     failed = state.setdefault("failed", {})
 
-    def _eligible(name):
-        conf = block.get(name)
-        if not isinstance(conf, dict) or not conf:
-            return False
-        if name == active:
-            return False
-        old = failed.get(name)
-        # 没试过，或试过但管理员改过配置 → 可尝试
-        return old is None or old != provider_conf_hash(conf)
-
-    candidates = []
-    selected = (cfg.get("selected_module") or {}).get(module_type)
-    if selected and _eligible(selected):
-        candidates.append(selected)
-    for name in block:
-        if _eligible(name) and name not in candidates:
-            candidates.append(name)
-
+    candidates = _ranked_candidates(conn, module_type, block, active, failed)
     if not candidates:
         _log(
             conn, "warning",
-            f"{module_type} 无可用备用provider（当前={active}，已试过且配置未变={sorted(failed)}）",
+            f"{module_type} 无可用备用provider（当前={active}，已配置={list(block)}，"
+            f"已试过且配置未变={sorted(failed)}，未配置密钥的已排除）",
         )
         return None
 

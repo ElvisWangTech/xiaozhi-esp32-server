@@ -403,6 +403,119 @@ def test_tts_silent_dead_service_is_detected_by_no_audio():
     assert isinstance(healthy_tts.tts_audio_queue, thread_queue.Queue)
 
 
+def _patch_candidates(providers):
+    """让刷新走管理端模型候选接口（不真的发 HTTP）。"""
+    import config.manage_api_client as mac
+
+    pf._candidate_cache.clear()
+
+    async def _fetch(model_type):
+        assert model_type == "LLM"
+        return {"modelType": model_type, "providers": providers}
+
+    return mock.patch.object(mac, "get_model_candidates", _fetch)
+
+
+def test_model_candidates_endpoint_supplies_extra_providers():
+    """agent 配置只给一个 provider 时，候选池由模型配置列表补齐。"""
+    import config.config_loader as cl
+
+    config = {
+        "LLM": {"LLM_DeepSeekLLM": {"type": "openai", "api_key": "k1"}},
+        "selected_module": {"LLM": "LLM_DeepSeekLLM"},
+    }
+    conn = _FakeConn(config, _FakeLLM(RuntimeError("404")), read_from_api=True)
+    primary = {"LLM": {"LLM_DeepSeekLLM": {"type": "openai", "api_key": "k1"}}}
+
+    async def rebuild(_conn, _module, name):
+        assert name == "LLM_MimoLLM"
+        return _FakeLLM('{"intent":"answer"}')
+
+    with mock.patch.object(pf, "rebuild_provider", rebuild), mock.patch.object(
+        cl, "get_private_config_from_api", _rescue_async(lambda: primary)
+    ), _patch_candidates(
+        {
+            "LLM_DeepSeekLLM": {"type": "openai", "api_key": "k1"},
+            "LLM_MimoLLM": {"type": "openai", "api_key": "k2"},
+        }
+    ):
+        data = asyncio.run(_ask_llm_json(conn, "sys", "用户", "提取昵称"))
+
+    assert data == {"intent": "answer"}
+    assert conn._failover_state["LLM"]["active"] == "LLM_MimoLLM"
+    assert "LLM_MimoLLM" in conn.config["LLM"]
+
+
+def test_unconfigured_provider_is_skipped():
+    """密钥还是模板占位值（你的api_key）的 provider 不作为候选。"""
+    config = {
+        "LLM": {
+            "DeepSeekLLM": {"type": "openai", "api_key": "k1"},
+            "AliLLM": {"type": "openai", "api_key": "你的api_key"},
+            "MimoLLM": {"type": "openai", "api_key": "k3"},
+        },
+        "selected_module": {"LLM": "DeepSeekLLM"},
+    }
+    conn = _FakeConn(config, _FakeLLM(RuntimeError("404")))
+    tried = []
+
+    async def rebuild(_conn, _module, name):
+        tried.append(name)
+        return _FakeLLM('{"intent":"answer"}')
+
+    with mock.patch.object(pf, "rebuild_provider", rebuild):
+        asyncio.run(_ask_llm_json(conn, "sys", "用户", "提取昵称"))
+
+    assert tried == ["MimoLLM"], tried
+    assert conn._failover_state["LLM"]["active"] == "MimoLLM"
+
+
+def test_local_provider_ranked_after_cloud_provider():
+    """本机地址（Ollama/LM Studio）排到云端备用之后。"""
+    config = {
+        "LLM": {
+            "DeepSeekLLM": {"type": "openai", "api_key": "k1"},
+            "OllamaLLM": {"type": "ollama", "base_url": "http://localhost:11434"},
+            "MimoLLM": {"type": "openai", "api_key": "k3"},
+        },
+        "selected_module": {"LLM": "DeepSeekLLM"},
+    }
+    conn = _FakeConn(config, _FakeLLM(RuntimeError("404")))
+    tried = []
+
+    async def rebuild(_conn, _module, name):
+        tried.append(name)
+        return _FakeLLM('{"intent":"answer"}')
+
+    with mock.patch.object(pf, "rebuild_provider", rebuild):
+        asyncio.run(_ask_llm_json(conn, "sys", "用户", "提取昵称"))
+
+    assert tried == ["MimoLLM"], tried
+
+
+def test_failover_priority_overrides_default_order():
+    """failover_priority 显式指定时按配置顺序优先。"""
+    config = {
+        "LLM": {
+            "DeepSeekLLM": {"type": "openai", "api_key": "k1"},
+            "MimoLLM": {"type": "openai", "api_key": "k3"},
+            "OllamaLLM": {"type": "ollama", "base_url": "http://localhost:11434"},
+        },
+        "selected_module": {"LLM": "DeepSeekLLM"},
+        "failover_priority": {"LLM": ["OllamaLLM", "MimoLLM"]},
+    }
+    conn = _FakeConn(config, _FakeLLM(RuntimeError("404")))
+
+    async def rebuild(_conn, _module, name):
+        assert name == "OllamaLLM"
+        return _FakeLLM('{"intent":"answer"}')
+
+    with mock.patch.object(pf, "rebuild_provider", rebuild):
+        asyncio.run(_ask_llm_json(conn, "sys", "用户", "提取昵称"))
+
+    assert conn._failover_state["LLM"]["active"] == "OllamaLLM"
+
+
 def test_swap_from_thread_runs_on_conn_loop():
     """正常对话：chat/TTS 线程经 failover_module_sync 回连接事件循环执行切换。"""
     conn = _FakeConn(_llm_config(), _FakeLLM(RuntimeError("500")))
