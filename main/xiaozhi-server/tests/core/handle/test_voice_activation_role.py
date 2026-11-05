@@ -48,7 +48,7 @@ class _FakeConn:
             raise self.reply
         return self.reply
 
-TEMPLATES = ["甜美小源", "温婉珊珊", "星际游子", "英语老师"]
+TEMPLATES = ["可爱女生", "甜美小源", "温婉珊珊", "星际游子", "英语老师"]
 
 
 def test_parse_nickname_reply():
@@ -209,16 +209,16 @@ def test_denied_title_asks_once_more_then_goes_to_phone():
 
 
 def test_keeping_the_current_persona_is_offered_and_worded_as_no_change():
-    conn = _FakeConn('{"intent":"answer","template":"甜美小源"}')
-    assert asyncio.run(resolve_persona(conn, "不用换了，就这样", TEMPLATES)) == "甜美小源"
+    conn = _FakeConn('{"intent":"answer","template":"可爱女生"}')
+    assert asyncio.run(resolve_persona(conn, "不用换了，就这样", TEMPLATES)) == "可爱女生"
     assert "第一个" in conn.calls[0][0]
 
     session, said = _guided_session(conn, "role", VoiceActivationSession.ASK_PERSONA)
     session.persona_templates = TEMPLATES
     asyncio.run(session.handle_text("不用换了，就这样"))
     assert session.state == session.CONFIRM_PERSONA
-    assert session.persona_name == "甜美小源"
-    assert said == ["性格就保持甜美小源，不换了，对吗？"]
+    assert session.persona_name == "可爱女生"
+    assert said == ["性格就保持可爱女生，不换了，对吗？"]
 
 
 def test_nickname_retries_give_progressively_clearer_hints():
@@ -255,8 +255,8 @@ def test_nickname_skip_uses_default():
     session, said = _guided_session(conn, "nickname", VoiceActivationSession.ASK_NICKNAME)
     asyncio.run(session.handle_text("算了"))
     assert session.state == session.CONFIRM_NICKNAME
-    assert session.nickname == "助手"
-    assert "助手" in said[-1]
+    assert session.nickname == "牛小七"
+    assert "牛小七" in said[-1]
 
 
 def test_owner_retries_give_progressively_clearer_hints():
@@ -764,8 +764,8 @@ def test_confirm_intent_asks_the_model():
 def test_supplement_and_menu():
     assert clean_supplement("  说话温柔一点。 ") == "说话温柔一点"
     menu = persona_menu(TEMPLATES)
-    assert menu.startswith("接下来选一个性格。一，甜美小源，也就是现在的我，不换也可以。二，温婉珊珊。")
-    assert "四，英语老师" in menu
+    assert menu.startswith("接下来选一个性格。一，可爱女生，也就是现在的我，不换也可以。二，甜美小源。")
+    assert "五，英语老师" in menu
 
 
 def test_prompt_connects_asr_as_prompt_ends():
@@ -1363,7 +1363,7 @@ def test_role_bind_announces_success_before_skills():
 
     session = VoiceActivationSession(_Conn(), stage="role")
     session.owner_title = "意为"
-    session.persona_name = "甜美小源"
+    session.persona_name = "可爱女生"
 
     async def _post(_path, _payload):
         order.append("save")

@@ -291,8 +291,8 @@ _SUPPLEMENT_LIMIT = 80
 # 补充可以分几句说。记下一句后先等用户继续，这段静音内没有新内容就当作说完了。
 SUPPLEMENT_PAUSE_SECONDS = 6
 # 跳过设置时的兜底昵称。后端 saveNickname 拒绝空值且负责推进 onboarding 阶段，
-# 所以跳过也必须提交一个昵称；用中性的「助手」，与 _begin_owner 的既有兜底一致。
-_NICKNAME_DEFAULT = "助手"
+# 所以跳过也必须提交一个昵称；默认用「牛小七」，配合默认性格模板「可爱女生」。
+_NICKNAME_DEFAULT = "牛小七"
 # 首次提问就给例子，减少用户不知道该说多短而反复失败。
 _ASK_NICKNAME_PROMPT = "给我起个名字吧，比如豆豆、小美。"
 # 模型判 unclear 时逐级给出更具体的引导，不重复同一句话。
@@ -1218,7 +1218,7 @@ class VoiceActivationSession:
     async def _begin_owner(self):
         self.stage = "role"
         self.conn.voice_onboarding = "role"
-        name = self.nickname or "助手"
+        name = self.nickname or _NICKNAME_DEFAULT
         if self.owner_title:
             # 开场打招呼时已经问过并确认过称呼，这里不再重复提问。
             await self._say(f"好的，我是{name}。")

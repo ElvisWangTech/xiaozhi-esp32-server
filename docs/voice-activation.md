@@ -27,7 +27,7 @@
 7. 校验通过后：查找 `super_admin=1` 的用户（取 id 最小的一个），**新建**一个智能体（不按手机号查找已有智能体），用默认模板创建，初始名为「小智」。按激活码写入 `ai_device`，`user_id` 为该管理员，并保存手机号，`onboarding_status=nickname`。同一手机号再绑另一台设备时，再新建一个智能体。
 8. 播报绑定成功，重新拉取该设备的私有配置。若 `voice_onboarding=nickname`，请用户说助手昵称。可以说「小智」，也可以说「你的昵称是小智」。播报确认后写入 `agentName`，状态改为 `role`。
 9. 认主：开场已经确认过称呼时不再重复提问，直接播报「好的，我是{昵称}」进入性格选择；否则问「我该怎么称呼您呢？」，用户可以直接说「老板」，也可以说「叫我老板」，确认后进入性格选择。
-10. 性格：按排序播报 `ai_agent_template` 的名称，第一项就是当前默认性格（甜美小源），说「不用换」「保持现在的」也等于选它。确认后问还有没有补充。说「没有」就结束；说了补充则追加到角色设定。然后把所选模板的 `systemPrompt`、主人称呼和补充写入智能体，状态改为 `skills`。
+10. 性格：按排序播报 `ai_agent_template` 的名称，第一项就是当前默认性格（可爱女生），说「不用换」「保持现在的」也等于选它。确认后问还有没有补充。说「没有」就结束；说了补充则追加到角色设定。然后把所选模板的 `systemPrompt`、主人称呼和补充写入智能体，状态改为 `skills`。
 11. 角色设定结束后**不询问用户**，自动做通用技能绑定（`POST /skills` → portal_lite `/api/device/bind` + `/api/portal/invite`）。**只有这一次**会接着自动开通瑞幸咖啡、滴滴出行（先瑞幸：滴滴常需实名/免密支付）。第一次调用 `/skills/auth` 后，状态从 `skills` 改为 `skills_manual`，重连和唤醒都不再自动开通。之后用户要自己说「绑定技能」。`/skills/auth` → portal automation；仅 `waiting_code` 时要短信验证码；说「不要/跳过」则 cancel 该项。单项失败会当场播报原因，全部结束后再汇总失败项并提示可说「绑定技能」重试，然后播报「配置完毕，设备即将重启」并直接下发重启（不询问用户；不重启设备 MCP 工具加载不到）。麦当劳暂不支持。通用绑定失败保持 `skills`。
 12. 断线重连：状态为 `nickname` 时只继续问昵称；为 `role` 时从「我该怎么称呼您呢？」重新开始；为 `skills` 时继续通用绑定，并仍会自动授权（这一次还没发起过）。为 `skills_quiet` 时只静默重试通用绑定，成功后结束引导，并告诉用户可以说「绑定技能」再开通瑞幸或滴滴。`skills_manual` 和 `done` 不再自动拉起；用户说「绑定技能」才会再开通。
 
@@ -77,7 +77,7 @@
 
 请求：`{ "macAddress": "..." }`
 
-仅当 `onboarding_status=role` 时，按排序返回仍在使用的性格模板。每项包含名称和豆包音色编码，例如 `[{"name":"甜美小源","voice":"zh_female_tianmeixiaoyuan_uranus_bigtts"},{"name":"温婉珊珊","voice":"saturn_zh_female_wenwanshanshan_cs_tob"}]`。`sort < 0` 的模板不返回。
+仅当 `onboarding_status=role` 时，按排序返回仍在使用的性格模板。每项包含名称和豆包音色编码，例如 `[{"name":"可爱女生","voice":"saturn_zh_female_keainvsheng_tob"},{"name":"甜美小源","voice":"zh_female_tianmeixiaoyuan_uranus_bigtts"},{"name":"温婉珊珊","voice":"saturn_zh_female_wenwanshanshan_cs_tob"}]`。`sort < 0` 的模板不返回。
 
 `POST /device/voice-activation/role`
 
@@ -162,7 +162,7 @@
 | --- | --- |
 | ASR | 豆包语音识别2.0(流式)，`ASR_DoubaoStreamASRV2` |
 | LLM | deepseek-chat，`LLM_DeepSeekLLM` |
-| TTS | 豆包语音合成2.0(流式)，`TTS_HSDSTTS_V2`，音色「甜美小源」（`TTS_HSDSTTS_V2_0021`） |
+| TTS | 豆包语音合成2.0(流式)，`TTS_HSDSTTS_V2`，音色「可爱女生」（`TTS_HSDSTTS_V2_0003`） |
 
 已绑定设备用智能体自己的模型。语音激活 `bind` 走 `createAgentForUser`，从默认模板复制这三项。
 
@@ -208,6 +208,13 @@
 - 性格模板「湾湾小何」改名为「温婉珊珊」，提示词整段替换，音色换成 `TTS_HSDSTTS_V2_0030`。排序：甜美小源 1（默认）、温婉珊珊 2、星际游子 3、英语老师 4。变更在 `db/changelog/202611041600.sql`。
 - 性格选择第一项就是当前默认性格，语音里会说明「也就是现在的我，不换也可以」；说「不用换」「保持现在的」「随便」都按选它处理，确认话术改成「性格就保持甜美小源，不换了」。
 - 修激活话术仍用「湾湾小何」音色的问题：`ConfigServiceImpl.getConfig` 原来给未绑定设备传 `voice=null`，TTS 回落到 `ai_model_config` 里 `TTS_HSDSTTS_V2` 的 `speaker`（还是 `zh_female_xiaohe_uranus_bigtts`）。改为取默认模板绑定的音色写成 `private_voice`，并在命中 Redis 缓存时比对音色，不一致就重建缓存。
+
+### 2026-11-05
+
+- 默认模板从「甜美小源」换成「可爱女生」：温柔、体贴、爱撒娇、偶尔闹点小脾气，但答应的事情一定做到。音色换成豆包语音合成2.0 的「可爱女生」（`TTS_HSDSTTS_V2_0003`，`saturn_zh_female_keainvsheng_tob`）。变更在 `db/changelog/202611051700.sql`。
+- 「甜美小源」保留为可选模板（提示词、音色不变），排序调整为：可爱女生 1（默认）、甜美小源 2、温婉珊珊 3、星际游子 4、英语老师 5。
+- 语音里的确认话术随之变为「性格就保持可爱女生，不换了，对吗？」，`persona_menu` 的第一项也变成「一，可爱女生，也就是现在的我，不换也可以」。Python 侧无硬编码，模板顺序全部来自 `ai_agent_template.sort`。
+- 默认昵称从「助手」改为「牛小七」：用户说「算了」「不想设置」跳过昵称时，`_NICKNAME_DEFAULT` 兜底为牛小七，写进 `agentName` 后提示词里的 `{{assistant_name}}` 也是牛小七。改动在 `core/handle/voice_activation.py`，`_begin_owner` 的 `self.nickname or _NICKNAME_DEFAULT` 同步复用同一常量，不再各写一份。
 
 ## 后续操作（本次不实现）
 
