@@ -1,5 +1,6 @@
 import asyncio
 import json
+import math
 import re
 import time
 import uuid
@@ -16,6 +17,7 @@ from core.utils.provider_failover import (
 TAG = __name__
 SMS_CODE_ERROR = 10075
 VOICE_SMS_COOLDOWN = 10205
+VOICE_SMS_COOLDOWN_SECONDS = 60
 VOICE_SMS_EXPIRED = 10206
 VOICE_SMS_ATTEMPTS_EXHAUSTED = 10207
 PLAYBACK_STOP_TIMEOUT_SECONDS = 2
@@ -198,7 +200,11 @@ _SUPPLEMENT_SYSTEM_PROMPT = (
     '{"action":"content","text":"说话温柔一点"}、{"action":"end","text":""}、'
     '{"action":"repeat","text":""} 或 {"action":"unclear","text":""}。\n'
     "content：这一句提出了新的具体要求。text 写这个要求本身，去掉「还有」「然后」「再补充」这类连接词。\n"
-    "end：整句都在表示补充说完了、没有了。\n"
+    "end：整句都在表示补充说完了、没有了。ASR 可能在一个短语中间插入标点，"
+    "理解整句时不要把逗号当成意思反转。"
+    "例如「没有，要补充的。」和「没有要补充的」都表示没有补充，输出 end。"
+    "「还有，要补充的。」表示想继续但尚未说内容，输出 continue。"
+    "如果否定后确实提出了具体要求，例如「没有，要补充的就是回答短一点」，输出 content。\n"
     "repeat：没听清，让你把刚才的问题再说一遍。\n"
     "unclear：语气词、纯确认、反问，或听不清在说什么。\n"
     "先说没有、后面又给了具体要求时，是 content，不是 end。不要因为出现「没有」「不用」「算了」就判成 end，"
@@ -803,6 +809,7 @@ class VoiceActivationSession:
         saved_title = re.search(r"\[主人称呼\]\s*请称呼用户为「([^」\n]{1,12})」。", config.get("prompt") or "")
         self.owner_title = saved_title[1] if saved_title and stage != "bind" else None
         self._sms_retry_action = None
+        self._last_sms_send = None
         self._retry_bind_code = None
         self.persona_name = None
         self.persona_templates = []
@@ -1133,23 +1140,42 @@ class VoiceActivationSession:
             self.conn.logger.bind(tag=TAG).warning("发送绑定验证码失败")
             error_code = getattr(exc, "code", None)
             details = getattr(exc, "data", None)
-            seconds = details.get("retryAfterSeconds") if isinstance(details, dict) else None
             self._sms_retry_action = "resend" if resending and error_code != VOICE_SMS_COOLDOWN else None
             self._retry_bind_code = None
             if error_code == VOICE_SMS_COOLDOWN:
                 self._sms_retry_action = "cooldown"
                 self.state = self.ASK_CODE if resending else self.RETRY_SMS
-                hint = f"还要等{seconds}秒。" if type(seconds) is int and seconds > 0 else "现在还不能重发。"
+                seconds = self._sms_cooldown_remaining(details)
+                if seconds is None:
+                    self.conn.logger.bind(tag=TAG).warning("绑定验证码冷却响应缺少有效剩余秒数")
+                hint = f"还要等{seconds}秒。" if seconds is not None else "现在还不能重发。"
                 await self._say(hint + "时间到了，可以说‘再发一条’。")
             else:
                 self.state = self.ASK_CODE if resending else self.RETRY_SMS
                 await self._say("刚才验证码没发出去，要我再试一次吗？")
             return
+        self._last_sms_send = (self.phone, time.monotonic())
         self._sms_retry_action = None
         self._retry_bind_code = None
         self.state = self.ASK_CODE
         self.conn.last_activity_time = time.time() * 1000
         await self._say("验证码重新发了，请念一下新收到的验证码。" if resending else "验证码已发送，请念一下短信里的验证码。")
+
+    def _sms_cooldown_remaining(self, details):
+        seconds = details.get("retryAfterSeconds") if isinstance(details, dict) else None
+        if isinstance(seconds, str) and re.fullmatch(r"[0-9]{1,2}", seconds):
+            seconds = int(seconds)
+        if type(seconds) is int and 0 < seconds <= VOICE_SMS_COOLDOWN_SECONDS:
+            return seconds
+        if self._last_sms_send and self._last_sms_send[0] == self.phone:
+            elapsed = time.monotonic() - self._last_sms_send[1]
+            remaining = math.ceil(VOICE_SMS_COOLDOWN_SECONDS - elapsed)
+            if remaining > 0:
+                self.conn.logger.bind(tag=TAG).info(
+                    f"绑定验证码冷却响应缺少有效剩余秒数，使用会话估算: remaining={remaining}s"
+                )
+                return remaining
+        return None
 
     async def _on_retry_sms(self, text):
         waiting_for_cooldown = self._sms_retry_action == "cooldown"
@@ -1855,7 +1881,7 @@ class VoiceActivationSession:
             return
         # 验证码已收下。登录完成前状态常常仍是 waiting_code，不能再把要验证码的那句说一遍。
         await self._advance_after_skill_prompt(
-            "我还在确认开通结果，稍等一下。",
+            "验证码已经收到了，我正在确认开通结果，稍等一下。",
             partial(self._handle_auth_result, result or {}, after_code=True),
         )
 

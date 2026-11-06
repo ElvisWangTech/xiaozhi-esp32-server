@@ -134,6 +134,21 @@ class VoiceActivationFlowTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(resumed.state, resumed.ASK_PERSONA)
         self.assertIn("星际游子", resumed._say.await_args.args[0])
 
+    async def test_sms_cooldown_missing_seconds_uses_last_successful_send(self):
+        session = self.make_session()
+        session.phone = "13800138000"
+        cooldown = RuntimeError("cooldown")
+        cooldown.code = voice.VOICE_SMS_COOLDOWN
+        session._post.side_effect = [None, cooldown]
+        with patch.object(voice.time, "monotonic", return_value=100):
+            await session._send_sms()
+        with patch.object(voice.time, "monotonic", return_value=120):
+            await session._send_sms(resending=True)
+            self.assertIn("还要等40秒", session._say.await_args.args[0])
+            self.assertEqual(session._sms_cooldown_remaining({"retryAfterSeconds": "12"}), 12)
+            session.phone = "13900139000"
+            self.assertIsNone(session._sms_cooldown_remaining(None))
+
     async def test_first_sms_cooldown_requires_explicit_resend(self):
         session = self.make_session()
         session.phone = "13800138000"
@@ -295,7 +310,7 @@ class VoiceActivationFlowTest(unittest.IsolatedAsyncioTestCase):
                     await session.handle_text("我想一下")
                     self.assertEqual(session.state, session.ASK_SUPPLEMENT)
                     self.assertEqual(session.supplement_parts, supplement)
-                    await session.handle_text("就这样吧")
+                    await session.handle_text("没有，要补充的。")
                     self.assertEqual(session.state, session.CONFIRM_SUPPLEMENT)
                     session._save_role.assert_not_awaited()
                     await session.handle_text("可以")
@@ -343,6 +358,17 @@ class VoiceActivationFlowTest(unittest.IsolatedAsyncioTestCase):
         await session._save_role("说话温柔一点")
         self.assertEqual(session.state, session.CONFIRM_SUPPLEMENT)
         session._say.assert_awaited_once_with("刚才没能保存角色设定，要我再试一次吗？")
+
+    async def test_skill_code_pending_acknowledges_receipt_before_polling(self):
+        session = self.make_session("skills")
+        session.state = session.ASK_AUTH_CODE
+        session.auth_task_id = "test-task"
+        session._post.return_value = {"status": "pending"}
+        session._poll_auth = AsyncMock()
+        with patch.object(voice, "resolve_auth_reply", AsyncMock(return_value=("code", "123456"))):
+            await session._on_auth_code("123456")
+        session._say.assert_awaited_once_with("验证码已经收到了，我正在确认开通结果，稍等一下。")
+        session._poll_auth.assert_awaited_once_with(after_code=True)
 
     async def test_skill_code_submission_error_uses_user_facing_prompt(self):
         session = self.make_session("skills")
