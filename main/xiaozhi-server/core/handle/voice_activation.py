@@ -1107,7 +1107,7 @@ class VoiceActivationSession:
             return
         self.state = self.ASK_CODE
         self.conn.last_activity_time = time.time() * 1000
-        await self._say("验证码已发送。请说出短信里的验证码。没收到可以说重发。")
+        await self._say("验证码已发送，是四位数字。请说出短信里的验证码，没收到可以说重发。")
 
     async def _on_code(self, text):
         action, code = await resolve_sms_reply(self.conn, text)
