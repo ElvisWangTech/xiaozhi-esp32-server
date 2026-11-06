@@ -157,43 +157,16 @@ def test_name_from_greeting_skips_the_owner_question_later():
     assert session.state == session.ASK_PHONE
     assert asked == ["好的，老王。请说出您的手机号码，一共十一位。"]
 
-    # 角色绑定阶段不再重复问称呼，直接进性格选择。
-    began = []
-
-    async def _persona():
-        began.append(True)
-
-    session._begin_persona = _persona
-    session.nickname = "小源"
-    said.clear()
-    asyncio.run(session._begin_owner())
-    assert said == ["好的，我是小源。"]
-    assert began == [True]
-
-
-def test_greeting_without_a_name_falls_through_to_phone():
-    """开场没听出称呼就继续报手机号，称呼留到角色绑定再问。"""
+def test_greeting_without_a_name_stays_at_greeting():
     session, _conn, said, asked = _greet_session('{"intent":"unclear","title":""}')
-
     asyncio.run(session.handle_text("今天天气不错"))
     assert session.owner_title is None
-    assert session.state == session.ASK_PHONE
-    assert asked == ["好的，请说出您的手机号码，一共十一位。"]
-
-    began = []
-
-    async def _persona():
-        began.append(True)
-
-    session._begin_persona = _persona
-    session.nickname = "小源"
-    asyncio.run(session._begin_owner())
-    assert session.state == session.ASK_OWNER
-    assert not began
-    assert any("我该怎么称呼您呢" in text for text in said)
+    assert session.state == session.GREET
+    assert asked == []
+    assert "我该怎么称呼你" in said[-1]
 
 
-def test_denied_title_asks_once_more_then_goes_to_phone():
+def test_denied_title_keeps_asking_for_name():
     session, _conn, said, asked = _greet_session('{"intent":"answer","title":"老王"}')
     asyncio.run(session.handle_text("叫我老王"))
 
@@ -201,11 +174,12 @@ def test_denied_title_asks_once_more_then_goes_to_phone():
     asyncio.run(session.handle_text("不对"))
     assert session.owner_title is None
     assert session.state == session.GREET
-    assert any("我该怎么称呼您呢" in text for text in said)
+    assert any("我该怎么称呼你" in text for text in said)
 
+    session.conn = _FakeConn('{"intent":"unclear"}')
     asyncio.run(session.handle_text("今天天气不错"))
-    assert session.state == session.ASK_PHONE
-    assert asked[-1] == "好的，请说出您的手机号码，一共十一位。"
+    assert session.state == session.GREET
+    assert asked == []
 
 
 def test_keeping_the_current_persona_is_offered_and_worded_as_no_change():
@@ -259,24 +233,12 @@ def test_nickname_skip_uses_default():
     assert "牛小七" in said[-1]
 
 
-def test_owner_retries_give_progressively_clearer_hints():
-    conn = _FakeConn('{"intent":"unclear","title":""}')
-    session, said = _guided_session(conn, "role", VoiceActivationSession.ASK_OWNER)
-    for _ in range(3):
-        asyncio.run(session.handle_text("嗯。"))
-    assert session.state == session.ASK_OWNER
-    assert len(said) == 3
-    assert len(set(said)) == 3  # 不再原样重复「没有听清。您希望我怎么称呼您？」
-    assert any("比如" in text for text in said)
-    assert any("默认称呼" in text for text in said)
-
-
 def test_misheard_owner_title_is_corrected_in_one_turn():
     conn = _FakeConn('{"intent":"answer","title":"一维"}')
-    session, said = _guided_session(conn, "role", VoiceActivationSession.ASK_OWNER)
+    session, said = _guided_session(conn, "bind", VoiceActivationSession.GREET)
     # ASR 误识别的称呼：模型按宽松候选返回 answer，直接进入确认。
     asyncio.run(session.handle_text("一维。"))
-    assert session.state == session.CONFIRM_OWNER
+    assert session.state == session.CONFIRM_GREET
     assert session.owner_title == "一维"
     assert said == ["我称呼您为一维，对吗？"]
 
@@ -284,17 +246,17 @@ def test_misheard_owner_title_is_corrected_in_one_turn():
     session.conn = _FakeConn('{"intent":"correct","value":"李工"}')
     asyncio.run(session.handle_text("不对，叫我李工"))
     assert session.owner_title == "李工"
-    assert session.state == session.CONFIRM_OWNER
+    assert session.state == session.CONFIRM_GREET
     assert said[-1] == "我称呼您为李工，对吗？"
 
 
-def test_owner_skip_uses_default():
+def test_owner_skip_keeps_greeting():
     conn = _FakeConn('{"intent":"skip","title":""}')
-    session, said = _guided_session(conn, "role", VoiceActivationSession.ASK_OWNER)
+    session, said = _guided_session(conn, "bind", VoiceActivationSession.GREET)
     asyncio.run(session.handle_text("算了"))
-    assert session.state == session.CONFIRM_OWNER
-    assert session.owner_title == "主人"
-    assert "主人" in said[-1]
+    assert session.state == session.GREET
+    assert session.owner_title is None
+    assert "我该怎么称呼你" in said[-1]
 
 
 def test_extract_owner_title():
@@ -492,12 +454,17 @@ def test_supplement_collects_several_sentences_until_end():
     assert saved == ["说话温柔一点。少讲道理"]
 
 
-def test_supplement_end_without_content_saves_empty():
+def test_supplement_end_without_content_requires_confirmation():
     conn = _FakeConn('{"action":"end"}')
     session, said, saved = _supplement_session(conn)
     asyncio.run(session.handle_text("没有"))
+    assert saved == []
+    assert session.state == session.CONFIRM_SUPPLEMENT
+    assert said[-1] == "那就用刚才选的角色，可以吗？"
+
+    session.conn = _FakeConn('{"intent":"accept"}')
+    asyncio.run(session.handle_text("对"))
     assert saved == [""]
-    assert session.state == session.ASK_SUPPLEMENT
 
 
 def test_supplement_confirm_can_add_more_and_restart():
@@ -533,26 +500,6 @@ def test_supplement_stops_at_the_eighty_char_limit():
     asyncio.run(session.handle_text("再多一句"))
     assert session.supplement_parts == [long_text]
     assert any("八十个字" in text for text in said)
-
-
-def test_supplement_silence_submits_what_was_collected():
-    """用户说完就不再开口：先再问一次，仍无回应就提交已记下的内容。"""
-    import core.handle.voice_activation as voice_activation
-
-    conn = _FakeConn('{"action":"content","text":"说话温柔一点"}')
-    session, said, saved = _supplement_session(conn)
-    asyncio.run(session.handle_text("说话温柔一点"))
-    task = session._supplement_wait_task
-    assert task is not None
-
-    async def _run():
-        await session._supplement_timeout()
-        await session._supplement_timeout()
-
-    asyncio.run(_run())
-    assert any("还有要补充的吗" in text for text in said)
-    assert saved == ["说话温柔一点"]
-    assert session._supplement_wait_task is None
 
 
 def test_supplement_repeat_keeps_what_was_collected():
@@ -597,7 +544,7 @@ def test_config_finished_reboots_without_asking():
     assert conn.skills_pending is False
 
 
-def test_complete_failure_still_reboots():
+def test_complete_failure_waits_for_retry_before_reboot():
     conn = _skill_conn("skills")
     session = VoiceActivationSession(conn, stage="skills")
     said = []
@@ -616,8 +563,11 @@ def test_complete_failure_still_reboots():
     session._say = _say
     session._reboot_device = _reboot
     asyncio.run(session._finish_skills_and_reboot())
-    assert said == ["技能引导已结束。配置完毕，设备即将重启。"]
-    assert rebooted == [True]
+    assert said == ["刚才没能保存技能配置进度，要我再试一次吗？"]
+    assert rebooted == []
+    assert session.state == session.RETRY_SKILLS_COMPLETE
+    assert conn.voice_onboarding == "skills"
+    assert conn.skills_pending is True
 
 
 def test_empty_auth_queue_goes_straight_to_reboot():
@@ -1118,8 +1068,8 @@ def test_bound_auth_skill_is_skipped_unless_rebind():
     asyncio.run(session._run_next_auth())
     assert payloads[0]["rebind"] is False
     assert "瑞幸咖啡已经开通。" in said
-    assert "正在开通瑞幸咖啡。" not in said
-    assert "正在开通滴滴出行。" in said
+    assert not any(text.startswith("正在开通瑞幸咖啡") for text in said)
+    assert any(text.startswith("接下来开通滴滴出行。") for text in said)
     assert "handle:waiting_code" in said
 
     said.clear()
@@ -1134,7 +1084,7 @@ def test_bound_auth_skill_is_skipped_unless_rebind():
     session._post = _post_rebind
     asyncio.run(session._run_next_auth())
     assert payloads[0]["rebind"] is True
-    assert "正在开通瑞幸咖啡。" in said
+    assert any(text.startswith("接下来开通瑞幸咖啡。") for text in said)
     assert "瑞幸咖啡已经开通。" not in said
 
 
@@ -1236,7 +1186,7 @@ def test_code_wait_timeout_announces_failure_before_next_auth():
     _run_poll(session, voice_activation, after_code=True)
 
     assert [text for kind, text in order if kind == "say"] == [
-        "瑞幸咖啡开通失败，没有收到授权结果。"
+        "瑞幸咖啡暂时没能开通，没有收到授权结果。"
     ]
     assert "瑞幸咖啡" in session.auth_failed
     assert [kind for kind, _ in order] == ["say", "wait", "next"]
@@ -1275,7 +1225,7 @@ def test_failed_auth_waits_for_prompt_before_next_auth():
 
     asyncio.run(session._handle_auth_result({"status": "failed", "message": "未收到短信"}))
     assert order == [
-        ("say", "瑞幸咖啡开通失败：未收到短信。"),
+        ("say", "瑞幸咖啡暂时没能开通，授权服务没有提供具体原因。"),
         ("wait", ""),
         ("next", ""),
     ]
@@ -1385,7 +1335,7 @@ def test_role_bind_announces_success_before_skills():
     assert order == [
         "save",
         "refresh",
-        "角色性格绑定成功。",
+        "角色设好了。",
         "wait",
         "接下来绑定技能。",
         "wait",

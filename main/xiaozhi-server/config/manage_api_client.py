@@ -14,6 +14,13 @@ TAG = __name__
 _RETRY_WAIT_SLICE = 0.1
 
 
+class ManageApiError(Exception):
+    def __init__(self, code, message, data=None):
+        super().__init__(f"API返回错误: {message}")
+        self.code = code
+        self.data = data
+
+
 class DeviceNotFoundException(Exception):
     pass
 
@@ -110,7 +117,7 @@ class ManageApiClient:
             elif result.get("code") == 10042:
                 raise DeviceBindException(result.get("msg"))
             elif result.get("code") != 0:
-                raise Exception(f"API返回错误: {result.get('msg', '未知错误')}")
+                raise ManageApiError(result.get("code"), result.get("msg", "未知错误"), result.get("data"))
             return result.get("data")
         finally:
             if response is not None:

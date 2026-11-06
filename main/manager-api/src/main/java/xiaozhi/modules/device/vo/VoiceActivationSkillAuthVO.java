@@ -17,4 +17,7 @@ public class VoiceActivationSkillAuthVO {
 
     @Schema(description = "可读说明")
     private String message;
+
+    @Schema(description = "授权服务返回的机器可读错误码")
+    private String errorCode;
 }
