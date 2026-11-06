@@ -132,12 +132,18 @@ public class VoiceActivationService {
         if (StringUtils.isBlank(activationCode)) {
             throw new RenException(ErrorCode.ACTIVATION_CODE_ERROR);
         }
+        String ownerTitle = StringUtils.isBlank(dto.getOwnerTitle()) ? null : normalizeOwnerTitle(dto.getOwnerTitle());
         smsCodeService.verifyOrThrow(phone, dto.getCode());
 
         SysUserEntity admin = findSuperAdmin();
         AgentCreateDTO create = new AgentCreateDTO();
         create.setAgentName(DEFAULT_AGENT_NAME);
         String agentId = agentService.createAgentForUser(create, admin.getId());
+        if (ownerTitle != null) {
+            AgentEntity agent = agentService.selectById(agentId);
+            agent.setSystemPrompt(composeRolePrompt(StringUtils.defaultString(agent.getSystemPrompt()), ownerTitle, null));
+            agentService.updateById(agent);
+        }
         deviceService.activateDevice(agentId, activationCode, admin.getId(), phone, ONBOARDING_NICKNAME);
 
         VoiceActivationBindVO vo = new VoiceActivationBindVO();
@@ -600,6 +606,7 @@ public class VoiceActivationService {
         } else if ("waiting_scan".equals(state)) {
             vo.setStatus("failed");
             vo.setMessage("该技能需要扫码，语音暂不支持");
+            vo.setErrorCode("SCAN_REQUIRED");
         } else {
             vo.setStatus("pending");
         }

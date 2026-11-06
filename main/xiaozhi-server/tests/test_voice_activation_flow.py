@@ -46,7 +46,8 @@ class VoiceActivationFlowTest(unittest.IsolatedAsyncioTestCase):
             ("就这个", {"intent": "accept"}, session.ASK_SUPPLEMENT),
             ("说话温柔一点", {"action": "content", "text": "说话温柔一点"}, session.ASK_SUPPLEMENT),
             ("就这样吧", {"action": "end"}, session.CONFIRM_SUPPLEMENT),
-            ("对", {"intent": "accept"}, session.ASK_AUTH_CODE),
+            ("对", {"intent": "accept"}, session.ASK_AUTH_CONSENT),
+            ("两项都开", {"intent": "accept", "services": ["luckin", "didi"]}, session.ASK_AUTH_CODE),
             ("123456", {"intent": "code", "slot": 1}, session.ASK_AUTH_CODE),
             ("滴滴先不用", {"intent": "skip"}, session.REBOOTING),
         ]
@@ -64,6 +65,74 @@ class VoiceActivationFlowTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(role_call.args[1]["supplement"], "说话温柔一点")
         self.assertEqual(session._post.await_args.args[0], "/device/voice-activation/skills/complete")
         session._reboot_device.assert_awaited_once()
+
+    async def test_opening_skip_or_phone_does_not_bypass_name(self):
+        session = self.make_session()
+        model = AsyncMock(side_effect=[
+            {"intent": "skip"}, {"intent": "phone", "phone": "13800138000"},
+        ])
+        with patch.object(voice, "_ask_llm_json", model):
+            await session._on_greet("先跳过")
+            await session._on_greet("13800138000")
+        self.assertEqual(session.state, session.GREET)
+        session._post.assert_not_awaited()
+
+    async def test_first_authorization_decline_completes_without_sending_codes(self):
+        session = self.make_session("skills")
+        session.include_auth = True
+        session.ask_auth_consent = True
+        session._reboot_device = AsyncMock()
+        await session._bind_skills()
+        self.assertEqual(session.state, session.ASK_AUTH_CONSENT)
+        self.assertEqual(session._post.await_count, 1)
+        with patch.object(voice, "_ask_llm_json", AsyncMock(return_value={"intent": "decline"})):
+            await session._dispatch("以后再说")
+        self.assertEqual([call.args[0] for call in session._post.await_args_list], [
+            "/device/voice-activation/skills", "/device/voice-activation/skills/complete",
+        ])
+        self.assertEqual(session.state, session.REBOOTING)
+
+    async def test_first_authorization_can_choose_only_one_service(self):
+        session = self.make_session("skills")
+        session.include_auth = True
+        session.ask_auth_consent = True
+        session._post.side_effect = [None, {"status": "waiting_code", "taskId": "didi"}]
+        await session._bind_skills()
+        with patch.object(voice, "_ask_llm_json", AsyncMock(
+            return_value={"intent": "accept", "services": ["didi"]}
+        )):
+            await session._dispatch("瑞幸先不用，只开滴滴")
+        self.assertEqual(session.auth_skipped, ["瑞幸咖啡"])
+        self.assertEqual(session.state, session.ASK_AUTH_CODE)
+        self.assertEqual(session._post.await_count, 2)
+        self.assertEqual(session._post.await_args.args[1]["service"], "didi")
+
+    async def test_active_authorization_starts_without_consent_and_prompts_before_request(self):
+        session = self.make_session("skills")
+        session.include_auth = True
+
+        async def post(path, payload):
+            if path.endswith("/auth"):
+                self.assertIn("请准备接收短信验证码", session._say.await_args.args[0])
+                self.assertEqual(payload["service"], "luckin")
+                return {"status": "waiting_code", "taskId": "luckin"}
+            return None
+
+        session._post.side_effect = post
+        await session._bind_skills()
+        self.assertEqual(session.state, session.ASK_AUTH_CODE)
+
+    async def test_role_resume_uses_saved_owner_without_asking_again(self):
+        session = self.make_session("role")
+        session.conn.config["prompt"] = "默认角色\n[主人称呼]\n请称呼用户为「老周」。"
+        resumed = voice.VoiceActivationSession(session.conn, stage="role")
+        resumed._start_idle_watch = Mock()
+        resumed._post = AsyncMock(return_value=["可爱女生", "星际游子"])
+        resumed._say = AsyncMock()
+        await resumed.start()
+        self.assertEqual(resumed.owner_title, "老周")
+        self.assertEqual(resumed.state, resumed.ASK_PERSONA)
+        self.assertIn("星际游子", resumed._say.await_args.args[0])
 
     async def test_first_sms_cooldown_requires_explicit_resend(self):
         session = self.make_session()
@@ -294,7 +363,7 @@ class VoiceActivationFlowTest(unittest.IsolatedAsyncioTestCase):
             "errorCode": "PROVIDER_502",
             "message": "HTTP 502 from upstream",
         })
-        session._say.assert_awaited_once_with("瑞幸咖啡暂时没能开通。")
+        session._say.assert_awaited_once_with("瑞幸咖啡暂时没能开通，授权服务没有提供具体原因。")
 
     async def test_auth_status_error_keeps_the_existing_task(self):
         session = self.make_session("skills")
