@@ -11,6 +11,7 @@ public class RenException extends RuntimeException {
 
     private int code;
     private String msg;
+    private transient Object data;
 
     public RenException(int code) {
         super(MessageUtils.getMessage(code));
@@ -46,6 +47,17 @@ public class RenException extends RuntimeException {
         super(msg, e);
         this.code = ErrorCode.INTERNAL_SERVER_ERROR;
         this.msg = msg;
+    }
+
+    public RenException(int code, String msg, Object data) {
+        super(msg);
+        this.code = code;
+        this.msg = msg;
+        this.data = data;
+    }
+
+    public Object getData() {
+        return data;
     }
 
     public String getMsg() {

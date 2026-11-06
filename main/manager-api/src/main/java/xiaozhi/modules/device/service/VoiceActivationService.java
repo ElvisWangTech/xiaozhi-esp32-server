@@ -132,12 +132,18 @@ public class VoiceActivationService {
         if (StringUtils.isBlank(activationCode)) {
             throw new RenException(ErrorCode.ACTIVATION_CODE_ERROR);
         }
+        String ownerTitle = StringUtils.isBlank(dto.getOwnerTitle()) ? null : normalizeOwnerTitle(dto.getOwnerTitle());
         smsCodeService.verifyOrThrow(phone, dto.getCode());
 
         SysUserEntity admin = findSuperAdmin();
         AgentCreateDTO create = new AgentCreateDTO();
         create.setAgentName(DEFAULT_AGENT_NAME);
         String agentId = agentService.createAgentForUser(create, admin.getId());
+        if (ownerTitle != null) {
+            AgentEntity agent = agentService.selectById(agentId);
+            agent.setSystemPrompt(composeRolePrompt(StringUtils.defaultString(agent.getSystemPrompt()), ownerTitle, null));
+            agentService.updateById(agent);
+        }
         deviceService.activateDevice(agentId, activationCode, admin.getId(), phone, ONBOARDING_NICKNAME);
 
         VoiceActivationBindVO vo = new VoiceActivationBindVO();
@@ -330,7 +336,8 @@ public class VoiceActivationService {
         body.put("code", smsCode);
         callPortalJson(portal.baseUrl, null, null, HttpMethod.POST, "/api/automation/code", body);
         VoiceActivationSkillAuthVO vo = skillAuthStatus(mac, tid);
-        if ("pending".equals(vo.getStatus()) || "waiting_code".equals(vo.getStatus())) {
+        if ("pending".equals(vo.getStatus())
+                || ("waiting_code".equals(vo.getStatus()) && !"INVALID_CODE".equals(vo.getErrorCode()))) {
             vo.setStatus("pending");
             if (StringUtils.isBlank(vo.getMessage())) {
                 vo.setMessage("验证码已提交，正在登录");
@@ -573,6 +580,7 @@ public class VoiceActivationService {
         if (view == null) {
             vo.setStatus("failed");
             vo.setMessage("任务不存在");
+            vo.setErrorCode("TASK_NOT_FOUND");
             return vo;
         }
         String taskId = textOrNull(view, "task_id");
@@ -580,6 +588,7 @@ public class VoiceActivationService {
         String message = textOrNull(view, "message");
         vo.setTaskId(taskId);
         vo.setMessage(message);
+        vo.setErrorCode(textOrNull(view, "error_code"));
         if (view.path("done").asBoolean(false) || "done".equals(state)) {
             vo.setStatus("done");
         } else if (view.path("canceled").asBoolean(false) || "canceled".equals(state)) {
@@ -597,6 +606,7 @@ public class VoiceActivationService {
         } else if ("waiting_scan".equals(state)) {
             vo.setStatus("failed");
             vo.setMessage("该技能需要扫码，语音暂不支持");
+            vo.setErrorCode("SCAN_REQUIRED");
         } else {
             vo.setStatus("pending");
         }

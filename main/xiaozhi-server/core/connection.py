@@ -836,7 +836,7 @@ class ConnectionHandler:
         # skills 才会自动跑授权；skills_quiet 只重试通用绑定。
         include_auth = self.voice_onboarding == "skills"
         self.voice_activation_handler = VoiceActivationSession(
-            self, stage="skills", include_auth=include_auth
+            self, stage="skills", include_auth=include_auth, ask_auth_consent=include_auth
         )
         await self.voice_activation_handler.start()
 

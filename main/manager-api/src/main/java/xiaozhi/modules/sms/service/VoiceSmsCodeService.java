@@ -3,6 +3,7 @@ package xiaozhi.modules.sms.service;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.time.LocalDate;
+import java.util.Map;
 import java.util.HexFormat;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.regex.Pattern;
@@ -74,11 +75,11 @@ public class VoiceSmsCodeService {
         Object attempts = redisUtils.get(attemptKey);
         int used = attempts instanceof Number ? ((Number) attempts).intValue() : 0;
         if (used >= MAX_VERIFY_ATTEMPTS) {
-            throw new RenException("验证码错误次数过多，请重新获取");
+            throw new RenException(ErrorCode.VOICE_SMS_ATTEMPTS_EXHAUSTED, "验证码错误次数过多，请重新获取", null);
         }
         Object stored = redisUtils.get(codeKey);
         if (stored == null) {
-            throw new RenException("验证码已过期，请重新获取");
+            throw new RenException(ErrorCode.VOICE_SMS_EXPIRED, "验证码已过期，请重新获取", null);
         }
         if (!MessageDigest.isEqual(
                 hash(trimmed).getBytes(StandardCharsets.UTF_8),
@@ -105,7 +106,10 @@ public class VoiceSmsCodeService {
         }
         long elapsed = (System.currentTimeMillis() - ((Number) last).longValue()) / 1000;
         if (elapsed < RESEND_INTERVAL_SECONDS) {
-            throw new RenException("请" + Math.max(1, RESEND_INTERVAL_SECONDS - elapsed) + "秒后再获取验证码");
+            long retryAfterSeconds = RESEND_INTERVAL_SECONDS - elapsed;
+            throw new RenException(ErrorCode.VOICE_SMS_COOLDOWN,
+                    "请" + retryAfterSeconds + "秒后再获取验证码",
+                    Map.of("retryAfterSeconds", retryAfterSeconds));
         }
     }
 
