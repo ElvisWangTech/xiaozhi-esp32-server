@@ -199,15 +199,15 @@ async def no_voice_close_connect(conn: "ConnectionHandler", have_voice):
     if have_voice:
         conn.last_activity_time = time.time() * 1000
         return
+    # The onboarding state machine owns its idle timeout and draft handling.
+    if getattr(conn, "voice_activation_handler", None) is not None:
+        return
     # 只有在已经初始化过时间戳的情况下才进行超时检查
     if conn.last_activity_time > 0.0:
         no_voice_time = time.time() * 1000 - conn.last_activity_time
         close_connection_no_voice_time = int(
             conn.config.get("close_connection_no_voice_time", 120)
         )
-        handler = getattr(conn, "voice_activation_handler", None)
-        if handler is not None and getattr(handler, "state", None) == "ask_code":
-            close_connection_no_voice_time = max(close_connection_no_voice_time, 300)
         if (
             not conn.close_after_chat
             and no_voice_time > 1000 * close_connection_no_voice_time
@@ -218,15 +218,6 @@ async def no_voice_close_connect(conn: "ConnectionHandler", have_voice):
             if end_prompt and end_prompt.get("enable", True) is False:
                 conn.logger.bind(tag=TAG).info("结束对话，无需发送结束提示语")
                 await conn.close()
-                return
-            handler = getattr(conn, "voice_activation_handler", None)
-            if handler is not None:
-                conn.close_after_chat = True
-                give_up = getattr(handler, "give_up_and_sleep", None)
-                if give_up is not None:
-                    await give_up()
-                else:
-                    await conn.close()
                 return
             prompt = end_prompt.get("prompt")
             if not prompt:
