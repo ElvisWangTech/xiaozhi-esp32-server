@@ -149,6 +149,44 @@ class VoiceActivationFlowTest(unittest.IsolatedAsyncioTestCase):
             session.phone = "13900139000"
             self.assertIsNone(session._sms_cooldown_remaining(None))
 
+    async def test_code_stage_help_answers_without_submitting_or_resending(self):
+        for stage, utterance, expected in (
+            ("bind", "你好，犀牛，继续吧。", "我在。收到短信后，把验证码念给我就好。"),
+            ("skills", "还在吗？在吗？", "我在。收到滴滴出行的短信后，把验证码念给我就好。"),
+        ):
+            session = self.make_session(stage)
+            session.state = session.ASK_CODE if stage == "bind" else session.ASK_AUTH_CODE
+            session.auth_label = "滴滴出行"
+            session._send_recognized_text = AsyncMock()
+            model = AsyncMock(side_effect=[{"intent": "help"}, {"intent": "background"}])
+            with patch.object(voice, "_ask_llm_json", model):
+                await session.handle_text(utterance)
+                await session.handle_text("他没有休眠，灯还亮着。")
+            session._say.assert_awaited_once_with(expected)
+            session._post.assert_not_awaited()
+            self.assertEqual(session.state, session.ASK_CODE if stage == "bind" else session.ASK_AUTH_CODE)
+
+    async def test_help_is_available_at_each_interactive_step(self):
+        session = self.make_session()
+        session._send_recognized_text = AsyncMock()
+        session._help_current_step = AsyncMock()
+        states = (
+            session.GREET, session.CONFIRM_GREET, session.ASK_PHONE, session.CONFIRM_PHONE,
+            session.RETRY_SMS, session.ASK_CODE, session.ASK_NICKNAME, session.CONFIRM_NICKNAME,
+            session.ASK_PERSONA, session.CONFIRM_PERSONA, session.ASK_SUPPLEMENT,
+            session.CONFIRM_SUPPLEMENT, session.RETRY_SKILLS, session.ASK_AUTH_CONSENT,
+            session.ASK_AUTH_CODE, session.RETRY_AUTH_SUMMARY, session.RETRY_SKILLS_COMPLETE,
+        )
+        session.persona_templates = ["可爱女生"]
+        model = AsyncMock(return_value={"intent": "help"})
+        with patch.object(voice, "_ask_llm_json", model):
+            for state in states:
+                session.state = state
+                await session.handle_text("还在吗？现在要做什么？")
+                self.assertEqual(session.state, state)
+        self.assertEqual(session._help_current_step.await_count, len(states))
+        session._post.assert_not_awaited()
+
     async def test_first_sms_cooldown_requires_explicit_resend(self):
         session = self.make_session()
         session.phone = "13800138000"
