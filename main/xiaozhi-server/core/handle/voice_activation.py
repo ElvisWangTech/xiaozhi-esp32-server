@@ -400,6 +400,7 @@ async def resolve_code_turn(conn, text, prompt, extra_intents):
     prompt += (
         '数字已替换为编号。明确提交验证码时返回 {"intent":"code","slot":1}，'
         "slot 指用户最终要提交的数字组。旧码、被否定的码、只提及的码不要提交。"
+        "询问是否在线或要求继续不等于同意重发或重试校验。"
         "技能授权时明确结束当前及所有剩余技能用 skip_all，仅跳过当前技能用 skip。"
         "如果只想略过后续项目但还要继续当前项目，不能判为 skip_all。"
     )
@@ -467,18 +468,23 @@ def parse_nickname_reply(text):
     return name
 
 
-class WaitRequested(Exception):
-    """The current onboarding turn explicitly requested more time."""
+class OnboardingTurnControl(Exception):
+    def __init__(self, intent):
+        self.intent = intent
 
 
 async def _ask_turn_json(conn, prompt, text, label):
     prompt += (
-        '只有用户明确要求先等他、暂缓当前步骤时，返回 {"intent":"wait"}。'
+        '只有用户明确要求等他一下时，返回 {"intent":"wait"}。'
+        '明确向设备询问是否还在、现在该做什么，或要求继续当前步骤时，返回 {"intent":"help"}。'
+        '例如「还在吗」「你好，犀牛，继续吧」。这些话不能视为同意执行当前操作。'
+        '只有明确是旁人对话或无关背景语音时返回 {"intent":"background"}。'
         "用户已经给出有效答案、只是在迟疑或转述时，按本步骤的规则返回结果。"
     )
     data = await _ask_llm_json(conn, prompt, text, label)
-    if _intent_of(data, {"wait"}) == "wait":
-        raise WaitRequested
+    control = _intent_of(data, {"wait", "help", "background"})
+    if control:
+        raise OnboardingTurnControl(control)
     return data
 
 
@@ -853,7 +859,7 @@ class VoiceActivationSession:
             if self.persona_name:
                 self._use_persona_voice(self.persona_name)
             if self.state == self.ASK_AUTH_CODE:
-                await self._resume_auth()
+                await self._resume_auth(after_code=bool(self._auth_status_after_code))
             else:
                 await self._repeat_prompt()
             return
@@ -922,20 +928,34 @@ class VoiceActivationSession:
         content = unwrap_user_text(text)
         if not content:
             return
-        await self._send_recognized_text(content)
-        if await self._speak_if_user_requests_skills(content):
-            return
-        wakeup_words = self.conn.config.get("wakeup_words") or []
-        if content in wakeup_words:
-            await self._repeat_prompt()
-            return
         self._busy = True
         try:
+            await self._send_recognized_text(content)
+            if await self._speak_if_user_requests_skills(content):
+                return
+            wakeup_words = self.conn.config.get("wakeup_words") or []
+            if content in wakeup_words:
+                await self._repeat_prompt()
+                return
             await self._dispatch(content)
-        except WaitRequested:
-            await self._wait_for_user()
+        except OnboardingTurnControl as control:
+            if control.intent == "wait":
+                await self._wait_for_user()
+            elif control.intent == "help":
+                await self._help_current_step()
         finally:
             self._busy = False
+
+    async def _help_current_step(self):
+        if self._auth_status_after_code is not None or self._sms_retry_action in {"resend", "verify"}:
+            await self._repeat_prompt()
+        elif self.state == self.ASK_CODE:
+            await self._say("我在。收到短信后，把验证码念给我就好。")
+        elif self.state == self.ASK_AUTH_CODE:
+            label = self.auth_label or "技能"
+            await self._say(f"我在。收到{label}的短信后，把验证码念给我就好。")
+        else:
+            await self._repeat_prompt()
 
     async def _wait_for_user(self):
         hint = "好，你慢慢想。"
@@ -1190,7 +1210,7 @@ class VoiceActivationSession:
             await self._start_phone()
         elif action == "resend" or (action == "accept" and not waiting_for_cooldown):
             await self._send_sms()
-        elif action == "repeat" or not waiting_for_cooldown:
+        else:
             await self._repeat_prompt()
 
     async def _on_code(self, text):
@@ -1225,6 +1245,7 @@ class VoiceActivationSession:
         if action == "accept" and self._sms_retry_action == "verify":
             code = self._retry_bind_code
         elif action != "code":
+            await self._repeat_prompt()
             return
         self._sms_retry_action = None
         self._retry_bind_code = None
@@ -1448,6 +1469,7 @@ class VoiceActivationSession:
             await self._say("好，改好了。还有吗？")
             return
         if action != "content" or not content:
+            await self._say("你可以接着补充，也可以说就这样吧。")
             return
         if not self._add_supplement(content):
             await self._say("补充已经到八十个字的上限了，先记这些。请说没有了，结束补充。")
@@ -1854,6 +1876,7 @@ class VoiceActivationSession:
             await self._say(f"请把{label}短信里的验证码完整念一遍。")
             return
         if action != "code":
+            await self._repeat_prompt()
             return
         if not self.auth_task_id:
             await self._report_auth_failure(label, "这次验证已失效")
@@ -2096,7 +2119,12 @@ class VoiceActivationSession:
             else:
                 await self._say("刚才验证码没发出去，要我再试一次吗？")
         elif self.state == self.ASK_CODE:
-            await self._say("请念一下短信里的验证码。")
+            if self._sms_retry_action == "resend":
+                await self._say("要我再发一条验证码吗？")
+            elif self._sms_retry_action == "verify":
+                await self._say("要再试一次校验刚才的验证码吗？")
+            else:
+                await self._say("请念一下短信里的验证码。")
         elif self.state == self.ASK_NICKNAME:
             await self._say(_ASK_NICKNAME_PROMPT)
         elif self.state == self.CONFIRM_NICKNAME:
@@ -2213,7 +2241,7 @@ class VoiceActivationSession:
                 "state", "nickname", "owner_title", "persona_name", "persona_templates",
                 "persona_voices", "supplement_parts", "auth_queue", "auth_service", "auth_label",
                 "auth_task_id", "auth_done", "auth_failed", "auth_skipped", "include_auth",
-                "rebind_auth", "ask_auth_consent", "_completion_prefix",
+                "rebind_auth", "ask_auth_consent", "_completion_prefix", "_auth_status_after_code",
             )
             snapshot = {field: getattr(self, field) for field in fields}
             if self.stage == "bind":
