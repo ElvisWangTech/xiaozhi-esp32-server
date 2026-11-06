@@ -30,9 +30,10 @@ public class RenExceptionHandler {
      * 处理自定义异常
      */
     @ExceptionHandler(RenException.class)
-    public Result<Void> handleRenException(RenException ex) {
-        Result<Void> result = new Result<>();
+    public Result<Object> handleRenException(RenException ex) {
+        Result<Object> result = new Result<>();
         result.error(ex.getCode(), ex.getMsg());
+        result.setData(ex.getData());
 
         return result;
     }

@@ -3,6 +3,7 @@ import json
 import re
 import time
 import uuid
+from functools import partial
 
 from core.providers.tts.dto.dto import ContentType, TTSMessageDTO, SentenceType
 from core.utils.provider_failover import (
@@ -13,6 +14,11 @@ from core.utils.provider_failover import (
 )
 
 TAG = __name__
+SMS_CODE_ERROR = 10075
+VOICE_SMS_COOLDOWN = 10205
+VOICE_SMS_EXPIRED = 10206
+VOICE_SMS_ATTEMPTS_EXHAUSTED = 10207
+PLAYBACK_STOP_TIMEOUT_SECONDS = 2
 # 报号中间常有停顿。这段静音内不播报，避免把用户后面的数字打断。
 PHONE_PAUSE_SECONDS = 3
 # 提交验证码后最多等多久（秒）。超时按失败处理，播报后接着开下一项。
@@ -61,6 +67,7 @@ class _SkipRequest:
 
 
 SKIP = _SkipRequest()
+SUGGEST_NAME = object()
 
 
 def compact_text(text):
@@ -83,15 +90,37 @@ def is_mobile_phone(digits):
     return bool(re.fullmatch(r"1\d{10}", digits or ""))
 
 
-def extract_phone(text):
-    digits = digits_from_text(text)
-    if is_mobile_phone(digits):
-        return digits
-    for index in range(0, max(0, len(digits) - 10)):
-        candidate = digits[index : index + 11]
-        if is_mobile_phone(candidate):
-            return candidate
-    return None
+_SPOKEN_NUMBER_GROUP = re.compile(
+    rf"[{''.join(CN_DIGITS)}0-9]+(?:[ ，,、-]+[{''.join(CN_DIGITS)}0-9]+)*"
+)
+
+
+def phone_candidates(text):
+    # Match separate spoken groups, keeping unrelated digits out of the candidate.
+    raw = unwrap_user_text(text)
+    groups = _SPOKEN_NUMBER_GROUP.findall(raw)
+    return [digits_from_text(group) for group in groups]
+
+
+def mask_spoken_numbers(text):
+    return _SPOKEN_NUMBER_GROUP.sub(
+        lambda match: "[数字]" if len(digits_from_text(match[0])) >= 2 else match[0], text
+    )
+
+
+def numbered_slots(text):
+    groups = []
+
+    def replace(match):
+        groups.append(digits_from_text(match[0]))
+        return f"〔数字组{len(groups)}〕"
+
+    return _SPOKEN_NUMBER_GROUP.sub(replace, unwrap_user_text(text)), groups
+
+
+def selected_digits(data, groups):
+    slot = (data or {}).get("slot")
+    return groups[slot - 1] if type(slot) is int and 1 <= slot <= len(groups) else ""
 
 
 def spoken_count(number):
@@ -101,20 +130,12 @@ def spoken_count(number):
 
 
 def extract_code(text):
-    digits = digits_from_text(text)
-    if 4 <= len(digits) <= 8:
-        return digits
-    match = re.search(r"\d{6}", digits)
-    if match:
-        return match.group(0)
-    match = re.search(r"\d{4,8}", digits)
-    if match:
-        return match.group(0)
-    return None
+    groups = phone_candidates(text)
+    return groups[0] if len(groups) == 1 and 4 <= len(groups[0]) <= 8 else None
 
 
 def spoken_digits_only(text):
-    """整句只有数字。带了别的字就交给模型，不用词表判断。"""
+    """判断输入是否由逐位念出的数字组成。"""
     compact = compact_text(unwrap_user_text(text))
     if not compact:
         return False
@@ -149,31 +170,6 @@ _NICKNAME_SYSTEM_PROMPT = (
     "5. 否定里如果带了新昵称，例如「不对，你的昵称是小美」，intent 为 answer，取出小美。\n"
     "6. 「没听清」「你再说一遍」「刚才说什么」是 repeat。用户自己要重说答案，例如「我重说」，是 unclear。\n"
     "7. 用户表达放弃设置的意图，例如不想起、算了、先跳过、用默认的，intent 为 skip，nickname 留空。"
-)
-_SPEECH_TAILS = (
-    "可以吗",
-    "好不好",
-    "对不对",
-    "行不行",
-    "就行了",
-    "就可以了",
-    "就好了",
-    "的话",
-    "好吗",
-    "行吗",
-    "对吗",
-    "就行",
-    "就好",
-    "就可以",
-    "谢谢",
-    "吧",
-    "啊",
-    "呀",
-    "呢",
-    "哦",
-    "哈",
-    "嘛",
-    "了",
 )
 _OWNER_SYSTEM_PROMPT = (
     "你在语音引导里，从用户原话中提取助手该怎么称呼用户。"
@@ -248,7 +244,7 @@ _RETRY_PROMPT = (
     "技能绑定失败了。用户可以现在重试，也可以稍后再说。"
     "只输出一个 JSON 对象，不要解释，不要使用 markdown。"
     '{"intent":"retry","rebind":false}、{"intent":"skip","rebind":false}、{"intent":"repeat","rebind":false} 或 {"intent":"unclear","rebind":false}。\n'
-    "retry：同意现在再试，或说不要跳过。明确要重新绑定、重新开通时，intent 仍是 retry，并把 rebind 设为 true。\n"
+    "retry：结合上一个问题判断是否同意现在再试，简短回应也要结合上下文。明确要重新绑定、重新开通时，intent 仍是 retry，并把 rebind 设为 true。\n"
     "skip：稍后再说、先不用、算了、取消、先聊天，或不想再试。\n"
     "repeat：没听清，让你把问题再说一遍。\n"
     "「不要重试」「先别试了」「能不再试吗」不是 retry。「不要跳过」「先别跳过」是 retry。\n"
@@ -277,22 +273,8 @@ _AUTH_PROMPT = (
     "repeat：没听清，让你把问题再说一遍。不是 skip。\n"
     "出现「跳过」「重发」「绑定」不等于要执行对应动作。"
 )
-_PHONE_ASIDE_PROMPT = (
-    "用户正在报手机号，这句里没有数字。"
-    "只输出一个 JSON 对象，不要解释，不要使用 markdown。"
-    '{"intent":"restart"}、{"intent":"repeat"}、{"intent":"ignore"} 或 {"intent":"unclear"}。\n'
-    "restart：明确说错了、要清空、重新报号码。\n"
-    "repeat：没听清，让你把刚才的问题再说一遍。\n"
-    "ignore：语气词、等一下，或「能不重说吗」这种并不是在要求清空。\n"
-    "出现「重说」「不对」不等于一定要清空，要看整句是不是在要求重来。"
-)
 _SHORT_NAME_LIMIT = 12
 _SUPPLEMENT_LIMIT = 80
-# 补充可以分几句说。记下一句后先等用户继续，这段静音内没有新内容就当作说完了。
-SUPPLEMENT_PAUSE_SECONDS = 6
-# 跳过设置时的兜底昵称。后端 saveNickname 拒绝空值且负责推进 onboarding 阶段，
-# 所以跳过也必须提交一个昵称；默认用「牛小七」，配合默认性格模板「可爱女生」。
-_NICKNAME_DEFAULT = "牛小七"
 # 首次提问就给例子，减少用户不知道该说多短而反复失败。
 _ASK_NICKNAME_PROMPT = "给我起个名字吧，比如豆豆、小美。"
 # 模型判 unclear 时逐级给出更具体的引导，不重复同一句话。
@@ -305,50 +287,18 @@ _NICKNAME_RETRY_HINTS = (
 # 一次性提交，后端 normalizeOwnerTitle 拒绝空值，所以跳过也必须给出称呼；
 # 「主人」是该类设备的通用默认称呼。
 _OWNER_DEFAULT = "主人"
-_ASK_OWNER_PROMPT = "我该怎么称呼您呢？比如老板、张先生。"
-_OWNER_RETRY_HINTS = (
-    "没听清。请直接说一个称呼，比如老板、张先生。",
-    "还是没听清。请靠近一点，直接说称呼，不要加别的字。",
-    "一直没听清。也可以说不想设置了，先用默认称呼。",
-)
+_ASK_OWNER_PROMPT = "我该怎么称呼你？说个你习惯的名字就好。"
 # 开场先打招呼，顺手问称呼。用户答了就把「主人称呼」提前存下并确认，
 # 角色绑定时不再重复问；没答就接着报手机号，留到角色绑定再问。
 _GREETING_PROMPT = "你好，我是 X-Atom，新一代物理AI智能体，让AI走进现实。第一次见面，我该怎么称呼您呢？"
 
 
-def _strip_speech_tails(text):
-    tails = sorted(_SPEECH_TAILS, key=len, reverse=True)
-    changed = True
-    while changed and text:
-        changed = False
-        for tail in tails:
-            if len(text) > len(tail) and text.endswith(tail):
-                text = text[: -len(tail)]
-                changed = True
-                break
-    return text
-
-
 def _valid_short_name(name, limit=_SHORT_NAME_LIMIT):
-    if not name or name in set("吧啊呀呢哦哈嘛了"):
-        return False
     return 1 <= len(name) <= limit
 
 
-def _strip_bare_leads(compact):
-    changed = True
-    while changed and compact:
-        changed = False
-        for lead in ("嗯", "啊", "呃", "哎"):
-            if compact.startswith(lead) and len(compact) > len(lead):
-                compact = compact[len(lead) :]
-                changed = True
-                break
-    return compact
-
-
 def _plain_name(compact):
-    return _strip_speech_tails(_strip_bare_leads(compact)).replace("「", "").replace("」", "")
+    return compact.strip("「」")
 
 
 def _log_guide(conn, level, message):
@@ -377,7 +327,7 @@ async def confirm_turn(conn, text, subject):
     if not compact_text(raw):
         return "unclear", ""
     asked = f"刚才的问题：{subject}\n用户原话：{raw}"
-    data = await _ask_llm_json(conn, _CONFIRM_SYSTEM_PROMPT, asked, "确认意图")
+    data = await _ask_turn_json(conn, _CONFIRM_SYSTEM_PROMPT, asked, "确认意图")
     intent = _intent_of(data, _CONFIRM_INTENTS) or "unclear"
     value = _plain_name(compact_text((data or {}).get("value") or ""))
     if not _valid_short_name(value):
@@ -389,7 +339,7 @@ async def confirm_turn(conn, text, subject):
 
 
 async def confirm_intent(conn, text, subject):
-    intent, _value = await confirm_turn(conn, text, subject)
+    intent, _ = await confirm_turn(conn, text, subject)
     return intent
 
 
@@ -406,12 +356,15 @@ async def resolve_skills_request(conn, text):
     return None
 
 
-async def resolve_skill_retry(conn, text):
+async def resolve_skill_retry(conn, text, operation=None):
     """重试、稍后再说，或让设备把问题再说一遍。"""
     raw = unwrap_user_text(text).strip()
     if not compact_text(raw):
         return "unclear", False
-    data = await _ask_llm_json(conn, _RETRY_PROMPT, raw, "重试意图")
+    prompt = _RETRY_PROMPT
+    if operation:
+        prompt += f"当前询问是否{operation}，以这项操作作为重试对象。"
+    data = await _ask_turn_json(conn, prompt, raw, "重试意图")
     intent = _intent_of(data, {"retry", "skip", "repeat", "unclear"}) or "unclear"
     rebind = bool(data) and _flag_true(data.get("rebind"))
     if rebind and intent == "unclear":
@@ -420,47 +373,62 @@ async def resolve_skill_retry(conn, text):
     return intent, rebind
 
 
-async def resolve_sms_reply(conn, text):
-    """纯数字验证码直接收下。其余问模型。"""
-    code = isolated_code(text)
-    if code:
-        return "code", code
-    raw = unwrap_user_text(text).strip()
-    if not compact_text(raw):
-        return "unclear", None
-    data = await _ask_llm_json(conn, _SMS_PROMPT, raw, "验证码意图")
-    intent = _intent_of(data, {"code", "resend", "restart", "repeat", "unclear"}) or "unclear"
-    _log_guide(conn, "info", f"验证码意图: {raw} -> {intent}")
-    if intent == "code":
-        return "code", extract_code(text)
-    return intent, None
+async def resolve_sms_reply(conn, text, retry=None):
+    prompt = _SMS_PROMPT + "仅表示听懂、同意等待或结束话题时返回 unclear。只有明确要求再次发送才返回 resend。"
+    intents = {"restart"}
+    if retry:
+        prompt += (
+            f"刚才还询问用户是否{retry}。如果用户明确同意该操作，返回 accept。"
+            "明确给了新验证码时仍然返回 code。"
+        )
+        intents.add("accept")
+    return await resolve_code_turn(conn, text, prompt, intents)
 
 
 async def resolve_auth_reply(conn, text):
-    """纯数字验证码直接收下。跳过、重发、重听都问模型。"""
-    code = isolated_code(text)
-    if code:
-        return "code", code
-    raw = unwrap_user_text(text).strip()
-    if not compact_text(raw):
-        return "unclear", None
-    data = await _ask_llm_json(conn, _AUTH_PROMPT, raw, "授权验证码意图")
-    intent = _intent_of(data, {"code", "skip", "resend", "rebind", "repeat", "unclear"}) or "unclear"
-    _log_guide(conn, "info", f"授权验证码意图: {raw} -> {intent}")
-    if intent == "code":
-        return "code", extract_code(text)
-    return intent, None
+    return await resolve_code_turn(conn, text, _AUTH_PROMPT, {"skip", "skip_all", "rebind"})
 
 
-async def resolve_phone_aside(conn, text):
-    """报号时这句没有数字。清空、重听还是忽略，都问模型。"""
-    raw = unwrap_user_text(text).strip()
-    if not compact_text(raw):
-        return "ignore"
-    data = await _ask_llm_json(conn, _PHONE_ASIDE_PROMPT, raw, "报号意图")
-    intent = _intent_of(data, {"restart", "repeat", "ignore", "unclear"}) or "unclear"
-    _log_guide(conn, "info", f"报号意图: {raw} -> {intent}")
-    return intent
+async def resolve_code_turn(conn, text, prompt, extra_intents):
+    masked, groups = numbered_slots(text)
+    prompt += (
+        '数字已替换为编号。明确提交验证码时返回 {"intent":"code","slot":1}，'
+        "slot 指用户最终要提交的数字组。旧码、被否定的码、只提及的码不要提交。"
+        "技能授权时明确结束当前及所有剩余技能用 skip_all，仅跳过当前技能用 skip。"
+        "如果只想略过后续项目但还要继续当前项目，不能判为 skip_all。"
+    )
+    data = await _ask_turn_json(conn, prompt, masked, "验证码意图")
+    intent = _intent_of(data, {"code", "resend", "repeat", "unclear"} | extra_intents)
+    if intent != "code":
+        return intent or "unclear", None
+    code = selected_digits(data, groups)
+    return "code", code if 4 <= len(code) <= 8 else None
+
+
+async def resolve_phone_turn(conn, text, stage):
+    prompt = (
+        f"当前步骤：{stage}。根据整句判断用户的意思，只返回 JSON。"
+        '明确报号返回 {"intent":"phone","phone":"数字字符串"}。'
+        "按原话逐位转写成阿拉伯数字。同一个号码分几段说时，按顺序拼接这一句中的有效数字，"
+        "例如「我的手机号是123然后456789，13」返回 12345678913。"
+        "用户只报了部分号码时只返回本句的片段，不要猜测或补齐。"
+        "明确改口换号时只返回最终号码，有歧义用 unclear。"
+        "日期、数量、旧号码、被否定的号码都不能当报号。"
+        '明确改最后一位返回 {"intent":"last_digit","phone":"8"}。'
+        "要求重新报号用 restart，重听用 repeat，确认待确认号码正确用 accept，"
+        "否定用 decline，无法理解用 unclear。"
+        "语气词、迟疑或只提到数字不表示确认。"
+    )
+    data = await _ask_turn_json(conn, prompt, unwrap_user_text(text), "手机号意图")
+    intent = _intent_of(data, {"phone", "last_digit", "restart", "repeat", "accept",
+                              "decline", "unclear"})
+    if intent in {"phone", "last_digit"}:
+        phone = data.get("phone")
+        pattern = r"[0-9]" if intent == "last_digit" else r"[0-9]+"
+        if isinstance(phone, str) and re.fullmatch(pattern, phone):
+            return intent, phone
+        return "unclear", ""
+    return intent, ""
 
 
 def parse_json_object(text):
@@ -490,9 +458,22 @@ def parse_nickname_reply(text):
     name = _plain_name(compact_text(data.get("nickname") or ""))
     if not _valid_short_name(name):
         return None
-    if any(token in name for token in ("昵称", "名字", "叫你", "叫做", "就叫", "你的", "您的")):
-        return None
     return name
+
+
+class WaitRequested(Exception):
+    """The current onboarding turn explicitly requested more time."""
+
+
+async def _ask_turn_json(conn, prompt, text, label):
+    prompt += (
+        '只有用户明确要求先等他、暂缓当前步骤时，返回 {"intent":"wait"}。'
+        "用户已经给出有效答案、只是在迟疑或转述时，按本步骤的规则返回结果。"
+    )
+    data = await _ask_llm_json(conn, prompt, text, label)
+    if _intent_of(data, {"wait"}) == "wait":
+        raise WaitRequested
+    return data
 
 
 async def _ask_llm_json(conn, system_prompt, user_text, label):
@@ -520,13 +501,18 @@ async def extract_nickname(conn, text):
     raw = unwrap_user_text(text).strip()
     if not compact_text(raw):
         return None
-    data = await _ask_llm_json(conn, _NICKNAME_SYSTEM_PROMPT, raw, "提取昵称")
-    intent = _intent_of(data, {"answer", "repeat", "unclear", "skip"})
+    prompt = _NICKNAME_SYSTEM_PROMPT + '用户明确请助手帮忙取名时返回 {"intent":"suggest"}。'
+    data = await _ask_turn_json(conn, prompt, raw, "提取昵称")
+    intent = _intent_of(data, {"answer", "repeat", "unclear", "skip", "suggest"})
+    if intent == "suggest":
+        return SUGGEST_NAME
     if intent == "repeat":
         return REPEAT
     if intent == "skip":
         _log_guide(conn, "info", f"昵称识别: {raw} -> 跳过")
         return SKIP
+    if intent != "answer":
+        return None
     nickname = parse_nickname_reply(json.dumps(data, ensure_ascii=False) if data else "")
     _log_guide(conn, "info", f"昵称识别: {raw} -> {nickname or ''}")
     return nickname
@@ -539,8 +525,6 @@ def parse_owner_reply(text):
     title = _plain_name(compact_text(data.get("title") or ""))
     if not _valid_short_name(title):
         return None
-    if any(token in title for token in ("称呼", "叫我", "喊我", "你的", "您的", "怎么", "什么")):
-        return None
     return title
 
 
@@ -549,13 +533,19 @@ async def extract_owner_title(conn, text):
     raw = unwrap_user_text(text).strip()
     if not compact_text(raw):
         return None
-    data = await _ask_llm_json(conn, _OWNER_SYSTEM_PROMPT, raw, "提取称呼")
+    prompt = _OWNER_SYSTEM_PROMPT + (
+        "当前必须先设置用户称呼。只报手机号、请求跳过或与称呼无关时返回 unclear。"
+        "只有明确给出了希望被叫的名字或称谓，才返回 answer。"
+    )
+    data = await _ask_turn_json(conn, prompt, raw, "提取称呼")
     intent = _intent_of(data, {"answer", "repeat", "unclear", "skip"})
     if intent == "repeat":
         return REPEAT
     if intent == "skip":
         _log_guide(conn, "info", f"称呼识别: {raw} -> 跳过")
         return SKIP
+    if intent != "answer":
+        return None
     title = parse_owner_reply(json.dumps(data, ensure_ascii=False) if data else "")
     _log_guide(conn, "info", f"称呼识别: {raw} -> {title or ''}")
     return title
@@ -566,55 +556,45 @@ def clean_supplement(text):
     return raw.strip("，。,.!！?？、 \n\t")
 
 
-def _persona_system_prompt(names):
-    listed = "、".join(names)
-    current = names[0]
-    return (
-        "你在语音引导里，根据用户原话从给定性格模板中选一个。"
-        f"可选模板只有这些：{listed}。"
-        f"列表第一个「{current}」是当前正在用的性格，用户不想换就选它。"
-        "只输出一个 JSON 对象，不要解释，不要使用 markdown。"
-        '{"intent":"answer","template":"英语老师"}。'
-        "没听清、让你再说一遍时输出 "
-        '{"intent":"repeat","template":""}。'
-        "没选中时输出 "
-        '{"intent":"unclear","template":""}。\n'
-        "规则：\n"
-        "1. template 必须是列表中的原文，不能自造。\n"
-        "2. 用户说序号、名字或描述，都要对应到列表中的一个，intent 为 answer。\n"
-        "3. 只是确认，或只是否定而没有改选，intent 为 unclear，template 留空。\n"
-        "4. 否定里改选了另一个，例如「不要英语老师，我要星际游子」，intent 为 answer，选出星际游子。\n"
-        "5. 「没听清」「你再说一遍」是 repeat。听不清或对不上任何一个，是 unclear。\n"
-        f"6. 用户表示不换、保持现在的、就用现在的、随便、不想选任何模板，intent 为 answer，"
-        f"template 填「{current}」。\n"
-    )
-
-
-def parse_persona_reply(text, names):
-    data = parse_json_object(text)
-    if not data:
-        return None
-    chosen = str(data.get("template") or "").strip()
-    for name in names:
-        if chosen == name or compact_text(chosen) == compact_text(name):
-            return name
-    return None
-
-
-async def resolve_persona(conn, text, names):
-    """每句都问模型，从给定模板里选。返回模板名、REPEAT，或 None。"""
+async def resolve_persona(conn, text, names, candidate=None):
+    """Interpret the full utterance and validate any selection against the catalog."""
     raw = unwrap_user_text(text).strip()
     if not names or not compact_text(raw):
         return None
-    data = await _ask_llm_json(conn, _persona_system_prompt(names), raw, "选择性格")
-    if _intent_of(data, {"answer", "repeat", "unclear"}) == "repeat":
-        chosen = parse_persona_reply(json.dumps(data, ensure_ascii=False) if data else "", names)
-        if not chosen:
-            _log_guide(conn, "info", f"性格识别: {raw} -> repeat")
-            return REPEAT
-    chosen = parse_persona_reply(json.dumps(data, ensure_ascii=False) if data else "", names)
-    _log_guide(conn, "info", f"性格识别: {raw} -> {chosen or ''}")
-    return chosen
+    options = "、".join(f"{index}. {name}" for index, name in enumerate(names, 1))
+    prompt = f"按用户整句话处理角色选择。可选角色：{options}。当前正在使用「{names[0]}」。"
+    if candidate:
+        prompt += f"当前待确认的候选是「{candidate}」。"
+    prompt += (
+        '只输出 JSON。明确选择序号时输出 {"intent":"answer","ordinal":3}，'
+        "保留用户最终选择的原序号，包括越界序号。"
+        '按名称或描述选择时输出 {"intent":"answer","template":"列表中的名称"}。'
+        "理解否定范围、改口、反问和引用。被排除或只是提及的角色不算选择。"
+        "例如「不是第二个，还是第五个吧」选择第五个；"
+        "「你刚说有第五个吗」不是选择。"
+        '请求重听用 {"intent":"repeat"}，等待用 {"intent":"wait"}，'
+        '不清楚用 {"intent":"unclear"}。'
+        '有待确认候选时，明确同意用 {"intent":"accept"}，'
+        '仅否定候选而没有改选用 {"intent":"decline"}。'
+        "改选后须返回新的选择。用户明确希望维持正在使用的角色时选择该角色。"
+    )
+    data = await _ask_turn_json(conn, prompt, raw, "选择性格")
+    intent = _intent_of(data, {"answer", "repeat", "wait", "accept", "decline", "unclear"})
+    if intent == "repeat":
+        return REPEAT
+    if intent in {"accept", "decline"}:
+        return intent, None
+    if intent != "answer":
+        return None
+    ordinal = data.get("ordinal")
+    if ordinal is not None:
+        if type(ordinal) is not int:
+            return None
+        if not 1 <= ordinal <= len(names):
+            return "out_of_range", None
+        return names[ordinal - 1]
+    chosen = str(data.get("template") or "").strip()
+    return next((name for name in names if compact_text(name) == compact_text(chosen)), None)
 
 
 async def resolve_supplement_turn(conn, text, collected=""):
@@ -626,13 +606,20 @@ async def resolve_supplement_turn(conn, text, collected=""):
     if not compact_text(raw):
         return "unclear", ""
     asked = f"已经记下的补充：{collected or '暂无'}\n用户这一句：{raw}"
-    data = await _ask_llm_json(conn, _SUPPLEMENT_SYSTEM_PROMPT, asked, "判断补充")
+    prompt = _SUPPLEMENT_SYSTEM_PROMPT + (
+        '用户明确删改已有要求时，输出 {"action":"edit","text":"修改后的全部要求"}。'
+        '只说还要补充但没有说内容时（包括疑似ASR错字），输出 {"action":"continue","text":""}。'
+        '用户表示不再补充或维持现状时输出 end，例如「好了，就这样吧」。修改对象有歧义时输出 unclear，禁止猜测。'
+    )
+    data = await _ask_turn_json(conn, prompt, asked, "判断补充")
     action = str((data or {}).get("action") or "").strip()
-    if action not in _SUPPLEMENT_ACTIONS:
+    if action not in (*_SUPPLEMENT_ACTIONS, "edit", "continue"):
         return "unclear", ""
     content = ""
     if action == "content":
         content = clean_supplement((data or {}).get("text") or "") or clean_supplement(raw)
+    if action == "edit":
+        content = clean_supplement((data or {}).get("text") or "")
     _log_guide(conn, "info", f"补充识别: {raw} -> {action} {content}")
     return action, content
 
@@ -643,7 +630,8 @@ async def resolve_supplement_confirm(conn, text, collected):
     if not compact_text(raw):
         return "unclear", ""
     asked = f"刚才复述的补充：{collected}\n用户原话：{raw}"
-    data = await _ask_llm_json(conn, _SUPPLEMENT_CONFIRM_PROMPT, asked, "确认补充")
+    prompt = _SUPPLEMENT_CONFIRM_PROMPT + "结合当前正在回读确认，用户明确表示维持现状时（例如「好了，就这样吧」）判为 accept。"
+    data = await _ask_turn_json(conn, prompt, asked, "确认补充")
     intent = str((data or {}).get("intent") or "").strip()
     if intent not in _SUPPLEMENT_CONFIRM_INTENTS:
         return "unclear", ""
@@ -708,6 +696,7 @@ async def start_skills_onboarding(conn, announce=None, rebind=False):
         handler = conn.voice_activation_handler
         if getattr(handler, "stage", None) == "skills":
             handler.include_auth = True
+            handler.ask_auth_consent = False
             if rebind:
                 handler.rebind_auth = True
             handler._announce_skill_failure = True
@@ -766,17 +755,6 @@ def speak(conn, text):
     )
 
 
-def api_error_text(exc):
-    message = str(exc or "")
-    prefix = "API返回错误: "
-    if message.startswith(prefix):
-        message = message[len(prefix) :]
-    message = message.strip()
-    if not message or len(message) > 40:
-        return "操作失败，请再说一次"
-    return message
-
-
 class VoiceActivationSession:
     GREET = "greet"
     CONFIRM_GREET = "confirm_greet"
@@ -785,8 +763,7 @@ class VoiceActivationSession:
     ASK_CODE = "ask_code"
     ASK_NICKNAME = "ask_nickname"
     CONFIRM_NICKNAME = "confirm_nickname"
-    ASK_OWNER = "ask_owner"
-    CONFIRM_OWNER = "confirm_owner"
+    ASK_AUTH_CONSENT = "ask_auth_consent"
     ASK_PERSONA = "ask_persona"
     CONFIRM_PERSONA = "confirm_persona"
     ASK_SUPPLEMENT = "ask_supplement"
@@ -794,17 +771,19 @@ class VoiceActivationSession:
     RETRY_SKILLS = "retry_skills"
     ASK_AUTH_CODE = "ask_auth_code"
     # 配置完毕到重启下发之间的终态：不再接收用户输入，避免误触发上一步的提问。
+    RETRY_SMS = "retry_sms"
+    RETRY_AUTH_SUMMARY = "retry_auth_summary"
+    RETRY_SKILLS_COMPLETE = "retry_skills_complete"
     REBOOTING = "rebooting"
 
     # 方案 B：默认依次开通；瑞幸先于滴滴（滴滴常需实名/免密支付）
-    # 不询问「要开通吗」；仅 waiting_code 时打断要验证码。
-    # 自动开通只在第一次进入 skills 时发生；之后必须用户主动说「绑定技能」。
+    # 首次引导先征求授权同意。用户主动要求绑定时直接进入授权。
     AUTH_QUEUE = (
         ("luckin", "瑞幸咖啡"),
         ("didi", "滴滴出行"),
     )
 
-    def __init__(self, conn, stage="bind", announce_bind_success=False, include_auth=False, rebind_auth=False):
+    def __init__(self, conn, stage="bind", announce_bind_success=False, include_auth=False, rebind_auth=False, ask_auth_consent=False):
         self.conn = conn
         self.stage = stage
         if stage == "bind":
@@ -812,7 +791,7 @@ class VoiceActivationSession:
         elif stage == "nickname":
             self.state = self.ASK_NICKNAME
         elif stage == "role":
-            self.state = self.ASK_OWNER
+            self.state = self.ASK_PERSONA
         else:
             self.state = self.RETRY_SKILLS
         self.phone = None
@@ -820,18 +799,16 @@ class VoiceActivationSession:
         self.nickname = None
         # 模型连续判 unclear 的次数。用于切换引导话术，避免重复同一句提示。
         self._nickname_misses = 0
-        self._owner_misses = 0
-        self.owner_title = None
-        # 开场确认称呼被否掉后允许再问一次，再没结果就直接报手机号。
-        self._greet_misses = 0
+        config = getattr(conn, "config", None) or {}
+        saved_title = re.search(r"\[主人称呼\]\s*请称呼用户为「([^」\n]{1,12})」。", config.get("prompt") or "")
+        self.owner_title = saved_title[1] if saved_title and stage != "bind" else None
+        self._sms_retry_action = None
+        self._retry_bind_code = None
         self.persona_name = None
         self.persona_templates = []
         self.persona_voices = {}
         # 补充设定可以分几句说，逐句记下来，最后一起提交。
         self.supplement_parts = []
-        self._supplement_epoch = 0
-        self._supplement_wait_task = None
-        self._supplement_nudges = 0
         self.announce_bind_success = announce_bind_success
         self.auth_queue = []
         self.auth_service = None
@@ -839,6 +816,9 @@ class VoiceActivationSession:
         self.auth_task_id = None
         self.auth_done = []
         self.auth_failed = []
+        self.auth_skipped = []
+        self._completion_prefix = None
+        self._auth_status_after_code = None
         self._busy = False
         self._phone_epoch = 0
         self._phone_wait_task = None
@@ -850,31 +830,76 @@ class VoiceActivationSession:
         self._auth_polling = False
         # 只有第一次技能引导，或用户主动说「绑定技能」，才自动跑瑞幸/滴滴。
         self.include_auth = include_auth
+        self.ask_auth_consent = ask_auth_consent
         # 用户说「重新绑定」时，已开通的授权技能也再走一遍。
         self.rebind_auth = rebind_auth
 
     async def start(self):
         self._start_idle_watch()
+        drafts = getattr(getattr(self.conn, "server", None), "_voice_onboarding_drafts", {})
+        draft = drafts.pop((self._mac(), self.stage), None)
+        if draft and time.monotonic() - draft[0] < 1800:
+            for field, value in draft[1].items():
+                setattr(self, field, value)
+            if self.state in {"ask_owner", "confirm_owner"}:
+                self.state = self.ASK_PERSONA
+            if self.persona_name:
+                self._use_persona_voice(self.persona_name)
+            if self.state == self.ASK_AUTH_CODE:
+                await self._resume_auth()
+            else:
+                await self._repeat_prompt()
+            return
         if self.stage == "skills":
             await self._bind_skills()
             return
         if self.state == self.ASK_NICKNAME:
-            prefix = "绑定成功。" if self.announce_bind_success else ""
+            prefix = "设备绑定好了。" if self.announce_bind_success else ""
             await self._say(prefix + _ASK_NICKNAME_PROMPT)
             return
         if self.state == self.GREET:
             await self._prompt_and_listen(_GREETING_PROMPT)
             return
-        if self.state == self.ASK_OWNER:
-            await self._say(_ASK_OWNER_PROMPT)
+        if self.state == self.ASK_PERSONA:
+            await self._begin_persona()
             return
         await self._prompt_and_listen("请说出您的手机号码，一共十一位。")
+
+    async def _resume_auth(self, after_code=False):
+        if self.auth_task_id:
+            try:
+                result = await self._post(
+                    "/device/voice-activation/skills/auth/status",
+                    {"macAddress": self._mac(), "taskId": self.auth_task_id},
+                )
+            except Exception as exc:
+                self.conn.logger.bind(tag=TAG).warning(f"恢复授权状态查询失败: {exc}")
+                await self._wait_for_auth_status_retry(after_code)
+                return
+            status = (result or {}).get("status")
+            error_code = (result or {}).get("errorCode")
+            self._auth_status_after_code = None
+            if status != "skipped" and error_code not in {"TASK_NOT_FOUND", "TASK_EXPIRED", "TASK_CANCELED"}:
+                if status in {"waiting_code", "pending", "done", "already_bound", "failed"}:
+                    await self._handle_auth_result(result, after_code=after_code)
+                else:
+                    await self._wait_for_auth_status_retry(after_code)
+                return
+            self.auth_task_id = None
+        if self.auth_service and self.auth_label:
+            self.auth_queue.insert(0, (self.auth_service, self.auth_label))
+        await self._run_next_auth()
+
+    async def _wait_for_auth_status_retry(self, after_code):
+        self.state = self.ASK_AUTH_CODE
+        self._auth_status_after_code = after_code
+        await self._repeat_prompt()
 
     def _allow_barge_in(self):
         return self.state not in (self.ASK_PHONE, self.ASK_CODE, self.ASK_AUTH_CODE)
 
     async def handle_text(self, text):
-        if self._busy:
+        if self._busy or self._giving_up:
             return
         # 已播报「即将重启」，等待下发重启工具期间不再处理任何输入。
         if self.state == self.REBOOTING:
@@ -900,10 +925,31 @@ class VoiceActivationSession:
         self._busy = True
         try:
             await self._dispatch(content)
+        except WaitRequested:
+            await self._wait_for_user()
         finally:
             self._busy = False
 
+    async def _wait_for_user(self):
+        hint = "好，你慢慢想。"
+        if self.state in (self.ASK_PHONE, self.CONFIRM_PHONE):
+            hint = "好，准备好了接着说。"
+        elif self.state in (self.ASK_PERSONA, self.CONFIRM_PERSONA):
+            hint = "好，你慢慢选。"
+        elif self.state in (self.ASK_CODE, self.ASK_AUTH_CODE):
+            hint = "好，看到验证码后直接念给我。"
+        elif self.state in (self.ASK_SUPPLEMENT, self.CONFIRM_SUPPLEMENT):
+            hint = "好，想好了接着说。"
+        await self._say(hint)
+
     async def _dispatch(self, text):
+        if self._auth_status_after_code is not None:
+            intent, _ = await resolve_skill_retry(self.conn, text, operation="重新查询技能开通状态")
+            if intent == "retry":
+                await self._resume_auth(after_code=self._auth_status_after_code)
+            else:
+                await self._repeat_prompt()
+            return
         if self.state == self.GREET:
             await self._on_greet(text)
         elif self.state == self.CONFIRM_GREET:
@@ -912,16 +958,20 @@ class VoiceActivationSession:
             await self._on_phone(text)
         elif self.state == self.CONFIRM_PHONE:
             await self._on_confirm_phone(text)
+        elif self.state == self.RETRY_SMS:
+            await self._on_retry_sms(text)
         elif self.state == self.ASK_CODE:
             await self._on_code(text)
+        elif self.state == self.RETRY_AUTH_SUMMARY:
+            await self._on_auth_summary(text)
+        elif self.state == self.RETRY_SKILLS_COMPLETE:
+            await self._on_retry_skills_complete(text)
         elif self.state == self.ASK_NICKNAME:
             await self._on_nickname(text)
         elif self.state == self.CONFIRM_NICKNAME:
             await self._on_confirm_nickname(text)
-        elif self.state == self.ASK_OWNER:
-            await self._on_owner(text)
-        elif self.state == self.CONFIRM_OWNER:
-            await self._on_confirm_owner(text)
+        elif self.state == self.ASK_AUTH_CONSENT:
+            await self._on_auth_consent(text)
         elif self.state == self.ASK_PERSONA:
             await self._on_persona(text)
         elif self.state == self.CONFIRM_PERSONA:
@@ -957,7 +1007,7 @@ class VoiceActivationSession:
                     return
                 speaking = bool(getattr(self.conn, "client_have_voice", False))
                 last_voice = getattr(self.conn, "vad_last_voice_time", 0) or 0
-                if speaking or last_voice > 0:
+                if speaking or (last_voice and time.time() * 1000 - last_voice < 1000):
                     quiet_since = None
                     continue
                 if quiet_since is None:
@@ -982,29 +1032,22 @@ class VoiceActivationSession:
         await self._say(f"您的手机号是，{spoken_digits(phone)}。对吗？")
 
     async def _start_phone(self):
-        """打招呼没拿到称呼，直接报手机号；称呼留到角色绑定再问。"""
+        """进入报号；未设置的称呼留到取名后补问。"""
         self.state = self.ASK_PHONE
         self.phone_digits = ""
         await self._prompt_and_listen("好的，请说出您的手机号码，一共十一位。")
 
     async def _on_greet(self, text):
-        """开场这一句里带了称呼就先存下并确认，没带就继续报手机号。"""
-        phone = extract_phone(text)
-        if phone:
-            await self._accept_phone(phone)
-            return
         title = await extract_owner_title(self.conn, text)
         if title is REPEAT:
             await self._repeat_prompt()
             return
         if title and title is not SKIP:
-            self._greet_misses = 0
             self.owner_title = title
             self.state = self.CONFIRM_GREET
             await self._say(f"我称呼您为{title}，对吗？")
             return
-        # 跳过、没听清、答非所问都往下走，不在开场卡住用户。
-        await self._start_phone()
+        await self._say(_ASK_OWNER_PROMPT)
 
     async def _on_confirm_greet(self, text):
         intent, title = await confirm_turn(
@@ -1025,116 +1068,154 @@ class VoiceActivationSession:
             )
             return
         if intent == "decline":
-            self._greet_misses += 1
             self.owner_title = None
-            if self._greet_misses <= 1:
-                self.state = self.GREET
-                await self._say(f"好的。{_ASK_OWNER_PROMPT}")
-                return
-            await self._start_phone()
+            self.state = self.GREET
+            await self._say(_ASK_OWNER_PROMPT)
             return
-        await self._say("请说确认，或者说重说。")
+        await self._say(f"我刚才听到的是{self.owner_title}。这样叫你可以吗？")
 
     async def _on_phone(self, text):
         self._invalidate_phone_wait()
-        digits = digits_from_text(text)
-        if not digits:
-            aside = await resolve_phone_aside(self.conn, text)
-            if aside == "repeat":
-                await self._repeat_prompt()
-                return
-            if aside == "restart":
-                self.phone_digits = ""
-                await self._prompt_and_listen("好的，请重新按顺序说出十一位手机号。")
-                return
+        intent, digits = await resolve_phone_turn(self.conn, text, "输入手机号")
+        if intent == "repeat":
+            await self._repeat_prompt()
+            return
+        if intent == "restart":
+            await self._start_phone()
+            return
+        if intent != "phone" or not digits:
             self._schedule_phone_wait()
             return
-
-        # 某一句里已经包含完整号码时，直接取这个号码，不和前面的片段拼在一起。
-        if self.phone_digits and len(digits) >= 11:
-            phone = extract_phone(text)
-            if phone:
-                await self._accept_phone(phone)
-                return
-
+        if is_mobile_phone(digits):
+            await self._accept_phone(digits)
+            return
         self.phone_digits += digits
-        if len(self.phone_digits) > 11:
+        if len(self.phone_digits) > 11 or not self.phone_digits.startswith("1"):
             self.phone_digits = ""
-            await self._prompt_and_listen("位数超过十一位了，请重新按顺序说出手机号。")
-            return
-        if len(self.phone_digits) < 11:
+            await self._prompt_and_listen("好，从第一位重新说一遍。")
+        elif len(self.phone_digits) == 11:
+            await self._accept_phone(self.phone_digits)
+        else:
             self._schedule_phone_wait()
-            return
-        if not is_mobile_phone(self.phone_digits):
-            self.phone_digits = ""
-            await self._prompt_and_listen("手机号需要是以1开头的十一位数字，请重新说。")
-            return
-        await self._accept_phone(self.phone_digits)
 
     async def _on_confirm_phone(self, text):
-        echoed = digits_from_text(text)
-        if echoed and self.phone and self.phone.startswith(echoed) and spoken_digits_only(text):
+        intent, digits = await resolve_phone_turn(self.conn, text, "回读手机号后等待确认")
+        if intent in {"phone", "last_digit"}:
+            corrected = self.phone[:-1] + digits if intent == "last_digit" and self.phone and len(digits) == 1 else digits
+            if is_mobile_phone(corrected):
+                await self._accept_phone(corrected)
+            else:
+                await self._repeat_prompt()
             return
-        corrected = extract_phone(text)
-        if corrected and corrected != self.phone:
-            self.phone = corrected
-            await self._say(f"您的手机号是，{spoken_digits(self.phone)}。对吗？")
-            return
-        intent = await confirm_intent(self.conn, text, "刚才报的手机号对不对")
         if intent == "repeat":
             await self._repeat_prompt()
             return
         if intent == "decline":
             self.phone = None
             self.phone_digits = ""
+            self._sms_retry_action = None
+            self._retry_bind_code = None
             self.state = self.ASK_PHONE
             await self._prompt_and_listen("好的，请重新按顺序说出十一位手机号。")
             return
         if intent != "accept":
-            await self._say("请说确认，或者说重说。")
+            await self._repeat_prompt()
             return
         await self._send_sms()
 
-    async def _send_sms(self):
+    async def _send_sms(self, resending=False):
         try:
             await self._post(
                 "/device/voice-activation/sms",
                 {"macAddress": self._mac(), "phone": self.phone},
             )
         except Exception as exc:
-            self.conn.logger.bind(tag=TAG).warning(f"发送验证码失败: {exc}")
-            await self._say(api_error_text(exc) + "。确认后我会再发一次。")
+            self.conn.logger.bind(tag=TAG).warning("发送绑定验证码失败")
+            error_code = getattr(exc, "code", None)
+            details = getattr(exc, "data", None)
+            seconds = details.get("retryAfterSeconds") if isinstance(details, dict) else None
+            self._sms_retry_action = "resend" if resending and error_code != VOICE_SMS_COOLDOWN else None
+            self._retry_bind_code = None
+            if error_code == VOICE_SMS_COOLDOWN:
+                self._sms_retry_action = "cooldown"
+                self.state = self.ASK_CODE if resending else self.RETRY_SMS
+                hint = f"还要等{seconds}秒。" if type(seconds) is int and seconds > 0 else "现在还不能重发。"
+                await self._say(hint + "时间到了，可以说‘再发一条’。")
+            else:
+                self.state = self.ASK_CODE if resending else self.RETRY_SMS
+                await self._say("刚才验证码没发出去，要我再试一次吗？")
             return
+        self._sms_retry_action = None
+        self._retry_bind_code = None
         self.state = self.ASK_CODE
         self.conn.last_activity_time = time.time() * 1000
-        await self._say("验证码已发送。请说出短信里的验证码。没收到可以说重发。")
+        await self._say("验证码重新发了，请念一下新收到的验证码。" if resending else "验证码已发送，请念一下短信里的验证码。")
+
+    async def _on_retry_sms(self, text):
+        waiting_for_cooldown = self._sms_retry_action == "cooldown"
+        retry = None if waiting_for_cooldown else "重新发送验证码"
+        action, _ = await resolve_sms_reply(self.conn, text, retry=retry)
+        if action == "restart":
+            self.phone = None
+            self._sms_retry_action = None
+            await self._start_phone()
+        elif action == "resend" or (action == "accept" and not waiting_for_cooldown):
+            await self._send_sms()
+        elif action == "repeat" or not waiting_for_cooldown:
+            await self._repeat_prompt()
 
     async def _on_code(self, text):
-        action, code = await resolve_sms_reply(self.conn, text)
+        retry = None
+        if self._sms_retry_action == "resend":
+            retry = "重新发送验证码"
+        elif self._sms_retry_action == "verify":
+            retry = "重试校验刚才的验证码"
+        action, code = await resolve_sms_reply(self.conn, text, retry=retry)
         if action == "repeat":
             await self._repeat_prompt()
             return
         if action == "resend":
-            self.state = self.CONFIRM_PHONE
-            await self._send_sms()
+            await self._send_sms(resending=True)
             return
         if action == "restart":
             self.phone = None
             self.phone_digits = ""
+            self._sms_retry_action = None
+            self._retry_bind_code = None
             self.state = self.ASK_PHONE
             await self._prompt_and_listen("好的，请重新按顺序说出十一位手机号。")
             return
-        if action != "code" or not code:
-            await self._say("没有听清验证码，请再说一遍。")
+        if action == "code" and not code:
+            self._sms_retry_action = None
+            self._retry_bind_code = None
+            await self._say("请把短信里的验证码完整念一遍。")
             return
+        if action == "accept" and self._sms_retry_action == "resend":
+            await self._send_sms(resending=True)
+            return
+        if action == "accept" and self._sms_retry_action == "verify":
+            code = self._retry_bind_code
+        elif action != "code":
+            return
+        self._sms_retry_action = None
+        self._retry_bind_code = None
         try:
             await self._post(
                 "/device/voice-activation/bind",
-                {"macAddress": self._mac(), "phone": self.phone, "code": code},
+                {"macAddress": self._mac(), "phone": self.phone, "code": code, "ownerTitle": self.owner_title},
             )
         except Exception as exc:
-            self.conn.logger.bind(tag=TAG).warning(f"语音绑定失败: {exc}")
-            await self._say(api_error_text(exc) + "。请再说一遍验证码。")
+            self.conn.logger.bind(tag=TAG).warning("语音绑定校验失败")
+            error_code = getattr(exc, "code", None)
+            if error_code in {VOICE_SMS_EXPIRED, VOICE_SMS_ATTEMPTS_EXHAUSTED}:
+                self._sms_retry_action = "resend"
+                await self._say("验证码已失效，要我再发一条吗？")
+            elif error_code == SMS_CODE_ERROR:
+                await self._say("请核对验证码，再念一遍。")
+            else:
+                self._sms_retry_action = "verify"
+                self._retry_bind_code = code
+                await self._say("刚才没能验证成功，要再试一次吗？")
             return
         try:
             ready = await self.conn.complete_voice_bind_setup()
@@ -1152,6 +1233,11 @@ class VoiceActivationSession:
 
     async def _on_nickname(self, text):
         nickname = await extract_nickname(self.conn, text)
+        if nickname is SUGGEST_NAME:
+            self.nickname = "小七"
+            self.state = self.CONFIRM_NICKNAME
+            await self._say("那叫我小七怎么样？")
+            return
         if nickname is REPEAT:
             await self._repeat_prompt()
             return
@@ -1178,9 +1264,9 @@ class VoiceActivationSession:
         所以必须走确认再提交，不能直接切到下一步，否则重连会退回本步。
         """
         self._nickname_misses = 0
-        self.nickname = _NICKNAME_DEFAULT
+        self.nickname = "助手"
         self.state = self.CONFIRM_NICKNAME
-        await self._say(f"好的，昵称先用{self.nickname}。对吗？说确认继续，或者说新的名字。")
+        await self._say(f"好，那我先叫{self.nickname}，可以吗？")
 
     async def _on_confirm_nickname(self, text):
         intent, nickname = await confirm_turn(self.conn, text, f"助手昵称是不是{self.nickname}")
@@ -1200,7 +1286,7 @@ class VoiceActivationSession:
             self.state = self.ASK_NICKNAME
             await self._say("好的，请重新说出助手昵称，比如豆豆、小美。")
             return
-        await self._say("请说确认，或者说重说。")
+        await self._repeat_prompt()
 
     async def _commit_nickname(self):
         try:
@@ -1210,74 +1296,12 @@ class VoiceActivationSession:
             )
         except Exception as exc:
             self.conn.logger.bind(tag=TAG).warning(f"设置昵称失败: {exc}")
-            await self._say(api_error_text(exc))
+            await self._say(f"{self.nickname}这个名字刚才没存上，要我再试一次吗？")
             return
         await self.conn.refresh_agent_prompt()
-        await self._begin_owner()
-
-    async def _begin_owner(self):
         self.stage = "role"
         self.conn.voice_onboarding = "role"
-        name = self.nickname or _NICKNAME_DEFAULT
-        if self.owner_title:
-            # 开场打招呼时已经问过并确认过称呼，这里不再重复提问。
-            await self._say(f"好的，我是{name}。")
-            await self._begin_persona()
-            return
-        self.state = self.ASK_OWNER
-        await self._say(f"好的，我是{name}。{_ASK_OWNER_PROMPT}")
-
-    async def _on_owner(self, text):
-        title = await extract_owner_title(self.conn, text)
-        if title is REPEAT:
-            await self._repeat_prompt()
-            return
-        if title is SKIP:
-            await self._skip_owner()
-            return
-        if not title:
-            self._owner_misses += 1
-            await self._say(self._owner_retry_hint())
-            return
-        self._owner_misses = 0
-        self.owner_title = title
-        self.state = self.CONFIRM_OWNER
-        await self._say(f"我称呼您为{title}，对吗？")
-
-    def _owner_retry_hint(self):
-        index = min(self._owner_misses, len(_OWNER_RETRY_HINTS)) - 1
-        return _OWNER_RETRY_HINTS[max(index, 0)]
-
-    async def _skip_owner(self):
-        """用户明确放弃设置时给一个出口：默认称呼走确认，仍可当场改口。
-
-        owner_title 与性格模板一起在 /role 提交，后端拒绝空值，
-        所以跳过也必须有称呼，不能留空跳到下一步。
-        """
-        self._owner_misses = 0
-        self.owner_title = _OWNER_DEFAULT
-        self.state = self.CONFIRM_OWNER
-        await self._say(f"好的，先称呼您为{self.owner_title}。对吗？说确认继续，或者说新的称呼。")
-
-    async def _on_confirm_owner(self, text):
-        intent, title = await confirm_turn(self.conn, text, f"是不是称呼用户为{self.owner_title}")
-        if intent == "repeat":
-            await self._repeat_prompt()
-            return
-        if title and title != self.owner_title:
-            self.owner_title = title
-            await self._say(f"我称呼您为{self.owner_title}，对吗？")
-            return
-        if intent == "accept" or title == self.owner_title:
-            await self._begin_persona()
-            return
-        if intent == "decline":
-            self.owner_title = None
-            self._owner_misses = 0
-            self.state = self.ASK_OWNER
-            await self._say(f"好的。{_ASK_OWNER_PROMPT}")
-            return
-        await self._say("请说确认，或者说重说。")
+        await self._begin_persona()
 
     async def _begin_persona(self):
         self.persona_name = None
@@ -1287,18 +1311,24 @@ class VoiceActivationSession:
         await self._say(self._persona_menu())
 
     async def _load_persona_templates(self):
-        try:
-            payload = await self._post(
-                "/device/voice-activation/role/templates",
-                {"macAddress": self._mac()},
-            )
-        except Exception as exc:
-            self.conn.logger.bind(tag=TAG).warning(f"读取性格模板失败: {exc}")
-            await self._say(api_error_text(exc) + "。请再说一次。")
-            return False
+        for attempt in range(2):
+            try:
+                payload = await self._post(
+                    "/device/voice-activation/role/templates",
+                    {"macAddress": self._mac()},
+                )
+                break
+            except Exception as exc:
+                self.conn.logger.bind(tag=TAG).warning(f"读取性格模板失败: {exc}")
+                if attempt == 0:
+                    await self._say("刚才没加载出来，我再试一次。")
+                    await self._wait_spoken()
+                else:
+                    await self._pause("现在暂时没有可选角色，我们稍后再继续。")
+                    return False
         names, voices = parse_persona_catalog(payload)
         if not names:
-            await self._say("还没有可选的性格模板。请再说一次。")
+            await self._pause("现在暂时没有可选角色，我们稍后再继续。")
             return False
         self.persona_templates = names
         self.persona_voices = voices
@@ -1323,48 +1353,31 @@ class VoiceActivationSession:
         self.conn.logger.bind(tag=TAG).info(f"性格模板 {name} 切换音色: {voice}")
 
     async def _on_persona(self, text):
-        if not self.persona_templates:
-            if not await self._load_persona_templates():
-                return
-        matched = await resolve_persona(self.conn, text, self.persona_templates)
+        if not self.persona_templates and not await self._load_persona_templates():
+            return
+        await self._handle_persona_turn(text)
+
+    async def _on_confirm_persona(self, text):
+        await self._handle_persona_turn(text, candidate=self.persona_name)
+
+    async def _handle_persona_turn(self, text, candidate=None):
+        matched = await resolve_persona(self.conn, text, self.persona_templates, candidate)
         if matched is REPEAT:
             await self._repeat_prompt()
-            return
-        if matched:
+        elif matched == ("out_of_range", None):
+            count = spoken_count(len(self.persona_templates))
+            await self._say(f"现在有{count}个角色。你想选第几个？")
+        elif candidate and matched == ("accept", None):
+            await self._ask_supplement()
+        elif candidate and matched == ("decline", None):
+            await self._reask_persona()
+        elif isinstance(matched, str):
             self.persona_name = matched
             self.state = self.CONFIRM_PERSONA
             self._use_persona_voice(matched)
             await self._say(self._persona_confirm_text())
-            return
-        await self._say("没有听清。请说序号，或者说模板名字。")
-
-    async def _on_confirm_persona(self, text):
-        listed = "、".join(self.persona_templates)
-        intent, value = await confirm_turn(
-            self.conn,
-            text,
-            f"性格是不是用{self.persona_name}。可选模板：{listed}",
-        )
-        if intent == "repeat":
+        else:
             await self._repeat_prompt()
-            return
-        chosen = None
-        for name in self.persona_templates:
-            if value and (value == name or compact_text(value) == compact_text(name)):
-                chosen = name
-                break
-        if chosen and chosen != self.persona_name:
-            self.persona_name = chosen
-            self._use_persona_voice(chosen)
-            await self._say(self._persona_confirm_text())
-            return
-        if intent == "accept" or chosen == self.persona_name:
-            await self._ask_supplement()
-            return
-        if intent == "decline":
-            await self._reask_persona()
-            return
-        await self._say("请说确认，或者说重说。")
 
     async def _reask_persona(self):
         self.persona_name = None
@@ -1375,12 +1388,7 @@ class VoiceActivationSession:
         """补充常常不止一句。先说清结束方式：说完请说「没有了」。"""
         self.state = self.ASK_SUPPLEMENT
         self.supplement_parts = []
-        self._supplement_nudges = 0
-        await self._say(
-            "还有要补充的吗？可以一句一句说，比如说话温柔一点、少讲道理。"
-            "说完请说没有了。不想补充也说没有。"
-        )
-        self._schedule_supplement_wait()
+        await self._say("接下来可以补充角色性格，比如，说话温柔一点，不要讲大道理")
 
     def _supplement_text(self):
         return "。".join(self.supplement_parts)
@@ -1390,108 +1398,36 @@ class VoiceActivationSession:
         if not content or len("。".join(self.supplement_parts + [content])) > _SUPPLEMENT_LIMIT:
             return False
         self.supplement_parts.append(content)
-        self._supplement_nudges = 0
         return True
 
-    def _invalidate_supplement_wait(self):
-        self._supplement_epoch += 1
-        task = self._supplement_wait_task
-        self._supplement_wait_task = None
-        if task is not None and not task.done():
-            task.cancel()
-
-    def _schedule_supplement_wait(self):
-        self._invalidate_supplement_wait()
-        epoch = self._supplement_epoch
-        self._supplement_wait_task = asyncio.create_task(self._supplement_wait(epoch))
-
-    def _voice_active(self):
-        """麦克风这边还有人声。自己的提示音不算。"""
-        if getattr(self.conn, "client_have_voice", False):
-            return True
-        last_voice_ms = getattr(self.conn, "vad_last_voice_time", 0) or 0
-        return bool(last_voice_ms and time.time() * 1000 - last_voice_ms < 1000)
-
-    async def _supplement_wait(self, epoch):
-        """记下一句后等用户继续。安静够久没有新内容，就当作说完了。"""
-        try:
-            for _ in range(120):
-                if epoch != self._supplement_epoch or self.state != self.ASK_SUPPLEMENT:
-                    return
-                if not self._playback_active() and not getattr(self.conn, "client_is_speaking", False):
-                    break
-                await asyncio.sleep(0.1)
-            quiet_since = None
-            while True:
-                await asyncio.sleep(0.2)
-                if epoch != self._supplement_epoch or self.state != self.ASK_SUPPLEMENT:
-                    return
-                if self._voice_active():
-                    quiet_since = None
-                    continue
-                now = time.monotonic()
-                if quiet_since is None:
-                    quiet_since = now
-                    continue
-                if now - quiet_since >= SUPPLEMENT_PAUSE_SECONDS:
-                    break
-        except asyncio.CancelledError:
-            return
-        if epoch != self._supplement_epoch or self.state != self.ASK_SUPPLEMENT or self._giving_up:
-            return
-        self._supplement_wait_task = None
-        await self._supplement_timeout()
-
-    async def _supplement_timeout(self):
-        """沉默也算说完。第一次先再问一遍，还是没回应就按已记下的提交。"""
-        if self._voice_active():
-            self._schedule_supplement_wait()
-            return
-        if self._supplement_nudges < 1:
-            self._supplement_nudges += 1
-            if self.supplement_parts:
-                await self._say("还有要补充的吗？没有的话请说没有了。")
-            else:
-                await self._say("还有要补充的吗？直接说就行，没有的话请说没有。")
-            self._schedule_supplement_wait()
-            return
-        self._invalidate_supplement_wait()
-        await self._save_role(self._supplement_text())
-
-    def _supplement_hint(self):
-        if self.supplement_parts:
-            return "没有听清。请继续补充，说完请说没有了。"
-        return "没有听清。请说出要补充的设定，没有的话请说没有。"
-
     async def _on_supplement(self, text):
-        self._invalidate_supplement_wait()
         action, content = await resolve_supplement_turn(self.conn, text, self._supplement_text())
         if action == "repeat":
             await self._repeat_prompt()
-            self._schedule_supplement_wait()
             return
         if action == "end":
             await self._finish_supplement()
             return
+        if action == "continue":
+            await self._say("好，你说，我听着。")
+            return
+        if action == "edit" and content:
+            if len(content) > _SUPPLEMENT_LIMIT:
+                await self._say("修改后的设定太长了，可以说得简短一点吗？")
+                return
+            self.supplement_parts = [content]
+            await self._say("好，改好了。还有吗？")
+            return
         if action != "content" or not content:
-            await self._say(self._supplement_hint())
-            self._schedule_supplement_wait()
             return
         if not self._add_supplement(content):
             await self._say("补充已经到八十个字的上限了，先记这些。请说没有了，结束补充。")
-            self._schedule_supplement_wait()
             return
         await self._say("好的，记下了。还有吗？说完请说没有了。")
-        self._schedule_supplement_wait()
 
     async def _finish_supplement(self):
-        """用户示意说完了。没记到内容就直接提交，记到了先复述确认。"""
-        self._invalidate_supplement_wait()
-        if not self.supplement_parts:
-            await self._save_role("")
-            return
         self.state = self.CONFIRM_SUPPLEMENT
-        await self._say(f"记下的补充是：{self._supplement_text()}。对吗？")
+        await self._repeat_prompt()
 
     async def _on_confirm_supplement(self, text):
         intent, content = await resolve_supplement_confirm(self.conn, text, self._supplement_text())
@@ -1505,7 +1441,6 @@ class VoiceActivationSession:
             self.supplement_parts = []
             self.state = self.ASK_SUPPLEMENT
             await self._say("好的，请重新说要补充的设定。说完请说没有了。")
-            self._schedule_supplement_wait()
             return
         if intent == "more":
             self.state = self.ASK_SUPPLEMENT
@@ -1515,9 +1450,8 @@ class VoiceActivationSession:
                 await self._say("补充已经到八十个字的上限了，先记这些。请说没有了，结束补充。")
             else:
                 await self._say("好的，记下了。还有吗？说完请说没有了。")
-            self._schedule_supplement_wait()
             return
-        await self._say("请说确认，或者说不对重新补充。")
+        await self._repeat_prompt()
 
     async def _save_role(self, supplement):
         try:
@@ -1525,24 +1459,24 @@ class VoiceActivationSession:
                 "/device/voice-activation/role",
                 {
                     "macAddress": self._mac(),
-                    "ownerTitle": self.owner_title,
+                    "ownerTitle": self.owner_title or _OWNER_DEFAULT,
                     "templateName": self.persona_name,
                     "supplement": supplement,
                 },
             )
         except Exception as exc:
             self.conn.logger.bind(tag=TAG).warning(f"保存角色设定失败: {exc}")
-            await self._say(api_error_text(exc))
+            await self._say("刚才没能保存角色设定，要我再试一次吗？")
             return
         await self.conn.refresh_agent_prompt()
-        await self._say("角色性格绑定成功。")
-        await self._wait_spoken()
         self.conn.voice_onboarding = "skills"
         self.stage = "skills"
         self.include_auth = True
-        await self._say("接下来绑定技能。")
-        await self._wait_spoken()
-        await self._bind_skills()
+        self.ask_auth_consent = True
+        await self._advance_after_skill_prompt("角色设好了。", self._announce_skills)
+
+    async def _announce_skills(self):
+        await self._advance_after_skill_prompt("接下来绑定技能。", self._bind_skills)
 
     def _skills_quiet(self):
         """用户已经跳过一次。唤醒后的自动重试失败不再出声。用户主动说绑定技能时要播报。"""
@@ -1552,14 +1486,14 @@ class VoiceActivationSession:
 
     async def _speak_if_user_requests_skills(self, text):
         """静默重试进行中，用户又说了绑定技能：这次失败要说出来。"""
-        if self.stage != "skills":
+        if (self.stage != "skills" or self.state == self.RETRY_SKILLS_COMPLETE
+                or getattr(self.conn, "voice_onboarding", None) != "skills_quiet"):
             return False
         request = await resolve_skills_request(self.conn, text)
         if not request:
             return False
-        if getattr(self.conn, "voice_onboarding", None) != "skills_quiet":
-            return False
         self.include_auth = True
+        self.ask_auth_consent = False
         if request == "rebind":
             self.rebind_auth = True
         self._announce_skill_failure = True
@@ -1595,7 +1529,7 @@ class VoiceActivationSession:
             self.state = self.RETRY_SKILLS
             self.conn.skills_pending = True
             self.conn.voice_onboarding = "skills"
-            await self._say(api_error_text(exc) + "。请说确认重试，或者说稍后再说。")
+            await self._say("刚才没连上技能服务，要我再试一次吗？")
             return
         finally:
             self._skill_bind_inflight = False
@@ -1610,18 +1544,50 @@ class VoiceActivationSession:
         self.auth_task_id = None
         self.auth_done = []
         self.auth_failed = []
-        await self._say("通用技能已绑定。")
-        await self._run_next_auth()
+        self.auth_skipped = []
+        if self.ask_auth_consent:
+            self.state = self.ASK_AUTH_CONSENT
+            await self._repeat_prompt()
+            return
+        await self._advance_after_skill_prompt("通用技能已绑定。", self._run_next_auth)
+
+    async def _on_auth_consent(self, text):
+        data = await _ask_turn_json(
+            self.conn,
+            "用户在选择现在要开通哪些授权技能。只返回 JSON。"
+            '只开瑞幸用 {"intent":"accept","services":["luckin"]}，只开滴滴选 didi，'
+            "明确同意两项都开时列出 luckin 和 didi。"
+            "结合整句理解否定和改口，只列用户同意开通的服务。"
+            '两项都暂缓或拒绝用 {"intent":"decline"}。要求重听用 repeat，'
+            "只询问用途、未明确选择时用 unclear。",
+            text,
+            "首次授权确认",
+        )
+        intent = _intent_of(data, {"accept", "decline", "repeat", "unclear"})
+        if intent == "accept":
+            services = data.get("services")
+            allowed = {service for service, _ in self.auth_queue}
+            if not isinstance(services, list) or not services or any(
+                not isinstance(service, str) or service not in allowed for service in services
+            ):
+                await self._repeat_prompt()
+                return
+            self.ask_auth_consent = False
+            self.auth_skipped.extend(label for service, label in self.auth_queue if service not in services)
+            self.auth_queue = [pair for pair in self.auth_queue if pair[0] in services]
+            await self._run_next_auth()
+        elif intent == "decline":
+            self.ask_auth_consent = False
+            self.auth_skipped.extend(label for _, label in self.auth_queue)
+            self.auth_queue.clear()
+            await self._finish_skills_and_reboot("瑞幸和滴滴可以之后再开通。")
+        else:
+            await self._repeat_prompt()
 
     async def _finish_general_skills(self):
         """通用绑定已完成，但这次不自动开通授权技能。"""
-        try:
-            await self._post(
-                "/device/voice-activation/skills/complete",
-                {"macAddress": self._mac()},
-            )
-        except Exception as exc:
-            self.conn.logger.bind(tag=TAG).warning(f"结束通用技能绑定失败: {exc}")
+        if not await self._complete_skills():
+            return
         self.conn.voice_onboarding = None
         self.conn.skills_pending = False
         self.conn.voice_activation_handler = None
@@ -1630,23 +1596,28 @@ class VoiceActivationSession:
             task.cancel()
         await self._say("通用技能已绑定。开通瑞幸或滴滴可以说绑定技能。")
 
-    def _mark_auth_failed(self, label, reason=""):
+    def _mark_auth_failed(self, label):
         name = label or "技能"
         if name not in self.auth_failed:
             self.auth_failed.append(name)
-        return reason
+
+    async def _report_auth_failure(self, label, reason, order_history_confirmed=False):
+        self._mark_auth_failed(label)
+        notice = f"{label}暂时没能开通，{reason}。"
+        if self.auth_service == "luckin" and not order_history_confirmed:
+            notice += "如果这个账号还没在瑞幸小程序下过单，可以先下单，再试一次。"
+        await self._advance_after_skill_prompt(notice, self._run_next_auth)
 
     def _auth_finish_prefix(self):
         """汇总开通结果，失败项必须口头提示。"""
         parts = []
         if self.auth_done:
             parts.append("、".join(self.auth_done) + "已开通")
+        if self.auth_skipped:
+            parts.append("、".join(self.auth_skipped) + "先跳过")
         if self.auth_failed:
             failed = "、".join(self.auth_failed)
             tip = f"{failed}开通失败"
-            if any("滴滴" in name for name in self.auth_failed):
-                tip += "。滴滴出行可能需要先完成实名认证和免密支付后再试"
-            tip += "。要重新开通可以说重新绑定"
             parts.append(tip)
         if not parts:
             return "技能引导已结束。"
@@ -1654,12 +1625,22 @@ class VoiceActivationSession:
 
     async def _run_next_auth(self):
         if not self.auth_queue:
-            await self._finish_skills_and_reboot(self._auth_finish_prefix())
+            if self.auth_failed:
+                self.state = self.RETRY_AUTH_SUMMARY
+                await self._repeat_prompt()
+            else:
+                await self._finish_skills_and_reboot(self._auth_finish_prefix())
             return
         service, label = self.auth_queue.pop(0)
         self.auth_service = service
         self.auth_label = label
         self.auth_task_id = None
+        if service == "luckin":
+            prompt = "接下来开通瑞幸咖啡。请准备接收短信验证码，在瑞幸App下过单的账号可以尝试开通。"
+        else:
+            prompt = "接下来开通滴滴出行。请准备接收短信验证码，并确认账号已实名、已开通免密支付。"
+        await self._say(prompt)
+        await self._wait_spoken()
         try:
             result = await self._post(
                 "/device/voice-activation/skills/auth",
@@ -1671,23 +1652,17 @@ class VoiceActivationSession:
             )
         except Exception as exc:
             self.conn.logger.bind(tag=TAG).warning(f"{label}授权启动失败: {exc}")
-            reason = api_error_text(exc)
-            self._mark_auth_failed(label, reason)
-            await self._say(f"{label}开通失败：{reason}。")
-            await self._wait_spoken()
-            await self._run_next_auth()
+            await self._report_auth_failure(label, "授权请求没能完成")
             return
         if str((result or {}).get("status") or "") == "already_bound":
-            await self._say(f"{label}已经开通。")
-            await self._wait_spoken()
-            await self._run_next_auth()
+            if label not in self.auth_done:
+                self.auth_done.append(label)
+            await self._advance_after_skill_prompt(f"{label}已经开通。", self._run_next_auth)
             return
-        await self._say(f"正在开通{label}。")
         await self._handle_auth_result(result or {})
 
     def _auth_code_rejected(self, result):
-        message = str((result or {}).get("message") or "")
-        return any(word in message for word in ("不正确", "重新输入", "验证码错误", "验证码有误"))
+        return (result or {}).get("errorCode") == "INVALID_CODE"
 
     async def _poll_auth(self, after_code=False):
         """登录往往还停在 waiting_code。提交验证码后要继续查，直到成功、失败或验证码被拒。"""
@@ -1707,11 +1682,7 @@ class VoiceActivationSession:
                     )
                 except Exception as exc:
                     self.conn.logger.bind(tag=TAG).warning(f"{label}授权状态查询失败: {exc}")
-                    reason = api_error_text(exc)
-                    self._mark_auth_failed(label, reason)
-                    await self._say(f"{label}开通失败：{reason}。")
-                    await self._wait_spoken()
-                    await self._run_next_auth()
+                    await self._wait_for_auth_status_retry(after_code)
                     return
                 polled_status = str((polled or {}).get("status") or "")
                 if polled_status == "pending":
@@ -1729,10 +1700,12 @@ class VoiceActivationSession:
 
         # 超时：先把失败播报完，再切下一项，否则「正在开通滴滴出行」会盖掉这句。
         await self._cancel_auth_task()
-        self._mark_auth_failed(label, "等待超时")
-        await self._say(f"{label}开通失败，没有收到授权结果。")
+        await self._report_auth_failure(label, "没有收到授权结果")
+
+    async def _advance_after_skill_prompt(self, text, advance):
+        await self._say(text)
         await self._wait_spoken()
-        await self._run_next_auth()
+        await advance()
 
     async def _wait_spoken(self):
         """等这一句开始播完，避免下一句把「已开通」盖掉。"""
@@ -1747,10 +1720,22 @@ class VoiceActivationSession:
                 return
             await asyncio.sleep(0.1)
 
+    async def _recover_stalled_playback(self, sentence_id):
+        from core.handle.abortHandle import handleAbortMessage
+
+        if getattr(self.conn, "sentence_id", None) != sentence_id:
+            return
+        try:
+            await asyncio.wait_for(handleAbortMessage(self.conn), PLAYBACK_STOP_TIMEOUT_SECONDS)
+        except Exception as exc:
+            self.conn.logger.bind(tag=TAG).warning(f"配置播报结束信号发送失败: {exc}")
+        finally:
+            if getattr(self.conn, "sentence_id", None) == sentence_id:
+                self.conn.clearSpeakStatus()
+
     async def _handle_auth_result(self, result, after_code=False):
         status = str((result or {}).get("status") or "")
         task_id = (result or {}).get("taskId")
-        message = (result or {}).get("message") or ""
         label = self.auth_label or "技能"
         if task_id:
             self.auth_task_id = task_id
@@ -1762,32 +1747,37 @@ class VoiceActivationSession:
             self.state = self.ASK_AUTH_CODE
             self.conn.last_activity_time = time.time() * 1000
             if after_code:
-                await self._say("验证码不正确或尚未生效，请再说一遍。")
+                await self._say("请核对验证码，再念一遍。")
             else:
                 await self._say(f"请说出{label}短信里的验证码。")
             return
 
-        if status == "done":
+        if status in {"done", "already_bound"}:
             if label not in self.auth_done:
                 self.auth_done.append(label)
-            await self._say(f"{label}已开通。")
-            await self._wait_spoken()
-            await self._run_next_auth()
+            await self._advance_after_skill_prompt(f"{label}已开通。", self._run_next_auth)
             return
 
         if status in ("failed", "skipped"):
             if status == "skipped":
-                await self._say(f"好的，已跳过{label}。")
+                if label not in self.auth_skipped:
+                    self.auth_skipped.append(label)
+                notice = f"好的，已跳过{label}。"
             else:
-                reason = message.strip() if message else ""
-                self._mark_auth_failed(label, reason)
-                if reason:
-                    await self._say(f"{label}开通失败：{reason}。")
-                else:
-                    await self._say(f"{label}开通失败。")
-            # 等这句播完再开下一项，否则失败提示会被「正在开通…」盖掉。
-            await self._wait_spoken()
-            await self._run_next_auth()
+                error_code = (result or {}).get("errorCode")
+                self.conn.logger.bind(tag=TAG).warning(f"{label}授权失败: error_code={error_code}")
+                reason = {
+                    "SCAN_REQUIRED": "这次需要扫码，设备上暂时开通不了",
+                    "INVALID_CODE": "验证码没能通过验证",
+                    "TASK_EXPIRED": "这次验证已经超时",
+                    "TASK_NOT_FOUND": "这次验证已失效",
+                    "REAL_NAME_REQUIRED": "账号还需要实名认证",
+                    "PASSWORD_FREE_PAYMENT_REQUIRED": "账号还需要开通免密支付",
+                    "ORDER_HISTORY_REQUIRED": "这个账号需要先在瑞幸小程序下过单",
+                }.get(error_code, "授权服务没有提供具体原因")
+                await self._report_auth_failure(label, reason, error_code == "ORDER_HISTORY_REQUIRED")
+                return
+            await self._advance_after_skill_prompt(notice, self._run_next_auth)
             return
 
         await self._poll_auth(after_code=after_code)
@@ -1814,27 +1804,30 @@ class VoiceActivationSession:
             self.rebind_auth = True
             await self._cancel_auth_task()
             self.auth_queue = list(self.AUTH_QUEUE)
-            await self._say("好的，重新绑定授权技能。")
-            await self._wait_spoken()
+            await self._advance_after_skill_prompt("好的，重新绑定授权技能。", self._run_next_auth)
+            return
+        if action == "skip_all":
+            await self._cancel_auth_task()
+            self.auth_skipped.extend([label, *(name for _, name in self.auth_queue)])
+            self.auth_queue.clear()
             await self._run_next_auth()
             return
         if action == "skip":
             await self._cancel_auth_task()
-            await self._say(f"好的，已跳过{label}。")
-            await self._wait_spoken()
-            await self._run_next_auth()
+            if label not in self.auth_skipped:
+                self.auth_skipped.append(label)
+            await self._advance_after_skill_prompt(f"好的，已跳过{label}。", self._run_next_auth)
             return
         if action == "resend":
             await self._say("验证码由服务方发送，请留意短信。收到后直接说出验证码。")
             return
-        if action != "code" or not code:
-            await self._say("没有听清验证码，请再说一遍。")
+        if action == "code" and not code:
+            await self._say(f"请把{label}短信里的验证码完整念一遍。")
+            return
+        if action != "code":
             return
         if not self.auth_task_id:
-            self._mark_auth_failed(label, "任务已失效")
-            await self._say(f"{label}开通失败：任务已失效。")
-            await self._wait_spoken()
-            await self._run_next_auth()
+            await self._report_auth_failure(label, "这次验证已失效")
             return
         try:
             result = await self._post(
@@ -1847,7 +1840,7 @@ class VoiceActivationSession:
             )
         except Exception as exc:
             self.conn.logger.bind(tag=TAG).warning(f"{label}提交验证码失败: {exc}")
-            await self._say(api_error_text(exc) + "。请再说一遍验证码。")
+            await self._say("刚才没能提交验证码，请再念一遍。")
             return
         status = str((result or {}).get("status") or "")
         if status == "done":
@@ -1855,17 +1848,46 @@ class VoiceActivationSession:
             return
         if status == "waiting_code" and self._auth_code_rejected(result):
             self.state = self.ASK_AUTH_CODE
-            await self._say("验证码不正确或尚未生效，请再说一遍。")
+            await self._say("请核对验证码，再念一遍。")
             return
         if status in ("failed", "skipped"):
             await self._handle_auth_result(result or {})
             return
         # 验证码已收下。登录完成前状态常常仍是 waiting_code，不能再把要验证码的那句说一遍。
-        await self._say("验证码已提交，正在登录。")
-        await self._handle_auth_result(result or {}, after_code=True)
+        await self._advance_after_skill_prompt(
+            "我还在确认开通结果，稍等一下。",
+            partial(self._handle_auth_result, result or {}, after_code=True),
+        )
 
-    async def _finish_skills_and_reboot(self, prefix=""):
-        """配置完毕不再询问：不重启设备 MCP 工具无法加载，播报后直接重启。"""
+    async def _on_auth_summary(self, text):
+        failed = [pair for pair in self.AUTH_QUEUE if pair[1] in self.auth_failed]
+        options = "、".join(f"{service}={label}" for service, label in failed)
+        data = await _ask_turn_json(
+            self.conn,
+            f"用户正在决定是否重试未开通的技能。可选项：{options}。"
+            '只输出 JSON。明确重试用 {"intent":"retry","services":["didi"]}，'
+            "services 只列最终明确要重试的技能。否定或只提及的品牌不选。"
+            "只有一个失败项且明确同意重试时，选这一项。全部重试时列出所有失败项。"
+            "明确结束用 skip，重听用 repeat，不明确用 unclear。",
+            text,
+            "失败技能重试意图",
+        )
+        intent = _intent_of(data, {"retry", "skip", "repeat", "unclear"})
+        if intent == "skip":
+            await self._finish_skills_and_reboot(self._auth_finish_prefix())
+            return
+        if intent == "retry":
+            services = data.get("services")
+            requested = [pair for pair in failed if pair[0] in services] if isinstance(services, list) else []
+            if requested:
+                for _, label in requested:
+                    self.auth_failed.remove(label)
+                self.auth_queue = requested
+                await self._run_next_auth()
+                return
+        await self._repeat_prompt()
+
+    async def _complete_skills(self, prefix=None):
         try:
             await self._post(
                 "/device/voice-activation/skills/complete",
@@ -1873,7 +1895,29 @@ class VoiceActivationSession:
             )
         except Exception as exc:
             self.conn.logger.bind(tag=TAG).warning(f"完成技能引导失败: {exc}")
-            # complete 失败也要继续重启，否则配置不生效、引导卡住
+            self._completion_prefix = prefix
+            self.state = self.RETRY_SKILLS_COMPLETE
+            self.conn.skills_pending = True
+            await self._repeat_prompt()
+            return False
+        return True
+
+    async def _on_retry_skills_complete(self, text):
+        intent, _ = await resolve_skill_retry(self.conn, text)
+        if intent == "retry":
+            if self._completion_prefix is None:
+                await self._finish_general_skills()
+            else:
+                await self._finish_skills_and_reboot(self._completion_prefix)
+        elif intent == "skip":
+            await self._pause("好，配置进度先留在这里。下次唤醒我后可以再试。")
+        else:
+            await self._repeat_prompt()
+
+    async def _finish_skills_and_reboot(self, prefix=""):
+        """后台确认完成后，播报并重启设备以加载 MCP 工具。"""
+        if not await self._complete_skills(prefix):
+            return
         self.conn.voice_onboarding = None
         self.conn.skills_pending = False
         self.state = self.REBOOTING
@@ -1909,7 +1953,7 @@ class VoiceActivationSession:
                 self.rebind_auth = True
             await self._bind_skills()
             return
-        await self._say("请说确认重试，或者说稍后再说。")
+        await self._repeat_prompt()
 
     async def _reboot_device(self):
         # 等「配置完毕，设备即将重启」播完再下发，别把提示音掐掉。
@@ -1942,8 +1986,10 @@ class VoiceActivationSession:
             # 设备马上重启，不必久等结果
             await call_mcp_tool(self.conn, self.conn.mcp_client, tool_name, "{}", timeout=5)
         except Exception as exc:
-            # 重启过程中连接断开也属正常
-            self.conn.logger.bind(tag=TAG).info(f"已下发重启工具 {tool_name}: {exc}")
+            self.conn.logger.bind(tag=TAG).warning(f"设备重启未确认: {exc}")
+            websocket = getattr(self.conn, "websocket", None)
+            if websocket is not None and getattr(websocket, "close_code", None) is None:
+                await self._say("如果设备没有自动重启，请手动重启一下。")
         self.conn.voice_activation_handler = None
         self.conn.voice_onboarding = None
         self.conn.skills_pending = False
@@ -2000,6 +2046,9 @@ class VoiceActivationSession:
         return last_empty > 0 and time.monotonic() - last_empty < 0.6
 
     async def _repeat_prompt(self):
+        if self._auth_status_after_code is not None:
+            await self._say("刚才没能查询技能开通状态，要我再查一次吗？")
+            return
         if self.state == self.GREET:
             await self._prompt_and_listen(_GREETING_PROMPT)
         elif self.state == self.CONFIRM_GREET:
@@ -2012,21 +2061,24 @@ class VoiceActivationSession:
                 await self._prompt_and_listen("请按顺序说出十一位手机号。")
         elif self.state == self.CONFIRM_PHONE:
             await self._say(f"您的手机号是，{spoken_digits(self.phone or '')}。对吗？")
+        elif self.state == self.RETRY_SMS:
+            if self._sms_retry_action == "cooldown":
+                await self._say("等到可以重发时，说‘再发一条’就好。")
+            else:
+                await self._say("刚才验证码没发出去，要我再试一次吗？")
         elif self.state == self.ASK_CODE:
-            await self._say("请说出短信验证码。")
+            await self._say("请念一下短信里的验证码。")
         elif self.state == self.ASK_NICKNAME:
             await self._say(_ASK_NICKNAME_PROMPT)
         elif self.state == self.CONFIRM_NICKNAME:
             await self._say(f"我的名字是{self.nickname}，对吗？")
-        elif self.state == self.ASK_OWNER:
-            await self._say(_ASK_OWNER_PROMPT)
-        elif self.state == self.CONFIRM_OWNER:
-            await self._say(f"我称呼您为{self.owner_title}，对吗？")
+        elif self.state == self.ASK_AUTH_CONSENT:
+            await self._say("通用技能已经绑定好了。瑞幸咖啡和滴滴出行需要短信验证，你想先开通哪项？两项都开或者晚点再开也可以。")
         elif self.state == self.ASK_PERSONA:
             if self.persona_templates:
                 await self._say(self._persona_menu())
             else:
-                await self._say("请说出性格模板的序号或名字。")
+                await self._begin_persona()
         elif self.state == self.CONFIRM_PERSONA:
             await self._say(self._persona_confirm_text())
         elif self.state == self.ASK_SUPPLEMENT:
@@ -2037,11 +2089,22 @@ class VoiceActivationSession:
             else:
                 await self._say("还有要补充的吗？可以一句一句说。说完请说没有了，不想补充也说没有。")
         elif self.state == self.CONFIRM_SUPPLEMENT:
-            await self._say(f"记下的补充是：{self._supplement_text()}。对吗？")
+            supplement = self._supplement_text()
+            if supplement:
+                await self._say(f"记下的补充是：{supplement}。对吗？")
+            else:
+                await self._say("那就用刚才选的角色，可以吗？")
         elif self.state == self.RETRY_SKILLS:
             if self._skills_quiet():
                 return
-            await self._say("技能绑定还未完成，请说确认重试，或者说稍后再说。")
+            await self._say("刚才没连上技能服务，要我再试一次吗？")
+        elif self.state == self.RETRY_SKILLS_COMPLETE:
+            await self._say("刚才没能保存技能配置进度，要我再试一次吗？")
+        elif self.state == self.RETRY_AUTH_SUMMARY:
+            failed = "、".join(self.auth_failed)
+            done = "、".join(self.auth_done)
+            prefix = f"{done}已开通。" if done else ""
+            await self._say(f"{prefix}{failed}还没开通，要现在再试一次吗？")
         elif self.state == self.ASK_AUTH_CODE:
             label = self.auth_label or "技能"
             await self._say(f"请说出{label}短信验证码。")
@@ -2071,7 +2134,7 @@ class VoiceActivationSession:
             base = 120
         if base <= 0:
             base = 120
-        if self.state == self.ASK_CODE:
+        if self.state in (self.ASK_CODE, self.RETRY_SMS):
             return max(base, 300)
         return base
 
@@ -2087,7 +2150,7 @@ class VoiceActivationSession:
                 now = time.monotonic()
                 delta = now - last
                 last = now
-                if self._auth_polling:
+                if self._auth_polling or self._busy:
                     accumulated = 0.0
                     continue
                 if self._playback_active() or getattr(self.conn, "client_is_speaking", False):
@@ -2104,16 +2167,37 @@ class VoiceActivationSession:
             return
 
     async def give_up_and_sleep(self):
-        """长时间没人说话：停掉计费识别，说一声，再断开连接。
+        """长时间没人说话时保留进度，再让设备休眠。"""
+        await self._pause("没有听到回应，我先休息了。唤醒我之后，我们再继续。")
 
-        设备回到空闲后会自己休眠。下次唤醒会重连，语音激活按当前进度重新开始。
-        """
+    async def _pause(self, prompt):
         if self._giving_up:
             return
         self._giving_up = True
+        server = getattr(self.conn, "server", None)
+        mac = self._mac()
+        if server is not None and mac:
+            if not hasattr(server, "_voice_onboarding_drafts"):
+                server._voice_onboarding_drafts = {}
+            drafts = server._voice_onboarding_drafts
+            fields = (
+                "state", "nickname", "owner_title", "persona_name", "persona_templates",
+                "persona_voices", "supplement_parts", "auth_queue", "auth_service", "auth_label",
+                "auth_task_id", "auth_done", "auth_failed", "auth_skipped", "include_auth",
+                "rebind_auth", "ask_auth_consent", "_completion_prefix",
+            )
+            snapshot = {field: getattr(self, field) for field in fields}
+            if self.stage == "bind":
+                # 不在连接之外保留手机号或验证码。重新报号时仍可复用已确认称呼。
+                if self.state not in (self.GREET, self.CONFIRM_GREET):
+                    snapshot["state"] = self.ASK_PHONE
+            key = (mac, self.stage)
+            drafts.pop(key, None)
+            drafts[key] = (time.monotonic(), snapshot)
+            if len(drafts) > 256:
+                drafts.pop(next(iter(drafts)))
         self.conn.close_after_chat = True
         self._invalidate_phone_wait()
-        self._invalidate_supplement_wait()
         ready = self._asr_ready_task
         if ready is not None and not ready.done():
             ready.cancel()
@@ -2124,7 +2208,7 @@ class VoiceActivationSession:
         if stop is not None:
             stop()
         self.conn.logger.bind(tag=TAG).info("语音激活长时间无回应，断开ASR并让设备休眠")
-        await self._say("没有听到回应，我先休息了。唤醒我之后，我们再继续。")
+        await self._say(prompt)
 
     async def _prompt_and_listen(self, text):
         """先播提示，等提示音快说完再连 ASR。不在整段提示音期间占着计费连接。"""
@@ -2237,11 +2321,15 @@ class VoiceActivationSession:
             finally:
                 if probe is not None:
                     probe.restore(tts)
+        failed_prompt_id = self.conn.sentence_id
         # 所有 provider 均失败：把文本推进字幕队列，避免流程彻底卡死。
         try:
             self.conn.tts.store_tts_text(self.conn.sentence_id, text)
+            await asyncio.wait_for(send_tts_message(self.conn, "stop"), PLAYBACK_STOP_TIMEOUT_SECONDS)
         except Exception:
-            pass
+            await self._recover_stalled_playback(failed_prompt_id)
+        finally:
+            self.conn.client_is_speaking = False
 
     def _mac(self):
         return self.conn.headers.get("device-id")

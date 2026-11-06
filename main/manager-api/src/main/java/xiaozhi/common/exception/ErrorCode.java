@@ -260,4 +260,8 @@ public interface ErrorCode {
     // 替换词相关错误码
     int CORRECT_WORD_FILE_NAME_EXISTS = 10203; // 文件名已存在
     int FILE_SIZE_OVER_LIMIT = 10204; // 文件大小超过限制
+
+    int VOICE_SMS_COOLDOWN = 10205;
+    int VOICE_SMS_EXPIRED = 10206;
+    int VOICE_SMS_ATTEMPTS_EXHAUSTED = 10207;
 }
