@@ -1149,7 +1149,10 @@ class VoiceActivationSession:
         self._retry_bind_code = None
         self.state = self.ASK_CODE
         self.conn.last_activity_time = time.time() * 1000
-        await self._say("验证码重新发了，请念一下新收到的验证码。" if resending else "验证码已发送，请念一下短信里的验证码。")
+        if resending:
+            await self._say("验证码重新发了，请念一下新收到的验证码。")
+        else:
+            await self._say("验证码已发送，是四位数字。请念一下短信里的验证码，没收到可以说重发。")
 
     async def _on_retry_sms(self, text):
         waiting_for_cooldown = self._sms_retry_action == "cooldown"

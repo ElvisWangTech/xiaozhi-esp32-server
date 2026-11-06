@@ -1,6 +1,6 @@
 # 语音激活
 
-未绑定设备除了拿到 6 位激活码，还会拿到 `activation_type=voice`。设备连上语音服务后，由服务端把手机号播报给用户确认，再用阿里云号码认证短信校验。校验通过后，用超级管理员新建一个智能体，并按激活码绑定设备，同时记下手机号。绑定成功后询问助手昵称；昵称确认后询问怎么称呼主人，再让用户选一个性格模板并补充设定，然后自动做默认技能绑定，最后直接重启设备。
+未绑定设备除了拿到 6 位激活码，还会拿到 `activation_type=voice`。设备连上语音服务后，由服务端把手机号播报给用户确认，再发一条含 4 位验证码的短信，验证码在 manager-api 本地校验。校验通过后，用超级管理员新建一个智能体，并按激活码绑定设备，同时记下手机号。校验通过后，用超级管理员新建一个智能体，并按激活码绑定设备，同时记下手机号。绑定成功后询问助手昵称；昵称确认后询问怎么称呼主人，再让用户选一个性格模板并补充设定，然后自动做默认技能绑定，最后直接重启设备。
 
 固件不在本仓库。设备侧对接见 [voice-activation-device.md](voice-activation-device.md)：OTA 返回 `activation_type=voice` 时连接 WebSocket 并对话，不要只把激活码展示成控制面板绑定。`activation_type` 不是 `voice` 时，仍播放「请登录控制面板，输入激活码」。
 
@@ -125,26 +125,28 @@
 
 ## 短信
 
-登录注册继续用现有短信服务（`dysmsapi`）。语音激活单独用阿里云号码认证（`dypnsapi`）：
+登录注册继续用现有短信服务（`dysmsapi`）。语音激活改走通用短信平台，平台只有发送接口，没有校验接口：
 
-- `SendSmsVerifyCode`，`returnVerifyCode=false`，验证码由阿里云生成。
-- `CheckSmsVerifyCode`，结果必须是 `PASS`。
+- 发送：`POST {sms.gateway.base_url}/api/notification/send/sms`，请求体 `template_type`、`phone_number`、`message`，请求头必带 `Client-Id`（取 `sms.gateway.client_id`）。
+- 验证码由 manager-api 本地生成：4 位数字，5 分钟有效，校验通过后立即失效，只存 SHA-256 摘要。
+- 平台返回 HTTP 2xx 且没有明确写 `success=false` / `ok=false` 视为发送成功；发送失败不占用频控额度。
 
-智控台参数：
+智控台参数（系统设置 → 参数管理，搜索 `sms.gateway`）：
 
 | 参数 | 说明 |
 | --- | --- |
-| `aliyun.dypns.access_key_id` | 为空时回退 `aliyun.sms.access_key_id` |
-| `aliyun.dypns.access_key_secret` | 为空时回退 `aliyun.sms.access_key_secret` |
-| `aliyun.dypns.sign_name` | 短信签名 |
-| `aliyun.dypns.template_code` | 短信模板。模板变量使用 `##code##` |
-| `aliyun.dypns.scheme_name` | 号码认证方案名，可空 |
-| `aliyun.dypns.mock` | `true` 时不调用阿里云，验证码写在服务端日志里，供开发联调 |
+| `sms.gateway.base_url` | 短信平台根地址，例如 `https://sms.example.com`，不带路径 |
+| `sms.gateway.client_id` | 客户端标识，必填。请求时以 `Client-Id` 请求头携带；为空时接口报「短信服务暂不可用」 |
+| `sms.gateway.template_type` | 短信类型：0 通知，1 营销，2 验证码。默认 2，非法值按 2 处理 |
+| `sms.gateway.message_template` | 短信文案模板，`{{code}}` 替换为验证码。默认 `您的验证码为{{code}}，五分钟内有效，请勿泄露给他人`；模板里没有占位符时回落默认文案 |
+| `sms.gateway.mock` | `true` 时不调用平台，验证码写在服务端日志里，供开发联调 |
 | `portal_lite.base_url` | portal_lite 服务地址，例如 `http://127.0.0.1:5005` |
 | `portal_lite.bind_token` | 对应 `X-Bind-Token` / `LITE_BIND_TOKEN` |
 | `portal_lite.admin_token` | 对应 `X-Admin-Token` / `LITE_ADMIN_TOKEN`，签发邀请令牌；为空时回退 `bind_token` |
 
-频控：同一手机号 60 秒内不可重发，每天最多 10 条，验证失败最多 5 次。未配置密钥且未开启 mock 时，接口返回「短信服务暂不可用」。
+频控：同一手机号 60 秒内不可重发，每天最多 10 条，验证失败最多 5 次。未配置 `base_url` 且未开启 mock 时，接口返回「短信服务暂不可用」。
+
+旧的 `aliyun.dypns.*` 参数已经不再读取，确认无需回滚后可自行删除。登录注册短信仍用 `aliyun.sms.*`。
 
 ## 一机一体
 
@@ -216,9 +218,17 @@
 - 语音里的确认话术随之变为「性格就保持可爱女生，不换了，对吗？」，`persona_menu` 的第一项也变成「一，可爱女生，也就是现在的我，不换也可以」。Python 侧无硬编码，模板顺序全部来自 `ai_agent_template.sort`。
 - 默认昵称从「助手」改为「牛小七」：用户说「算了」「不想设置」跳过昵称时，`_NICKNAME_DEFAULT` 兜底为牛小七，写进 `agentName` 后提示词里的 `{{assistant_name}}` 也是牛小七。改动在 `core/handle/voice_activation.py`，`_begin_owner` 的 `self.nickname or _NICKNAME_DEFAULT` 同步复用同一常量，不再各写一份。
 
+### 2026-11-06
+
+- 语音激活短信从阿里云号码认证（`dypnsapi`）换成通用短信平台：只调发送接口 `POST {base_url}/api/notification/send/sms`，参数 `template_type`、`phone_number`、`message`。平台没有校验接口，验证码改由 `VoiceSmsCodeService` 本地生成（4 位）、`Redis` 存摘要、5 分钟有效、校验通过即失效。
+- 新增智控台参数 `sms.gateway.base_url`、`sms.gateway.template_type`（默认 2 验证码）、`sms.gateway.message_template`（默认 `验证码：{{code}}`）、`sms.gateway.mock`，变更在 `db/changelog/202611061600.sql`。`DypnsSmsSender`、`DypnsSmsCodeService` 与 `alibabacloud-dypnsapi20170525` 依赖一并删除；登录注册短信仍走 `dysmsapi`。
+- 平台要求每个请求携带 `Client-Id` 请求头，新增必填参数 `sms.gateway.client_id`（`db/changelog/202611061700.sql`），为空时不发请求、接口报「短信服务暂不可用」。
+- 默认文案模板改为 `您的验证码为{{code}}，五分钟内有效，请勿泄露给他人`（`db/changelog/202611061800.sql`，只覆盖仍是旧默认值的行，用户自定义模板不动）。
+- 语音提示补上「是四位数字」，避免用户报错位数。
+
 ## 后续操作（本次不实现）
 
-升级、更换手机号、解绑也走语音：先播报当前绑定手机号请用户确认，确认后发送短信，验证码通过后再执行变更。设备上的 `phone` 和号码认证校验就是为这些操作留的。本次只保存手机号并完成激活校验，不提供上述三条对话。
+升级、更换手机号、解绑也走语音：先播报当前绑定手机号请用户确认，确认后发送短信，验证码通过后再执行变更。设备上的 `phone` 和本地验证码校验就是为这些操作留的。本次只保存手机号并完成激活校验，不提供上述三条对话。
 
 ## 第三阶段（方案 B）
 

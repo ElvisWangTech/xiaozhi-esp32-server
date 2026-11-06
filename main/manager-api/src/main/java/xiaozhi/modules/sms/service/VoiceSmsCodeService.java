@@ -19,76 +19,77 @@ import xiaozhi.common.redis.RedisKeys;
 import xiaozhi.common.redis.RedisUtils;
 
 /**
- * 语音激活短信：频控，以及 mock 模式下的本地验证码。
- * 真实发送时验证码由阿里云号码认证生成并校验。
+ * 语音激活短信验证码。
+ *
+ * <p>通用短信平台只有发送能力，没有校验接口，所以验证码在本地生成与校验：
+ * 4 位数字、5 分钟有效、最多试 5 次；重发间隔 60 秒，单号码单日最多 10 条。</p>
+ *
+ * <p>验证码只保存 SHA-256 摘要，日志里只在 mock 模式打印明文。</p>
  */
 @Slf4j
 @Service
 @AllArgsConstructor
-public class DypnsSmsCodeService {
+public class VoiceSmsCodeService {
 
     static final Pattern PHONE = Pattern.compile("^1\\d{10}$");
-    private static final int RESEND_INTERVAL_SECONDS = 60;
+    /** 验证码位数，需与 {@link #randomCode()} 和 {@link #verifyOrThrow} 的正则保持一致 */
+    private static final int CODE_LENGTH = 4;
     private static final int CODE_TTL_SECONDS = 300;
+    private static final int RESEND_INTERVAL_SECONDS = 60;
     private static final int MAX_VERIFY_ATTEMPTS = 5;
     private static final int MAX_DAILY_SEND_COUNT = 10;
     private static final long DAY_SECONDS = 60L * 60 * 26;
 
-    private final DypnsSmsSender sender;
+    private final SmsGatewaySender sender;
     private final RedisUtils redisUtils;
 
     public void send(String phone) {
         String normalized = normalizePhone(phone);
         assertResendInterval(normalized);
         assertDailyLimit(normalized);
-        if (sender.isMock()) {
-            String mockCode = String.format("%06d", ThreadLocalRandom.current().nextInt(1_000_000));
-            redisUtils.set(RedisKeys.getVoiceSmsCodeKey(normalized), hash(mockCode), CODE_TTL_SECONDS);
-            log.info("Voice activation SMS mock phone={} code={}", DypnsSmsSender.maskPhone(normalized), mockCode);
-        } else {
-            redisUtils.delete(RedisKeys.getVoiceSmsCodeKey(normalized));
-            sender.sendVerifyCode(normalized);
+        String code = randomCode();
+        boolean mock = sender.isMock();
+        if (!mock) {
+            // 平台失败直接抛出：此时不写缓存、不计数，用户可以立刻重试
+            sender.sendVerifyCode(normalized, code);
         }
-        redisUtils.set(RedisKeys.getVoiceSmsLastSendKey(normalized), System.currentTimeMillis(), RESEND_INTERVAL_SECONDS);
+        redisUtils.set(RedisKeys.getVoiceSmsCodeKey(normalized), hash(code), CODE_TTL_SECONDS);
         redisUtils.delete(RedisKeys.getVoiceSmsAttemptKey(normalized));
-        String dailyKey = RedisKeys.getVoiceSmsDailyKey(normalized, LocalDate.now().toString());
-        redisUtils.increment(dailyKey, DAY_SECONDS);
+        redisUtils.set(RedisKeys.getVoiceSmsLastSendKey(normalized),
+                System.currentTimeMillis(), RESEND_INTERVAL_SECONDS);
+        redisUtils.increment(
+                RedisKeys.getVoiceSmsDailyKey(normalized, LocalDate.now().toString()), DAY_SECONDS);
+        if (mock) {
+            log.info("语音激活短信 mock phone={} code={}", SmsGatewaySender.maskPhone(normalized), code);
+        }
     }
 
     public void verifyOrThrow(String phone, String code) {
         String normalized = normalizePhone(phone);
-        if (StringUtils.isBlank(code) || !code.trim().matches("\\d{4,8}")) {
+        String trimmed = StringUtils.trimToEmpty(code);
+        if (!trimmed.matches("\\d{" + CODE_LENGTH + "}")) {
             throw new RenException(ErrorCode.SMS_CODE_ERROR);
         }
+        String codeKey = RedisKeys.getVoiceSmsCodeKey(normalized);
         String attemptKey = RedisKeys.getVoiceSmsAttemptKey(normalized);
         Object attempts = redisUtils.get(attemptKey);
         int used = attempts instanceof Number ? ((Number) attempts).intValue() : 0;
         if (used >= MAX_VERIFY_ATTEMPTS) {
             throw new RenException(ErrorCode.VOICE_SMS_ATTEMPTS_EXHAUSTED, "验证码错误次数过多，请重新获取", null);
         }
-        String trimmed = code.trim();
-        try {
-            if (sender.isMock()) {
-                Object stored = redisUtils.get(RedisKeys.getVoiceSmsCodeKey(normalized));
-                if (stored == null) {
-                    throw new RenException(ErrorCode.VOICE_SMS_EXPIRED, "请重新获取手机验证码", null);
-                }
-                if (!MessageDigest.isEqual(
-                        hash(trimmed).getBytes(StandardCharsets.UTF_8),
-                        String.valueOf(stored).getBytes(StandardCharsets.UTF_8))) {
-                    throw new RenException(ErrorCode.SMS_CODE_ERROR);
-                }
-            } else {
-                sender.checkVerifyCode(normalized, trimmed);
-            }
-            redisUtils.delete(RedisKeys.getVoiceSmsCodeKey(normalized));
-            redisUtils.delete(attemptKey);
-        } catch (RenException e) {
-            if (e.getCode() == ErrorCode.SMS_CODE_ERROR) {
-                redisUtils.increment(attemptKey, CODE_TTL_SECONDS);
-            }
-            throw e;
+        Object stored = redisUtils.get(codeKey);
+        if (stored == null) {
+            throw new RenException(ErrorCode.VOICE_SMS_EXPIRED, "验证码已过期，请重新获取", null);
         }
+        if (!MessageDigest.isEqual(
+                hash(trimmed).getBytes(StandardCharsets.UTF_8),
+                String.valueOf(stored).getBytes(StandardCharsets.UTF_8))) {
+            redisUtils.increment(attemptKey, CODE_TTL_SECONDS);
+            throw new RenException(ErrorCode.SMS_CODE_ERROR);
+        }
+        // 一次性使用：校验通过立刻失效
+        redisUtils.delete(codeKey);
+        redisUtils.delete(attemptKey);
     }
 
     public static String normalizePhone(String phone) {
@@ -118,6 +119,11 @@ public class DypnsSmsCodeService {
         if (sent >= MAX_DAILY_SEND_COUNT) {
             throw new RenException(ErrorCode.TODAY_SMS_LIMIT_REACHED);
         }
+    }
+
+    private static String randomCode() {
+        int bound = (int) Math.pow(10, CODE_LENGTH);
+        return String.format("%0" + CODE_LENGTH + "d", ThreadLocalRandom.current().nextInt(bound));
     }
 
     private static String hash(String code) {

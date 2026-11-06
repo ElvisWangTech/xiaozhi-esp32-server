@@ -44,7 +44,7 @@ import xiaozhi.modules.device.vo.VoiceActivationSkillAuthVO;
 import xiaozhi.modules.device.vo.VoiceActivationTemplateVO;
 import xiaozhi.modules.timbre.service.TimbreService;
 import xiaozhi.modules.timbre.vo.TimbreDetailsVO;
-import xiaozhi.modules.sms.service.DypnsSmsCodeService;
+import xiaozhi.modules.sms.service.VoiceSmsCodeService;
 import xiaozhi.modules.sys.dao.SysUserDao;
 import xiaozhi.modules.sys.entity.SysUserEntity;
 import xiaozhi.modules.sys.enums.SuperAdminEnum;
@@ -77,7 +77,7 @@ public class VoiceActivationService {
     private final AgentTemplateService agentTemplateService;
     private final TimbreService timbreService;
     private final AgentMcpAccessPointService agentMcpAccessPointService;
-    private final DypnsSmsCodeService smsCodeService;
+    private final VoiceSmsCodeService smsCodeService;
     private final SysUserDao sysUserDao;
     private final SysParamsService sysParamsService;
     private final RedisUtils redisUtils;
@@ -106,7 +106,7 @@ public class VoiceActivationService {
 
     public void sendSms(VoiceActivationSmsDTO dto) {
         String mac = requireMac(dto.getMacAddress());
-        String phone = DypnsSmsCodeService.normalizePhone(dto.getPhone());
+        String phone = VoiceSmsCodeService.normalizePhone(dto.getPhone());
         assertPendingActivation(mac);
         Map<String, Object> cache = activationData(mac);
         if (cache == null || !ACTIVATION_VOICE.equals(String.valueOf(cache.get("activation_type")))) {
@@ -120,7 +120,7 @@ public class VoiceActivationService {
     @Transactional(rollbackFor = Exception.class)
     public VoiceActivationBindVO bind(VoiceActivationBindDTO dto) {
         String mac = requireMac(dto.getMacAddress());
-        String phone = DypnsSmsCodeService.normalizePhone(dto.getPhone());
+        String phone = VoiceSmsCodeService.normalizePhone(dto.getPhone());
         if (deviceService.getDeviceByMacAddress(mac) != null) {
             throw new RenException(ErrorCode.DEVICE_ALREADY_ACTIVATED);
         }
