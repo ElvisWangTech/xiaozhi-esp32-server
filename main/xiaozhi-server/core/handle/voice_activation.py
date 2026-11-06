@@ -1601,6 +1601,13 @@ class VoiceActivationSession:
         if name not in self.auth_failed:
             self.auth_failed.append(name)
 
+    async def _report_auth_failure(self, label, reason, order_history_confirmed=False):
+        self._mark_auth_failed(label)
+        notice = f"{label}暂时没能开通，{reason}。"
+        if self.auth_service == "luckin" and not order_history_confirmed:
+            notice += "如果这个账号还没在瑞幸小程序下过单，可以先下单，再试一次。"
+        await self._advance_after_skill_prompt(notice, self._run_next_auth)
+
     def _auth_finish_prefix(self):
         """汇总开通结果，失败项必须口头提示。"""
         parts = []
@@ -1629,7 +1636,7 @@ class VoiceActivationSession:
         self.auth_label = label
         self.auth_task_id = None
         if service == "luckin":
-            prompt = "接下来开通瑞幸咖啡。请准备接收短信验证码，瑞幸小程序下过单的账号可以试着开通。"
+            prompt = "接下来开通瑞幸咖啡。请准备接收短信验证码，在瑞幸App下过单的账号可以尝试开通。"
         else:
             prompt = "接下来开通滴滴出行。请准备接收短信验证码，并确认账号已实名、已开通免密支付。"
         await self._say(prompt)
@@ -1645,8 +1652,7 @@ class VoiceActivationSession:
             )
         except Exception as exc:
             self.conn.logger.bind(tag=TAG).warning(f"{label}授权启动失败: {exc}")
-            self._mark_auth_failed(label)
-            await self._advance_after_skill_prompt(f"{label}暂时没能开通，授权请求没能完成。", self._run_next_auth)
+            await self._report_auth_failure(label, "授权请求没能完成")
             return
         if str((result or {}).get("status") or "") == "already_bound":
             if label not in self.auth_done:
@@ -1694,8 +1700,7 @@ class VoiceActivationSession:
 
         # 超时：先把失败播报完，再切下一项，否则「正在开通滴滴出行」会盖掉这句。
         await self._cancel_auth_task()
-        self._mark_auth_failed(label)
-        await self._advance_after_skill_prompt(f"{label}开通失败，没有收到授权结果。", self._run_next_auth)
+        await self._report_auth_failure(label, "没有收到授权结果")
 
     async def _advance_after_skill_prompt(self, text, advance):
         await self._say(text)
@@ -1761,7 +1766,6 @@ class VoiceActivationSession:
             else:
                 error_code = (result or {}).get("errorCode")
                 self.conn.logger.bind(tag=TAG).warning(f"{label}授权失败: error_code={error_code}")
-                self._mark_auth_failed(label)
                 reason = {
                     "SCAN_REQUIRED": "这次需要扫码，设备上暂时开通不了",
                     "INVALID_CODE": "验证码没能通过验证",
@@ -1771,7 +1775,8 @@ class VoiceActivationSession:
                     "PASSWORD_FREE_PAYMENT_REQUIRED": "账号还需要开通免密支付",
                     "ORDER_HISTORY_REQUIRED": "这个账号需要先在瑞幸小程序下过单",
                 }.get(error_code, "授权服务没有提供具体原因")
-                notice = f"{label}暂时没能开通，{reason}。"
+                await self._report_auth_failure(label, reason, error_code == "ORDER_HISTORY_REQUIRED")
+                return
             await self._advance_after_skill_prompt(notice, self._run_next_auth)
             return
 
@@ -1822,8 +1827,7 @@ class VoiceActivationSession:
         if action != "code":
             return
         if not self.auth_task_id:
-            self._mark_auth_failed(label)
-            await self._advance_after_skill_prompt(f"{label}开通失败：任务已失效。", self._run_next_auth)
+            await self._report_auth_failure(label, "这次验证已失效")
             return
         try:
             result = await self._post(

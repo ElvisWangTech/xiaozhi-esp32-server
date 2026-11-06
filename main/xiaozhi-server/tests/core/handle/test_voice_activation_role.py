@@ -1186,7 +1186,7 @@ def test_code_wait_timeout_announces_failure_before_next_auth():
     _run_poll(session, voice_activation, after_code=True)
 
     assert [text for kind, text in order if kind == "say"] == [
-        "瑞幸咖啡开通失败，没有收到授权结果。"
+        "瑞幸咖啡暂时没能开通，没有收到授权结果。"
     ]
     assert "瑞幸咖啡" in session.auth_failed
     assert [kind for kind, _ in order] == ["say", "wait", "next"]

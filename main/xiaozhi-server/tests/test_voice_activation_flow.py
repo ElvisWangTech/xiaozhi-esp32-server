@@ -354,16 +354,31 @@ class VoiceActivationFlowTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(session.state, session.ASK_AUTH_CODE)
         session._say.assert_awaited_once_with("刚才没能提交验证码，请再念一遍。")
 
-    async def test_skill_failure_does_not_read_backend_details(self):
+    async def test_luckin_failure_gives_safe_order_history_guidance(self):
         session = self.make_session("skills")
+        session.auth_service = "luckin"
         session.auth_label = "瑞幸咖啡"
         session._run_next_auth = AsyncMock()
-        await session._handle_auth_result({
-            "status": "failed",
-            "errorCode": "PROVIDER_502",
-            "message": "HTTP 502 from upstream",
-        })
-        session._say.assert_awaited_once_with("瑞幸咖啡暂时没能开通，授权服务没有提供具体原因。")
+        for error_code, expected in (
+            ("PROVIDER_502", "瑞幸咖啡暂时没能开通，授权服务没有提供具体原因。"
+             "如果这个账号还没在瑞幸小程序下过单，可以先下单，再试一次。"),
+            ("ORDER_HISTORY_REQUIRED", "瑞幸咖啡暂时没能开通，这个账号需要先在瑞幸小程序下过单。"),
+        ):
+            session._say.reset_mock()
+            await session._handle_auth_result({
+                "status": "failed", "errorCode": error_code, "message": "HTTP 502 from upstream",
+            })
+            session._say.assert_awaited_once_with(expected)
+
+    async def test_authorization_success_is_announced_for_both_skills(self):
+        for service, label in voice.VoiceActivationSession.AUTH_QUEUE:
+            session = self.make_session("skills")
+            session.auth_service = service
+            session.auth_label = label
+            session._run_next_auth = AsyncMock()
+            await session._handle_auth_result({"status": "done"})
+            session._say.assert_awaited_once_with(f"{label}已开通。")
+            session._run_next_auth.assert_awaited_once()
 
     async def test_auth_status_error_keeps_the_existing_task(self):
         session = self.make_session("skills")
