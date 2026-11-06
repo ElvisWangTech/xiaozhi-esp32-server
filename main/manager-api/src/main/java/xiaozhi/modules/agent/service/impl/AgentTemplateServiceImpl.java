@@ -11,7 +11,6 @@ import xiaozhi.modules.agent.entity.AgentTemplateEntity;
 import xiaozhi.modules.agent.service.AgentTemplateService;
 
 import java.util.List;
-import java.util.Objects;
 import java.util.stream.Collectors;
 import com.baomidou.mybatisplus.core.conditions.query.QueryWrapper;
 
@@ -31,7 +30,8 @@ public class AgentTemplateServiceImpl extends CrudRepository<AgentTemplateDao, A
      */
     public AgentTemplateEntity getDefaultTemplate() {
         LambdaQueryWrapper<AgentTemplateEntity> wrapper = new LambdaQueryWrapper<>();
-        wrapper.orderByAsc(AgentTemplateEntity::getSort)
+        wrapper.ge(AgentTemplateEntity::getSort, 0)
+                .orderByAsc(AgentTemplateEntity::getSort)
                 .last("LIMIT 1");
         return this.getOne(wrapper);
     }
@@ -100,7 +100,7 @@ public class AgentTemplateServiceImpl extends CrudRepository<AgentTemplateDao, A
         List<Integer> sortValues = baseMapper.selectList(new QueryWrapper<AgentTemplateEntity>())
                 .stream()
                 .map(AgentTemplateEntity::getSort)
-                .filter(Objects::nonNull)
+                .filter(sort -> sort != null && sort >= 1)
                 .sorted()
                 .collect(Collectors.toList());
         

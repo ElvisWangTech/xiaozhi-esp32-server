@@ -108,6 +108,9 @@ class TTSProviderBase(ABC):
         self.tts_stop_request = False
         self.processed_chars = 0
         self.is_first_sentence = True
+        # 连续合成失败计数与失败文本列表：正常对话链路的 TTS 故障切换依据
+        self.consecutive_tts_failures = 0
+        self._failed_tts_texts = []
 
     def generate_filename(self, extension=".wav"):
         return os.path.join(
@@ -116,6 +119,16 @@ class TTSProviderBase(ABC):
         )
 
     def handle_opus(self, opus_data: bytes):
+        conn = getattr(self, "conn", None)
+        if conn is not None and getattr(conn, "client_abort", False):
+            return
+        epoch = getattr(self, "_tts_epoch", None)
+        if (
+            conn is not None
+            and epoch is not None
+            and epoch != getattr(conn, "tts_epoch", 0)
+        ):
+            return
         logger.bind(tag=TAG).debug(f"推送数据到队列里面帧数～～ {len(opus_data)}")
         self.tts_audio_queue.put((SentenceType.MIDDLE, opus_data, None, getattr(self, 'current_sentence_id', None)))
 
@@ -158,10 +171,12 @@ class TTSProviderBase(ABC):
                 logger.bind(tag=TAG).info(
                     f"语音生成成功: {original_text}，重试{5 - max_repeat_time}次"
                 )
+                self._note_tts_success()
             else:
                 logger.bind(tag=TAG).error(
                     f"语音生成失败: {original_text}，请检查网络或服务是否正常"
                 )
+                self._note_tts_failure(original_text)
             return None
         else:
             tmp_file = self.generate_filename()
@@ -182,10 +197,12 @@ class TTSProviderBase(ABC):
                     logger.bind(tag=TAG).info(
                         f"语音生成成功: {original_text}:{tmp_file}，重试{5 - max_repeat_time}次"
                     )
+                    self._note_tts_success()
                 else:
                     logger.bind(tag=TAG).error(
                         f"语音生成失败: {original_text}，请检查网络或服务是否正常"
                     )
+                    self._note_tts_failure(original_text)
                 self.tts_audio_queue.put((SentenceType.FIRST, None, original_text, getattr(self, 'current_sentence_id', None)))
                 self._process_audio_file_stream(tmp_file, callback=opus_handler)
             except Exception as e:
@@ -225,10 +242,12 @@ class TTSProviderBase(ABC):
                 logger.bind(tag=TAG).info(
                     f"语音生成成功: {original_text}，重试{5 - max_repeat_time}次"
                 )
+                self._note_tts_success()
             else:
                 logger.bind(tag=TAG).error(
                     f"语音生成失败: {original_text}，请检查网络或服务是否正常"
                 )
+                self._note_tts_failure(original_text)
             return None
         else:
             tmp_file = self.generate_filename()
@@ -249,10 +268,12 @@ class TTSProviderBase(ABC):
                     logger.bind(tag=TAG).info(
                         f"语音生成成功: {original_text}:{tmp_file}，重试{5 - max_repeat_time}次"
                     )
+                    self._note_tts_success()
                 else:
                     logger.bind(tag=TAG).error(
                         f"语音生成失败: {original_text}，请检查网络或服务是否正常"
                     )
+                    self._note_tts_failure(original_text)
 
                 return tmp_file
             except Exception as e:
@@ -338,6 +359,102 @@ class TTSProviderBase(ABC):
                 oldest = next(iter(self._sentence_text_map))
                 del self._sentence_text_map[oldest]
 
+    # ------------------------------------------------------------------
+    # TTS 故障切换（正常对话链路）
+    #
+    # to_tts/to_tts_stream 内部会重试并吞掉异常，上层只能靠“连续合成
+    # 失败次数”感知服务是否可用。达到阈值即在文本线程里触发切换：
+    # 真正的切换回到连接事件循环执行，本线程阻塞等待，成功后把本句
+    # 还没播出去的文本移交给新实例。
+    # ------------------------------------------------------------------
+
+    def _note_tts_failure(self, text=None):
+        self.consecutive_tts_failures += 1
+        if text:
+            self._failed_tts_texts.append(text)
+
+    def _note_tts_success(self):
+        self.consecutive_tts_failures = 0
+        self._failed_tts_texts = []
+
+    def _maybe_failover_tts(self):
+        if self.consecutive_tts_failures < 2:
+            return
+        conn = getattr(self, "conn", None)
+        if conn is None:
+            return
+        new_name = None
+        try:
+            from core.utils.provider_failover import failover_module_sync
+
+            new_name = failover_module_sync(conn, "TTS")
+        except Exception as e:
+            logger.bind(tag=TAG).error(f"TTS 切换备用provider失败: {e}")
+        new_tts = getattr(conn, "tts", None)
+        if new_name and new_tts is not None and new_tts is not self:
+            try:
+                self._replay_pending_to_new_tts(new_tts)
+            except Exception as e:
+                logger.bind(tag=TAG).error(f"重放未播文本到备用TTS失败: {e}")
+        self.consecutive_tts_failures = 0
+        self._failed_tts_texts = []
+
+    def _replay_pending_to_new_tts(self, new_tts):
+        """把本句还没播出去的文本移交给新 TTS 实例。"""
+        sid = (
+            getattr(self, "current_sentence_id", None)
+            or getattr(self.conn, "sentence_id", None)
+        )
+        # 本线程还没消费的 DTO 原样转移（含可能的 LAST 收尾）
+        pending = []
+        try:
+            while True:
+                pending.append(self.tts_text_queue.get_nowait())
+        except Exception:
+            pass
+        # 已消费但没合成成功的部分：失败片段 + 分段缓冲里剩余的文本
+        texts = []
+        texts.extend(getattr(self, "_failed_tts_texts", None) or [])
+        try:
+            full = "".join(getattr(self, "tts_text_buff", None) or [])
+            pos = int(getattr(self, "processed_chars", 0) or 0)
+            leftover = full[pos:] if len(full) >= pos else ""
+        except Exception:
+            leftover = ""
+        if leftover:
+            texts.append(leftover)
+        has_last = any(
+            getattr(m, "sentence_type", None) == SentenceType.LAST for m in pending
+        )
+        if sid:
+            new_tts.tts_text_queue.put(
+                TTSMessageDTO(
+                    sentence_id=sid,
+                    sentence_type=SentenceType.FIRST,
+                    content_type=ContentType.ACTION,
+                )
+            )
+        for text in texts:
+            new_tts.tts_text_queue.put(
+                TTSMessageDTO(
+                    sentence_id=sid,
+                    sentence_type=SentenceType.MIDDLE,
+                    content_type=ContentType.TEXT,
+                    content_detail=text,
+                )
+            )
+        for m in pending:
+            new_tts.tts_text_queue.put(m)
+        # 本句已收到 LAST 但还没处理时补一个收尾标记，让新实例正常收口
+        if not has_last and getattr(self, "tts_stop_request", False) and sid:
+            new_tts.tts_text_queue.put(
+                TTSMessageDTO(
+                    sentence_id=sid,
+                    sentence_type=SentenceType.LAST,
+                    content_type=ContentType.ACTION,
+                )
+            )
+
     def get_tts_text(self, sentence_id):
         """获取指定 sentence_id 对应的文本
 
@@ -389,6 +506,7 @@ class TTSProviderBase(ABC):
                     segment_text = self._get_segment_text()
                     if segment_text:
                         self.to_tts_stream(segment_text, opus_handler=self.handle_opus)
+                        self._maybe_failover_tts()
                 elif ContentType.FILE == message.content_type:
                     self._process_remaining_text_stream(opus_handler=self.handle_opus)
                     tts_file = message.content_file
@@ -398,6 +516,7 @@ class TTSProviderBase(ABC):
                         )
                 if message.sentence_type == SentenceType.LAST:
                     self._process_remaining_text_stream(opus_handler=self.handle_opus)
+                    self._maybe_failover_tts()
                     self.tts_audio_queue.put(
                         (message.sentence_type, [], message.content_detail, message.sentence_id)
                     )
@@ -408,6 +527,7 @@ class TTSProviderBase(ABC):
                 logger.bind(tag=TAG).error(
                     f"处理TTS文本失败: {str(e)}, 类型: {type(e).__name__}, 堆栈: {traceback.format_exc()}"
                 )
+                self._maybe_failover_tts()
                 continue
 
     def _audio_play_priority_thread(self):

@@ -12,6 +12,6 @@ public class VoiceActivationSessionVO {
     @Schema(description = "未绑定时的激活方式，voice 或 code")
     private String activationType;
 
-    @Schema(description = "已绑定时的引导状态，nickname 表示还要设置昵称")
+    @Schema(description = "已绑定时的引导状态：nickname 待设昵称，role 待认主和性格，skills 待技能绑定")
     private String onboardingStatus;
 }

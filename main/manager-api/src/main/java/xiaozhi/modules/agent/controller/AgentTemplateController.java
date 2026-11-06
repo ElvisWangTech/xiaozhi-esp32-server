@@ -48,7 +48,7 @@ public class AgentTemplateController {
     @RequiresPermissions("sys:role:normal")
     public Result<List<AgentTemplateEntity>> getAgentTemplates() {
         List<AgentTemplateEntity> list = agentTemplateService
-                .list(new QueryWrapper<AgentTemplateEntity>().orderByAsc("sort"));
+                .list(new QueryWrapper<AgentTemplateEntity>().ge("sort", 0).orderByAsc("sort"));
         return new Result<List<AgentTemplateEntity>>().ok(list);
     }
 

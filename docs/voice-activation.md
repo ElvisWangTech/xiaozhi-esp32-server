@@ -1,6 +1,6 @@
 # 语音激活
 
-未绑定设备除了拿到 6 位激活码，还会拿到 `activation_type=voice`。设备连上语音服务后，由服务端把手机号播报给用户确认，再用阿里云号码认证短信校验。校验通过后，用超级管理员新建一个智能体，并按激活码绑定设备，同时记下手机号。绑定成功后询问助手昵称；昵称确认后自动做默认技能绑定，再询问是否重启设备。
+未绑定设备除了拿到 6 位激活码，还会拿到 `activation_type=voice`。设备连上语音服务后，由服务端把手机号播报给用户确认，再用阿里云号码认证短信校验。校验通过后，用超级管理员新建一个智能体，并按激活码绑定设备，同时记下手机号。绑定成功后询问助手昵称；昵称确认后询问怎么称呼主人，再让用户选一个性格模板并补充设定，然后自动做默认技能绑定，最后直接重启设备。
 
 固件不在本仓库。设备侧对接见 [voice-activation-device.md](voice-activation-device.md)：OTA 返回 `activation_type=voice` 时连接 WebSocket 并对话，不要只把激活码展示成控制面板绑定。`activation_type` 不是 `voice` 时，仍播放「请登录控制面板，输入激活码」。
 
@@ -11,8 +11,8 @@
 | 阶段 | 内容 | 本次 |
 | --- | --- | --- |
 | 第一阶段 激活 | 确认手机号、发短信、校验验证码、超级管理员建智能体并绑定设备 | 实现 |
-| 第二阶段 角色绑定 | 只询问助手昵称，写入智能体 `agentName` | 实现 |
-| 第三阶段 技能绑定 | 昵称确认后自动通用绑定，默认开通瑞幸→滴滴（仅验证码时打断；失败口头提示），最后询问是否重启 | 实现 |
+| 第二阶段 角色绑定 | 助手昵称、主人称呼、性格模板和补充设定 | 实现 |
+| 第三阶段 技能绑定 | 昵称确认后自动通用绑定，默认开通瑞幸→滴滴（仅验证码时打断；失败口头提示），最后直接重启 | 实现 |
 
 控制台原有 `POST /device/bind/{agentId}/{deviceCode}` 保留，给非 voice 路径使用。一个智能体只能绑定一台设备，见下文「一机一体」。
 
@@ -20,13 +20,16 @@
 
 1. 设备不存在时，`POST /ota/` 仍生成 6 位激活码（Redis，24 小时），响应增加 `activation_type=voice`。激活码写入 `ota:activation:data:*` 时一并写入 `activation_type`。
 2. 设备连接 `xiaozhi-server`。配置接口返回 10042 时，再查语音激活会话。类型为 `voice` 才进入语音状态机，并使用公共配置里的 ASR/TTS 听和说。
-3. 请用户说手机号。从识别文本抽出 11 位号码（含中文数字）。不是合法手机号就重问。
-4. 逐位播报号码，请用户说「确认」或「重说」。
-5. 确认后调用发送接口。成功后请用户说出短信验证码。失败则播报原因，留在确认步骤，再说「确认」会重发。
-6. 校验通过后：查找 `super_admin=1` 的用户（取 id 最小的一个），**新建**一个智能体（不按手机号查找已有智能体），用默认模板创建，初始名为「小智」。按激活码写入 `ai_device`，`user_id` 为该管理员，并保存手机号，`onboarding_status=nickname`。同一手机号再绑另一台设备时，再新建一个智能体。
-7. 播报绑定成功，重新拉取该设备的私有配置。若 `voice_onboarding=nickname`，请用户说助手昵称，播报确认后写入 `agentName`，状态改为 `skills`。
-8. 昵称确认后**不询问用户**，自动做通用技能绑定（`POST /skills` → portal_lite `/api/device/bind` + `/api/portal/invite`）。成功后**默认**依次开通瑞幸咖啡、滴滴出行（先瑞幸：滴滴常需实名/免密支付）。`/skills/auth` → portal automation；仅 `waiting_code` 时要短信验证码；说「不要/跳过」则 cancel 该项。单项失败会当场播报原因，全部结束后再汇总失败项并提示可说「绑定技能」重试，然后问是否重启。麦当劳暂不支持。通用绑定失败保持 `skills`。
-9. 断线重连：已绑定且状态为 `nickname` 时只继续问昵称；为 `skills` 时继续通用绑定与默认授权流程，不再走激活。
+3. 开场先打招呼：「你好，我是 X-Atom，新一代物理AI智能体，让AI走进现实。第一次见面，我该怎么称呼您呢？」用户说出称呼（例如「叫我老王」）就复述确认，提前记下作为主人称呼；没听出、跳过或答非所问都不卡住，直接进入报手机号，称呼留到第 9 步再问。
+4. 请用户说手机号。从识别文本抽出 11 位号码（含中文数字）。不是合法手机号就重问。
+5. 逐位播报号码，请用户说「确认」或「重说」。
+6. 确认后调用发送接口。成功后请用户说出短信验证码。失败则播报原因，留在确认步骤，再说「确认」会重发。
+7. 校验通过后：查找 `super_admin=1` 的用户（取 id 最小的一个），**新建**一个智能体（不按手机号查找已有智能体），用默认模板创建，初始名为「小智」。按激活码写入 `ai_device`，`user_id` 为该管理员，并保存手机号，`onboarding_status=nickname`。同一手机号再绑另一台设备时，再新建一个智能体。
+8. 播报绑定成功，重新拉取该设备的私有配置。若 `voice_onboarding=nickname`，请用户说助手昵称。可以说「小智」，也可以说「你的昵称是小智」。播报确认后写入 `agentName`，状态改为 `role`。
+9. 认主：开场已经确认过称呼时不再重复提问，直接播报「好的，我是{昵称}」进入性格选择；否则问「我该怎么称呼您呢？」，用户可以直接说「老板」，也可以说「叫我老板」，确认后进入性格选择。
+10. 性格：按排序播报 `ai_agent_template` 的名称，第一项就是当前默认性格（可爱女生），说「不用换」「保持现在的」也等于选它。确认后问还有没有补充。说「没有」就结束；说了补充则追加到角色设定。然后把所选模板的 `systemPrompt`、主人称呼和补充写入智能体，状态改为 `skills`。
+11. 角色设定结束后**不询问用户**，自动做通用技能绑定（`POST /skills` → portal_lite `/api/device/bind` + `/api/portal/invite`）。**只有这一次**会接着自动开通瑞幸咖啡、滴滴出行（先瑞幸：滴滴常需实名/免密支付）。第一次调用 `/skills/auth` 后，状态从 `skills` 改为 `skills_manual`，重连和唤醒都不再自动开通。之后用户要自己说「绑定技能」。`/skills/auth` → portal automation；仅 `waiting_code` 时要短信验证码；说「不要/跳过」则 cancel 该项。单项失败会当场播报原因，全部结束后再汇总失败项并提示可说「绑定技能」重试，然后播报「配置完毕，设备即将重启」并直接下发重启（不询问用户；不重启设备 MCP 工具加载不到）。麦当劳暂不支持。通用绑定失败保持 `skills`。
+12. 断线重连：状态为 `nickname` 时只继续问昵称；为 `role` 时从「我该怎么称呼您呢？」重新开始；为 `skills` 时继续通用绑定，并仍会自动授权（这一次还没发起过）。为 `skills_quiet` 时只静默重试通用绑定，成功后结束引导，并告诉用户可以说「绑定技能」再开通瑞幸或滴滴。`skills_manual` 和 `done` 不再自动拉起；用户说「绑定技能」才会再开通。
 
 验证码阶段说「重说」会回到手机号。说「重发」会再发一条短信（仍受频控）。
 
@@ -37,7 +40,7 @@
 | 字段 | 说明 |
 | --- | --- |
 | `phone` | 绑定手机号，可空。控制台手工绑定的旧设备为空。首页智能体卡片通过列表接口的 `phone` 字段展示，没有号码时显示「未记录」。右上角搜索同时匹配这个号码，支持片段，例如输入 `136` |
-| `onboarding_status` | `nickname` 待设置昵称；`skills` 待技能绑定；`done` 已完成。空值视为已完成，避免老设备被追问 |
+| `onboarding_status` | `nickname` 待设置昵称；`role` 待认主和性格；`skills` 待技能绑定；`done` 已完成。空值视为已完成，避免老设备被追问 |
 
 发送短信时，把已确认的手机号写入该设备的激活 Redis，校验时必须和请求里的手机号一致。
 
@@ -50,7 +53,7 @@
 请求：`{ "macAddress": "..." }`
 
 - 未绑定且激活码仍在：`{ "bound": false, "activationType": "voice" }`。没有 `activation_type` 的旧缓存视为 `code`。
-- 已绑定：`{ "bound": true, "onboardingStatus": "nickname" | "skills" }`，没有引导任务时 `onboardingStatus` 为空。
+- 已绑定：`{ "bound": true, "onboardingStatus": "nickname" | "role" | "skills" }`，没有引导任务时 `onboardingStatus` 为空。
 
 `POST /device/voice-activation/sms`
 
@@ -68,7 +71,19 @@
 
 请求：`{ "macAddress": "...", "nickname": "小助" }`
 
-仅当 `onboarding_status=nickname` 时更新智能体名称，然后把状态改为 `skills`。
+仅当 `onboarding_status=nickname` 时更新智能体名称，然后把状态改为 `role`。
+
+`POST /device/voice-activation/role/templates`
+
+请求：`{ "macAddress": "..." }`
+
+仅当 `onboarding_status=role` 时，按排序返回仍在使用的性格模板。每项包含名称和豆包音色编码，例如 `[{"name":"可爱女生","voice":"saturn_zh_female_keainvsheng_tob"},{"name":"甜美小源","voice":"zh_female_tianmeixiaoyuan_uranus_bigtts"},{"name":"温婉珊珊","voice":"saturn_zh_female_wenwanshanshan_cs_tob"}]`。`sort < 0` 的模板不返回。
+
+`POST /device/voice-activation/role`
+
+请求：`{ "macAddress": "...", "ownerTitle": "老板", "templateName": "英语老师", "supplement": "说话温柔一点" }`
+
+`supplement` 可空。仅当状态为 `role` 时，把模板的 `systemPrompt`、TTS 模型和音色抄到智能体，并追加主人称呼和补充，然后把状态改为 `skills`。`{{assistant_name}}` 仍留给配置下发时替换成昵称。
 
 `POST /device/voice-activation/skills`
 
@@ -106,7 +121,7 @@
 
 授权流程结束后调用：可选 `portal/finish`，把 `onboarding_status` 改为 `done`，清掉邀请缓存。
 
-已绑定设备的 `POST /config/agent-models`：需要昵称时返回 `voice_onboarding=nickname`；需要技能绑定时返回 `voice_onboarding=skills`。
+已绑定设备的 `POST /config/agent-models`：需要昵称时返回 `voice_onboarding=nickname`；需要认主和性格时返回 `voice_onboarding=role`；需要技能绑定时返回 `voice_onboarding=skills`。
 
 ## 短信
 
@@ -139,11 +154,21 @@
 
 控制台 `POST /device/bind/{agentId}/{deviceCode}` 和手动添加设备走同一条限制：该智能体下已经有设备时拒绝，提示「该智能体已绑定设备，请新建智能体后再绑定」。已经绑了多台的历史数据不拆开，卡片上的手机号会用顿号拼在一起。
 
-## 默认音色
+## 默认模型
 
-未绑定设备的公共配置固定 `TTS_MimoTTS`。已绑定设备用智能体自己的音色。
+未绑定设备的公共配置固定：
 
-2026-10-21 起，TTS 默认模型、智能体模板，以及仍指向 `TTS_HuoshanDoubleStreamTTS` 的已有智能体，都改为小米 MiMo 语音合成，音色为「冰糖」（`TTS_MimoTTS_0001`）。其它音色模型不受影响。变更在 `db/changelog/202610211150.sql`，随 manager-api 启动执行。
+| 模块 | 模型 |
+| --- | --- |
+| ASR | 豆包语音识别2.0(流式)，`ASR_DoubaoStreamASRV2` |
+| LLM | deepseek-chat，`LLM_DeepSeekLLM` |
+| TTS | 豆包语音合成2.0(流式)，`TTS_HSDSTTS_V2`，音色「可爱女生」（`TTS_HSDSTTS_V2_0003`） |
+
+已绑定设备用智能体自己的模型。语音激活 `bind` 走 `createAgentForUser`，从默认模板复制这三项。
+
+激活话术的音色跟着**默认模板**走：`/config/server-base` 把默认模板绑定的音色写成 `private_voice` 下发，不再沿用 `ai_model_config` 里 TTS 模型自身的 `speaker`（那个值可能还是旧音色）。缓存里存的音色和当前默认模板对不上时会丢掉缓存重建，所以换模板音色不需要手工清 Redis。
+
+2026-10-27 起，上述三项的默认模型、仍指向小米 MiMo 的智能体模板和已有智能体，都改为这一组。其它模型不受影响。变更在 `db/changelog/202610271430.sql`，随 manager-api 启动执行。
 
 ## 变更记录
 
@@ -165,13 +190,39 @@
 
 - 重构为默认开通：通用绑定后签发 invite，自动跑瑞幸→滴滴 automation；仅 `waiting_code` 时要短信验证码；拒绝则 cancel 该项；失败当场与结束时口头提示。新增 `portal_lite.admin_token` 与 `/skills/auth/{status,code,cancel}`。
 
+### 2026-10-27
+
+- 昵称可以听「你的昵称是小智」这类整句。确认后先认主、再选性格模板并接受补充，写完角色设定才进入 `skills`。新增状态 `role`，以及 `/role/templates`、`/role`。
+- 默认 ASR / LLM / TTS 从小米 MiMo 改为豆包语音识别2.0(流式)、deepseek-chat、豆包语音合成2.0(流式)。未绑定设备的公共配置、智能体模板，以及仍使用 MiMo 的已有智能体一起切换，语音激活新建的智能体因此也用这一组。
+- 授权技能（瑞幸、滴滴）只在第一次进入 `skills` 时自动开通。发起后状态改为 `skills_manual`，重连和唤醒不再自动开通；用户说「绑定技能」才会再绑。`skills_quiet` 只重试通用绑定。
+
+### 2026-11-03
+
+- 配置完毕后不再询问是否重启：汇总结果后直接播报「配置完毕，设备即将重启」，等这句播完再调设备 MCP `self.qiniu.custom.restart`。原因是不重启时设备 MCP 工具加载不到，技能配了也用不了。原 `ask_reboot` 状态与确认/拒绝分支删除，改为终态 `rebooting`，期间用户输入不再处理。
+- 授权等待收紧：提交验证码后查 `/skills/auth/status` 的时间从 90 秒改为 15 秒（`AUTH_CODE_WAIT_SECONDS=15`，间隔 1.5 秒，10 次）。没有验证码环节的自动化登录仍按 90 秒等（`AUTH_POLL_WAIT_SECONDS=90`）。超时、`failed`、`skipped`、`already_bound`、启动异常等在切到下一项或汇总前都先 `_wait_spoken()`，避免「瑞幸咖啡开通失败」被「正在开通滴滴出行」盖掉。
+
+### 2026-11-04
+
+- 语音激活开场先打招呼：「你好，我是 X-Atom，新一代物理AI智能体，让AI走进现实。第一次见面，我该怎么称呼您呢？」用户说出称呼就复述确认并提前记下，角色绑定时不再重复问；没说出来就继续报手机号，留到认主那一步再问。新增状态 `greet`、`confirm_greet`。
+- 默认模板从「湾湾小何」换成「甜美小源」，定位为 x-atom 专业客服（中英双语、耐心解答、偶尔给情绪价值），音色 `TTS_HSDSTTS_V2_0021`。
+- 性格模板「湾湾小何」改名为「温婉珊珊」，提示词整段替换，音色换成 `TTS_HSDSTTS_V2_0030`。排序：甜美小源 1（默认）、温婉珊珊 2、星际游子 3、英语老师 4。变更在 `db/changelog/202611041600.sql`。
+- 性格选择第一项就是当前默认性格，语音里会说明「也就是现在的我，不换也可以」；说「不用换」「保持现在的」「随便」都按选它处理，确认话术改成「性格就保持甜美小源，不换了」。
+- 修激活话术仍用「湾湾小何」音色的问题：`ConfigServiceImpl.getConfig` 原来给未绑定设备传 `voice=null`，TTS 回落到 `ai_model_config` 里 `TTS_HSDSTTS_V2` 的 `speaker`（还是 `zh_female_xiaohe_uranus_bigtts`）。改为取默认模板绑定的音色写成 `private_voice`，并在命中 Redis 缓存时比对音色，不一致就重建缓存。
+
+### 2026-11-05
+
+- 默认模板从「甜美小源」换成「可爱女生」：温柔、体贴、爱撒娇、偶尔闹点小脾气，但答应的事情一定做到。音色换成豆包语音合成2.0 的「可爱女生」（`TTS_HSDSTTS_V2_0003`，`saturn_zh_female_keainvsheng_tob`）。变更在 `db/changelog/202611051700.sql`。
+- 「甜美小源」保留为可选模板（提示词、音色不变），排序调整为：可爱女生 1（默认）、甜美小源 2、温婉珊珊 3、星际游子 4、英语老师 5。
+- 语音里的确认话术随之变为「性格就保持可爱女生，不换了，对吗？」，`persona_menu` 的第一项也变成「一，可爱女生，也就是现在的我，不换也可以」。Python 侧无硬编码，模板顺序全部来自 `ai_agent_template.sort`。
+- 默认昵称从「助手」改为「牛小七」：用户说「算了」「不想设置」跳过昵称时，`_NICKNAME_DEFAULT` 兜底为牛小七，写进 `agentName` 后提示词里的 `{{assistant_name}}` 也是牛小七。改动在 `core/handle/voice_activation.py`，`_begin_owner` 的 `self.nickname or _NICKNAME_DEFAULT` 同步复用同一常量，不再各写一份。
+
 ## 后续操作（本次不实现）
 
 升级、更换手机号、解绑也走语音：先播报当前绑定手机号请用户确认，确认后发送短信，验证码通过后再执行变更。设备上的 `phone` 和号码认证校验就是为这些操作留的。本次只保存手机号并完成激活校验，不提供上述三条对话。
 
 ## 第三阶段（方案 B）
 
-激活和昵称完成之前，不询问技能。昵称确认后：先自动做**通用技能绑定**，再**默认**跑瑞幸→滴滴授权自动化（不问「要开通吗」），仅短信验证码阶段打断用户；失败会提示原因，最后询问是否重启。
+激活、昵称、认主和性格完成之前，不询问技能。角色设定写入后：先自动做**通用技能绑定**，再**仅这一次**默认跑瑞幸→滴滴授权自动化（不问「要开通吗」），仅短信验证码阶段打断用户；失败会提示原因，最后询问是否重启。授权一旦发起，状态变为 `skills_manual`，之后只能用户说「绑定技能」再开通。每个授权技能开通前都会查是否已有凭证：瑞幸看 `luckin_token`，滴滴看 `didi_key`。已经开通的跳过。用户说「重新绑定」才会再开通。
 
 真实凭证由 portal_lite Playwright 自动化写入 skills；本阶段不再只写 `auth_bind` 元数据。
 
@@ -179,16 +230,17 @@
 
 | 步骤 | `onboarding_status` | 对话 |
 | --- | --- | --- |
-| 设备绑定成功 | `nickname` | 询问助手昵称 |
-| 昵称确认写入 | `skills` | 自动通用技能绑定，不询问用户 |
-| 通用绑定成功 | `skills` | 「正在开通瑞幸咖啡」——默认启动 automation |
-| 瑞幸 `waiting_code` | `skills` | 「请说出瑞幸短信验证码」；「不要/跳过」则 cancel |
-| 瑞幸结束 | `skills` | 自动开通滴滴出行（同上） |
-| 授权做完 | `done` | 汇总成功/失败（失败含原因；滴滴失败可提示实名/免密），`complete` 后问是否重启 |
-| 用户确认重启 | `done` | 设备 MCP `self.qiniu.custom.restart` |
-| 用户拒绝重启 | `done` | 「好的，我们可以开始聊天了」 |
+| 设备绑定成功 | `nickname` | 询问助手昵称。可说「你的昵称是小智」 |
+| 昵称确认写入 | `role` | 问「我该怎么称呼您呢？」，确认主人称呼 |
+| 称呼确认 | `role` | 播报性格模板，用户说序号或名字，再问补充 |
+| 性格和补充写入 | `skills` | 自动通用技能绑定，不询问用户 |
+| 通用绑定成功，且还没自动授权过 | `skills` → `skills_manual` | 「正在开通瑞幸咖啡」——只这一次默认启动 automation |
+| 瑞幸 `waiting_code` | `skills_manual` | 「请说出瑞幸短信验证码」；「不要/跳过」则 cancel。同一次对话里继续，不再重新自动开始 |
+| 瑞幸结束 | `skills_manual` | 同一次对话里继续开通滴滴出行 |
+| 授权做完 | `done` | 汇总成功/失败（失败含原因；滴滴失败可提示实名/免密），`complete` 后直接重启 |
+| 重启下发 | `done` | 播报「配置完毕，设备即将重启」，等播完再调设备 MCP `self.qiniu.custom.restart` |
 
-断线重连：`voice_onboarding=skills` 时继续通用绑定与默认授权。通用绑定失败可说「确认」重试，或「稍后再说」先聊天，之后再说「绑定技能」。已是 `done` 的老设备不回填。
+断线重连：`voice_onboarding=role` 时从认主重新开始；`voice_onboarding=skills` 时继续通用绑定，并在还没发起过授权时自动开通。`skills_quiet` 只重试通用绑定。`skills_manual` 和 `done` 不自动开通，用户说「绑定技能」才进入授权。通用绑定失败可说「确认」重试，或「稍后再说」先聊天。已是 `done` 的老设备不回填，仍可以说「绑定技能」。
 
 部署注意：`portal_lite` 须提供 `/api/device/bind`、`/api/portal/invite`、`/api/automation/{start,status,code,cancel}`；并配置 `admin_token`（或与 bind_token 相同）。
 

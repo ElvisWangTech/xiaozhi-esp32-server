@@ -158,10 +158,10 @@
           <mxGeometry relative="1" as="geometry"/>
         </mxCell>
 
-        <mxCell id="p7" value="瑞幸→滴滴做完&#xa;失败汇总后问重启" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;" vertex="1" parent="lane-py">
+        <mxCell id="p7" value="瑞幸→滴滴做完&#xa;汇总失败后直接重启" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;" vertex="1" parent="lane-py">
           <mxGeometry x="30" y="920" width="180" height="50" as="geometry"/>
         </mxCell>
-        <mxCell id="d7" value="确认或拒绝重启" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;" vertex="1" parent="lane-device">
+        <mxCell id="d7" value="播放「配置完毕，设备即将重启」" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;" vertex="1" parent="lane-device">
           <mxGeometry x="30" y="930" width="140" height="40" as="geometry"/>
         </mxCell>
         <mxCell id="a8" value="POST /skills/complete&#xa;status=done" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;" vertex="1" parent="lane-api">
@@ -177,10 +177,10 @@
           <mxGeometry relative="1" as="geometry"/>
         </mxCell>
 
-        <mxCell id="p8" value="确认：MCP restart&#xa;拒绝：进入闲聊" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;" vertex="1" parent="lane-py">
+        <mxCell id="p8" value="播报完直接下发&#xa;MCP restart" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;" vertex="1" parent="lane-py">
           <mxGeometry x="30" y="1030" width="180" height="50" as="geometry"/>
         </mxCell>
-        <mxCell id="d8" value="重启或日常对话" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;" vertex="1" parent="lane-device">
+        <mxCell id="d8" value="设备重启" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;" vertex="1" parent="lane-device">
           <mxGeometry x="30" y="1040" width="140" height="40" as="geometry"/>
         </mxCell>
         <mxCell id="e18" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;" edge="1" parent="1" source="p7" target="p8">
@@ -190,7 +190,7 @@
           <mxGeometry relative="1" as="geometry"/>
         </mxCell>
 
-        <mxCell id="note" value="方案 B：通用绑定后默认开通瑞幸→滴滴（滴滴常需实名/免密）；仅 waiting_code 打断要验证码；失败当场与结束时口头提示；完成后才问重启。麦当劳暂不支持。" style="text;html=1;strokeColor=none;fillColor=none;align=left;verticalAlign=top;whiteSpace=wrap;rounded=0;" vertex="1" parent="1">
+        <mxCell id="note" value="方案 B：通用绑定后默认开通瑞幸→滴滴（滴滴常需实名/免密）；仅 waiting_code 打断要验证码；失败当场与结束时口头提示；完成后播报「配置完毕，设备即将重启」并直接重启，不询问用户（不重启设备 MCP 工具加载不到）。麦当劳暂不支持。" style="text;html=1;strokeColor=none;fillColor=none;align=left;verticalAlign=top;whiteSpace=wrap;rounded=0;" vertex="1" parent="1">
           <mxGeometry x="40" y="1480" width="1100" height="40" as="geometry"/>
         </mxCell>
       </root>

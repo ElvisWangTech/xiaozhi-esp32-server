@@ -788,3 +788,66 @@ databaseChangeLog:
         - sqlFile:
             encoding: utf8
             path: classpath:db/changelog/202610261530.sql
+  - changeSet:
+      id: 202610271430
+      author: qiniu
+      changes:
+        - sqlFile:
+            encoding: utf8
+            path: classpath:db/changelog/202610271430.sql
+  - changeSet:
+      id: 202610271700
+      author: qiniu
+      changes:
+        - sqlFile:
+            encoding: utf8
+            path: classpath:db/changelog/202610271700.sql
+  - changeSet:
+      id: 202610281410
+      author: qiniu
+      changes:
+        - sqlFile:
+            encoding: utf8
+            path: classpath:db/changelog/202610281410.sql
+  - changeSet:
+      id: 202611021240
+      author: qiniu
+      changes:
+        - sqlFile:
+            encoding: utf8
+            path: classpath:db/changelog/202611021240.sql
+  - changeSet:
+      id: 202611021410
+      author: qiniu
+      changes:
+        - sqlFile:
+            encoding: utf8
+            path: classpath:db/changelog/202611021410.sql
+  - changeSet:
+      id: 202611021515
+      author: qiniu
+      changes:
+        - sqlFile:
+            encoding: utf8
+            path: classpath:db/changelog/202611021515.sql
+  - changeSet:
+      id: 202611041600
+      author: qiniu
+      changes:
+        - sqlFile:
+            encoding: utf8
+            path: classpath:db/changelog/202611041600.sql
+  - changeSet:
+      id: 202611051600
+      author: qiniu
+      changes:
+        - sqlFile:
+            encoding: utf8
+            path: classpath:db/changelog/202611051600.sql
+  - changeSet:
+      id: 202611051700
+      author: qiniu
+      changes:
+        - sqlFile:
+            encoding: utf8
+            path: classpath:db/changelog/202611051700.sql

@@ -219,8 +219,9 @@ prompt: |
 # 默认系统提示词模板文件
 prompt_template: agent-base-prompt.txt
 
-# 系统错误时的回复
-system_error_response: "主人，小智现在有点忙，我们稍后再试吧。"
+# 系统错误时的回复（{title} 会被替换成用户自己的称呼，未设置称呼时自动省略）
+# 直接说明后台服务出问题，不引导用户重复说或稍后重试：服务不可用时重试必然失败。
+system_error_response: "{title}抱歉，我的后台服务出了一点问题，暂时帮不了您。"
 
 # 结束语prompt
 end_prompt:
@@ -1116,6 +1117,41 @@ TTS:
     format: wav
     # style_prompt: 用温柔自然的女声说话，语速适中。
     output_dir: tmp/
+  QwenTTS:
+    # 阿里云百炼 Qwen3-TTS（非实时语音合成 + SSE 流式输出）
+    # API Key 获取：https://bailian.console.aliyun.com/?tab=model#/api-key
+    # 文档：https://help.aliyun.com/zh/model-studio/qwen-tts-api
+    # 特点：首包快、成本低；音频固定 PCM 24kHz/16bit/单声道，单次请求上限 600 字符
+    # 音色列表：https://help.aliyun.com/zh/model-studio/qwen-tts-voice-list
+    type: qwen_tts
+    api_key: 你的阿里云百炼API Key
+    model: qwen3-tts-flash
+    # 推荐音色：Cherry(芊悦)、Serena(苏瑶)、Ethan(晨煦)、Chelsie(千雪)、Nofish、Sunny(四川话)
+    voice: Cherry
+    output_dir: tmp/
+    # 以下可不用设置，使用默认设置
+    # api_url: https://dashscope.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation
+    # language_type: Chinese  # Auto/Chinese/English/German/Italian/Portuguese/Spanish/Japanese/Korean/French/Russian
+    # max_chars: 600  # 单次请求文本上限，超长会自动切分
+  QwenAudioTTS:
+    # 阿里云百炼 Qwen-Audio-TTS（非实时语音合成 + SSE 流式输出）
+    # 文档：https://help.aliyun.com/zh/model-studio/qwen-audio-tts-http-python-sdk
+    # 相比 QwenTTS：拟人度更高、支持自然语言指令/方言/情感标签，
+    # 且采样率、语速、音调、音量均可配，采样率可直接对齐设备无需重采样
+    # 音色列表：https://help.aliyun.com/zh/model-studio/qwen-audio-tts-voice-list
+    type: qwen_audio_tts
+    api_key: 你的阿里云百炼API Key
+    model: qwen-audio-3.1-tts-flash
+    voice: longanhuan_v3.1
+    output_dir: tmp/
+    # 以下可不用设置，使用默认设置
+    # api_url: https://dashscope.aliyuncs.com/api/v1/services/audio/tts/SpeechSynthesizer
+    # instruction: 请用温柔亲切的语气说话  # 自然语言指令，控制情感/方言/角色
+    # language_hints: zh  # zh/en/ja/ko/fr/de/ru/pt/es/it/th/id/vi/ms/fil/ar
+    # rate: 1.0    # 语速 0.5~2.0
+    # pitch: 1.0   # 音调 0.5~2.0
+    # volume: 50   # 音量 0~100
+    # max_chars: 600
   CustomTTS:
     # 自定义的TTS接口服务，请求参数可自定义，可接入众多TTS服务
     # 以本地部署的KokoroTTS为例

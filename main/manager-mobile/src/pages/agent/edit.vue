@@ -720,6 +720,16 @@ async function fetchAllLanguag(ttsModelId: string, options: VoiceSelectionOption
 //   }
 // }
 
+function roleTemplateLlmId(templateLlmId?: string, currentLlmId?: string) {
+  if (templateLlmId && templateLlmId !== 'LLM_MimoLLM') {
+    return templateLlmId
+  }
+  if (currentLlmId && currentLlmId !== 'LLM_MimoLLM') {
+    return currentLlmId
+  }
+  return 'LLM_DeepSeekLLM'
+}
+
 // 选择角色模板
 async function selectRoleTemplate(templateId: string) {
   if (ttsOptionsLoading.value) {
@@ -741,8 +751,8 @@ async function selectRoleTemplate(templateId: string) {
       systemPrompt: template.systemPrompt || formData.value.systemPrompt,
       vadModelId: template.vadModelId || formData.value.vadModelId,
       asrModelId: template.asrModelId || formData.value.asrModelId,
-      llmModelId: template.llmModelId || formData.value.llmModelId,
-      slmModelId: template.llmModelId || formData.value.slmModelId,
+      llmModelId: roleTemplateLlmId(template.llmModelId, formData.value.llmModelId),
+      slmModelId: roleTemplateLlmId(template.llmModelId, formData.value.slmModelId),
       vllmModelId: template.vllmModelId || formData.value.vllmModelId,
       intentModelId: template.intentModelId || formData.value.intentModelId,
       memModelId: template.memModelId || formData.value.memModelId,

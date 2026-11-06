@@ -1,6 +1,8 @@
 package xiaozhi.modules.device.service;
 
+import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 
 import org.apache.commons.lang3.StringUtils;
@@ -27,15 +29,21 @@ import xiaozhi.common.redis.RedisKeys;
 import xiaozhi.common.redis.RedisUtils;
 import xiaozhi.modules.agent.dto.AgentCreateDTO;
 import xiaozhi.modules.agent.entity.AgentEntity;
+import xiaozhi.modules.agent.entity.AgentTemplateEntity;
 import xiaozhi.modules.agent.service.AgentMcpAccessPointService;
 import xiaozhi.modules.agent.service.AgentService;
+import xiaozhi.modules.agent.service.AgentTemplateService;
 import xiaozhi.modules.device.dto.VoiceActivationBindDTO;
 import xiaozhi.modules.device.dto.VoiceActivationNicknameDTO;
+import xiaozhi.modules.device.dto.VoiceActivationRoleDTO;
 import xiaozhi.modules.device.dto.VoiceActivationSmsDTO;
 import xiaozhi.modules.device.entity.DeviceEntity;
 import xiaozhi.modules.device.vo.VoiceActivationBindVO;
 import xiaozhi.modules.device.vo.VoiceActivationSessionVO;
 import xiaozhi.modules.device.vo.VoiceActivationSkillAuthVO;
+import xiaozhi.modules.device.vo.VoiceActivationTemplateVO;
+import xiaozhi.modules.timbre.service.TimbreService;
+import xiaozhi.modules.timbre.vo.TimbreDetailsVO;
 import xiaozhi.modules.sms.service.DypnsSmsCodeService;
 import xiaozhi.modules.sys.dao.SysUserDao;
 import xiaozhi.modules.sys.entity.SysUserEntity;
@@ -48,7 +56,14 @@ import xiaozhi.modules.sys.service.SysParamsService;
 public class VoiceActivationService {
 
     public static final String ONBOARDING_NICKNAME = "nickname";
+    public static final String ONBOARDING_ROLE = "role";
     public static final String ONBOARDING_SKILLS = "skills";
+    /** 用户已经跳过一次。唤醒后仍会重试通用绑定，失败不再播报。 */
+    public static final String ONBOARDING_SKILLS_QUIET = "skills_quiet";
+    /**
+     * 授权技能已经自动启动过一次。不再随重连或唤醒自动开通，只接受用户主动说「绑定技能」。
+     */
+    public static final String ONBOARDING_SKILLS_MANUAL = "skills_manual";
     public static final String ONBOARDING_DONE = "done";
     public static final String ACTIVATION_VOICE = "voice";
     private static final String DEFAULT_AGENT_NAME = "小智";
@@ -59,6 +74,8 @@ public class VoiceActivationService {
 
     private final DeviceService deviceService;
     private final AgentService agentService;
+    private final AgentTemplateService agentTemplateService;
+    private final TimbreService timbreService;
     private final AgentMcpAccessPointService agentMcpAccessPointService;
     private final DypnsSmsCodeService smsCodeService;
     private final SysUserDao sysUserDao;
@@ -146,8 +163,90 @@ public class VoiceActivationService {
         }
         agent.setAgentName(nickname);
         agentService.updateById(agent);
+        device.setOnboardingStatus(ONBOARDING_ROLE);
+        deviceService.updateById(device);
+    }
+
+    public List<VoiceActivationTemplateVO> listRoleTemplates(String macAddress) {
+        requireRoleDevice(requireMac(macAddress));
+        QueryWrapper<AgentTemplateEntity> wrapper = new QueryWrapper<>();
+        wrapper.ge("sort", 0);
+        wrapper.orderByAsc("sort");
+        List<AgentTemplateEntity> templates = agentTemplateService.list(wrapper);
+        List<VoiceActivationTemplateVO> items = new ArrayList<>();
+        if (templates == null) {
+            return items;
+        }
+        for (AgentTemplateEntity template : templates) {
+            if (template == null || StringUtils.isBlank(template.getAgentName())) {
+                continue;
+            }
+            String name = template.getAgentName().trim();
+            boolean duplicated = false;
+            for (VoiceActivationTemplateVO existing : items) {
+                if (name.equals(existing.getName())) {
+                    duplicated = true;
+                    break;
+                }
+            }
+            if (duplicated) {
+                continue;
+            }
+            VoiceActivationTemplateVO item = new VoiceActivationTemplateVO();
+            item.setName(name);
+            item.setVoice(templateVoiceCode(template.getTtsVoiceId()));
+            items.add(item);
+        }
+        return items;
+    }
+
+    private String templateVoiceCode(String ttsVoiceId) {
+        if (StringUtils.isBlank(ttsVoiceId)) {
+            return null;
+        }
+        TimbreDetailsVO timbre = timbreService.get(ttsVoiceId);
+        if (timbre == null || StringUtils.isBlank(timbre.getTtsVoice())) {
+            return null;
+        }
+        return timbre.getTtsVoice().trim();
+    }
+
+    @Transactional(rollbackFor = Exception.class)
+    public void saveRole(VoiceActivationRoleDTO dto) {
+        String mac = requireMac(dto.getMacAddress());
+        DeviceEntity device = requireRoleDevice(mac);
+        String ownerTitle = normalizeOwnerTitle(dto.getOwnerTitle());
+        String templateName = normalizeTemplateName(dto.getTemplateName());
+        String supplement = normalizeSupplement(dto.getSupplement());
+        AgentEntity agent = requireAgent(device);
+        QueryWrapper<AgentTemplateEntity> wrapper = new QueryWrapper<>();
+        wrapper.eq("agent_name", templateName);
+        wrapper.ge("sort", 0);
+        wrapper.orderByAsc("sort");
+        List<AgentTemplateEntity> found = agentTemplateService.list(wrapper);
+        if (found == null || found.isEmpty() || StringUtils.isBlank(found.get(0).getSystemPrompt())) {
+            throw new RenException("没有这个性格模板");
+        }
+        AgentTemplateEntity template = found.get(0);
+        agent.setSystemPrompt(composeRolePrompt(template.getSystemPrompt(), ownerTitle, supplement));
+        if (StringUtils.isNotBlank(template.getTtsModelId())) {
+            agent.setTtsModelId(template.getTtsModelId());
+        }
+        if (StringUtils.isNotBlank(template.getTtsVoiceId())) {
+            agent.setTtsVoiceId(template.getTtsVoiceId());
+        }
+        agentService.updateById(agent);
         device.setOnboardingStatus(ONBOARDING_SKILLS);
         deviceService.updateById(device);
+    }
+
+    static String composeRolePrompt(String templatePrompt, String ownerTitle, String supplement) {
+        StringBuilder prompt = new StringBuilder(templatePrompt.trim());
+        prompt.append("\n[主人称呼]\n请称呼用户为「").append(ownerTitle).append("」。");
+        if (StringUtils.isNotBlank(supplement)) {
+            prompt.append("\n[补充设定]\n").append(supplement.trim());
+        }
+        return prompt.toString();
     }
 
     @Transactional(rollbackFor = Exception.class)
@@ -176,10 +275,22 @@ public class VoiceActivationService {
         cachePortalInvite(mac, portalDeviceId, issueInviteToken(portal, portalDeviceId));
     }
 
-    public VoiceActivationSkillAuthVO startSkillAuth(String macAddress, String service) {
+    public VoiceActivationSkillAuthVO startSkillAuth(String macAddress, String service, boolean rebind) {
         String mac = requireMac(macAddress);
         DeviceEntity device = requireSkillsDevice(mac);
         String normalized = normalizeAuthService(service);
+        // 自动授权只发生在第一次进入 skills。一旦真正发起，就改成手动，避免重连再次自动开通。
+        if (ONBOARDING_SKILLS.equals(device.getOnboardingStatus())) {
+            device.setOnboardingStatus(ONBOARDING_SKILLS_MANUAL);
+            deviceService.updateById(device);
+        }
+        if (!rebind && portalSkillBound(mac, normalized)) {
+            VoiceActivationSkillAuthVO skipped = new VoiceActivationSkillAuthVO();
+            skipped.setService(normalized);
+            skipped.setStatus("already_bound");
+            skipped.setMessage("已经开通");
+            return skipped;
+        }
         PortalInvite invite = requirePortalInvite(mac);
         PortalConfig portal = requirePortalConfig();
         Map<String, Object> body = new HashMap<>();
@@ -249,9 +360,35 @@ public class VoiceActivationService {
     }
 
     @Transactional(rollbackFor = Exception.class)
+    public void deferSkills(String macAddress) {
+        String mac = requireMac(macAddress);
+        DeviceEntity device = deviceService.getDeviceByMacAddress(mac);
+        if (device == null) {
+            throw new RenException(ErrorCode.DEVICE_NOT_EXIST);
+        }
+        String status = device.getOnboardingStatus();
+        if (!ONBOARDING_SKILLS.equals(status) && !ONBOARDING_SKILLS_QUIET.equals(status)) {
+            throw new RenException("当前不需要绑定技能");
+        }
+        if (!ONBOARDING_SKILLS_QUIET.equals(device.getOnboardingStatus())) {
+            device.setOnboardingStatus(ONBOARDING_SKILLS_QUIET);
+            deviceService.updateById(device);
+        }
+    }
+
+    @Transactional(rollbackFor = Exception.class)
     public void completeSkills(String macAddress) {
         String mac = requireMac(macAddress);
-        DeviceEntity device = requireSkillsDevice(mac);
+        DeviceEntity device = deviceService.getDeviceByMacAddress(mac);
+        if (device == null) {
+            throw new RenException(ErrorCode.DEVICE_NOT_EXIST);
+        }
+        if (ONBOARDING_DONE.equals(device.getOnboardingStatus())) {
+            return;
+        }
+        if (!isSkillsOnboarding(device.getOnboardingStatus())) {
+            throw new RenException("当前不需要绑定技能");
+        }
         finishPortalInvite(mac);
         device.setOnboardingStatus(ONBOARDING_DONE);
         deviceService.updateById(device);
@@ -273,12 +410,57 @@ public class VoiceActivationService {
         }
     }
 
+    private DeviceEntity requireRoleDevice(String mac) {
+        DeviceEntity device = deviceService.getDeviceByMacAddress(mac);
+        if (device == null) {
+            throw new RenException(ErrorCode.DEVICE_NOT_EXIST);
+        }
+        if (!ONBOARDING_ROLE.equals(device.getOnboardingStatus())) {
+            throw new RenException("当前不需要设置角色");
+        }
+        return device;
+    }
+
+    private static String normalizeOwnerTitle(String title) {
+        if (title == null) {
+            throw new RenException("请说出怎么称呼您");
+        }
+        String trimmed = title.trim().replaceAll("[\\s，。,.!！?？、「」]", "");
+        if (trimmed.isEmpty() || trimmed.length() > 12) {
+            throw new RenException("称呼请控制在1到12个字");
+        }
+        return trimmed;
+    }
+
+    private static String normalizeTemplateName(String name) {
+        String trimmed = StringUtils.trimToEmpty(name);
+        if (trimmed.isEmpty() || trimmed.length() > 32) {
+            throw new RenException("请选择性格模板");
+        }
+        return trimmed;
+    }
+
+    private static String normalizeSupplement(String supplement) {
+        String trimmed = StringUtils.trimToEmpty(supplement);
+        if (trimmed.length() > 80) {
+            throw new RenException("补充请控制在八十个字以内");
+        }
+        return trimmed;
+    }
+
+    private static boolean isSkillsOnboarding(String status) {
+        return ONBOARDING_SKILLS.equals(status)
+                || ONBOARDING_SKILLS_QUIET.equals(status)
+                || ONBOARDING_SKILLS_MANUAL.equals(status);
+    }
+
     private DeviceEntity requireSkillsDevice(String mac) {
         DeviceEntity device = deviceService.getDeviceByMacAddress(mac);
         if (device == null) {
             throw new RenException(ErrorCode.DEVICE_NOT_EXIST);
         }
-        if (!ONBOARDING_SKILLS.equals(device.getOnboardingStatus())) {
+        if (!isSkillsOnboarding(device.getOnboardingStatus())
+                && !ONBOARDING_DONE.equals(device.getOnboardingStatus())) {
             throw new RenException("当前不需要绑定技能");
         }
         if (StringUtils.isBlank(device.getPhone())) {
@@ -293,6 +475,20 @@ public class VoiceActivationService {
             throw new RenException(ErrorCode.AGENT_NOT_FOUND);
         }
         return agent;
+    }
+
+    private boolean portalSkillBound(String mac, String service) {
+        try {
+            PortalConfig portal = requirePortalConfig();
+            Map<String, Object> body = new HashMap<>();
+            body.put("mac_address", mac);
+            JsonNode view = callPortalJson(portal.baseUrl, portal.bindToken, null,
+                    HttpMethod.POST, "/api/device/auth-status", body);
+            return view.path(service).asBoolean(false);
+        } catch (Exception e) {
+            log.info("auth bound check skipped: service={} err={}", service, e.getMessage());
+            return false;
+        }
     }
 
     private PortalConfig requirePortalConfig() {

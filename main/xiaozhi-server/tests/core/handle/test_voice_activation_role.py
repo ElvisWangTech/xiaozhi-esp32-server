@@ -1,0 +1,1674 @@
+"""昵称抽取、主人称呼和性格模板选择。"""
+
+import asyncio
+
+from core.handle.voice_activation import (
+    REPEAT,
+    SKIP,
+    VoiceActivationSession,
+    apply_persona_voice,
+    clean_supplement,
+    confirm_intent,
+    extract_nickname,
+    extract_owner_title,
+    parse_nickname_reply,
+    parse_persona_catalog,
+    persona_menu,
+    resolve_auth_reply,
+    resolve_persona,
+    resolve_skill_retry,
+    resolve_skills_request,
+    resolve_supplement_confirm,
+    resolve_supplement_turn,
+)
+
+
+class _FakeLogger:
+    def bind(self, **_kwargs):
+        return self
+
+    def info(self, *_args, **_kwargs):
+        return None
+
+    def warning(self, *_args, **_kwargs):
+        return None
+
+
+class _FakeConn:
+    def __init__(self, reply):
+        self.reply = reply
+        self.calls = []
+        self.logger = _FakeLogger()
+        self.llm = self
+        self.config = {}
+
+    def response_no_stream(self, system_prompt, user_prompt):
+        self.calls.append((system_prompt, user_prompt))
+        if isinstance(self.reply, Exception):
+            raise self.reply
+        return self.reply
+
+TEMPLATES = ["可爱女生", "甜美小源", "温婉珊珊", "星际游子", "英语老师"]
+
+
+def test_parse_nickname_reply():
+    assert parse_nickname_reply('{"nickname":"小智"}') == "小智"
+    assert parse_nickname_reply('```json\n{"nickname":"豆豆"}\n```') == "豆豆"
+    assert parse_nickname_reply('好的 {"nickname":"小美"}') == "小美"
+    assert parse_nickname_reply('{"nickname":""}') is None
+    assert parse_nickname_reply('{"nickname":"你的昵称是小智"}') is None
+    assert parse_nickname_reply("小智") is None
+
+
+def test_extract_nickname_uses_llm_for_sentences():
+    conn = _FakeConn('{"nickname":"小智"}')
+    assert asyncio.run(extract_nickname(conn, "你的昵称是小智")) == "小智"
+    assert conn.calls and "你的昵称是小智" in conn.calls[0][1]
+
+    corrected = _FakeConn('{"nickname":"小美"}')
+    assert asyncio.run(extract_nickname(corrected, "不对，你的昵称是小美")) == "小美"
+
+
+def test_extract_nickname_always_asks_the_model():
+    conn = _FakeConn('{"intent":"answer","nickname":"小智"}')
+    assert asyncio.run(extract_nickname(conn, "小智")) == "小智"
+    assert conn.calls
+    assert asyncio.run(extract_nickname(_FakeConn('{"intent":"answer","nickname":"小智"}'), "小智吧")) == "小智"
+    assert asyncio.run(extract_nickname(_FakeConn('{"intent":"unclear","nickname":""}'), "确认")) is None
+    assert asyncio.run(extract_nickname(_FakeConn('{"intent":"unclear","nickname":""}'), "不对")) is None
+    assert asyncio.run(extract_nickname(_FakeConn('{"intent":"unclear","nickname":""}'), "你的昵称是")) is None
+    long_name = "一二三四五六七八九十一二三"
+    assert asyncio.run(extract_nickname(_FakeConn('{"intent":"answer","nickname":"' + long_name + '"}'), long_name)) is None
+    failed = _FakeConn(RuntimeError("down"))
+    assert asyncio.run(extract_nickname(failed, "就叫小美")) is None
+    repeated = _FakeConn('{"intent":"repeat","nickname":""}')
+    assert asyncio.run(extract_nickname(repeated, "没听清")) is REPEAT
+
+    skipped = _FakeConn('{"intent":"skip","nickname":""}')
+    assert asyncio.run(extract_nickname(skipped, "不想设置了")) is SKIP
+
+
+def _guided_session(conn, stage, state):
+    session = VoiceActivationSession(conn, stage=stage)
+    session.state = state
+    said = []
+
+    async def _say(text):
+        said.append(text)
+
+    async def _send(_text):
+        return None
+
+    session._say = _say
+    session._send_recognized_text = _send
+    return session, said
+
+
+def _greet_session(reply):
+    """bind 开场的会话：把播报和「说完再连 ASR」都换成本地记录。"""
+    conn = _FakeConn(reply)
+    session = VoiceActivationSession(conn, stage="bind")
+    said = []
+    asked = []
+
+    async def _say(text):
+        said.append(text)
+
+    async def _prompt(text):
+        asked.append(text)
+
+    async def _send(_text):
+        return None
+
+    session._say = _say
+    session._prompt_and_listen = _prompt
+    session._send_recognized_text = _send
+    session.state = session.GREET
+    return session, conn, said, asked
+
+
+def test_activation_greets_before_asking_for_phone():
+    """一开始先打招呼并问称呼，不直接要手机号。"""
+    session, _conn, _said, asked = _greet_session('{"intent":"answer","title":"老板"}')
+
+    async def _run():
+        await session.start()
+        session._idle_task.cancel()
+        try:
+            await session._idle_task
+        except asyncio.CancelledError:
+            pass
+
+    asyncio.run(_run())
+    assert session.state == session.GREET
+    assert asked == ["你好，我是 X-Atom，新一代物理AI智能体，让AI走进现实。第一次见面，我该怎么称呼您呢？"]
+
+
+def test_name_from_greeting_skips_the_owner_question_later():
+    session, _conn, said, asked = _greet_session('{"intent":"answer","title":"老王"}')
+
+    asyncio.run(session.handle_text("叫我老王"))
+    assert session.owner_title == "老王"
+    assert session.state == session.CONFIRM_GREET
+    assert said == ["我称呼您为老王，对吗？"]
+
+    session.conn = _FakeConn('{"intent":"accept","value":""}')
+    asyncio.run(session.handle_text("对"))
+    assert session.state == session.ASK_PHONE
+    assert asked == ["好的，老王。请说出您的手机号码，一共十一位。"]
+
+    # 角色绑定阶段不再重复问称呼，直接进性格选择。
+    began = []
+
+    async def _persona():
+        began.append(True)
+
+    session._begin_persona = _persona
+    session.nickname = "小源"
+    said.clear()
+    asyncio.run(session._begin_owner())
+    assert said == ["好的，我是小源。"]
+    assert began == [True]
+
+
+def test_greeting_without_a_name_falls_through_to_phone():
+    """开场没听出称呼就继续报手机号，称呼留到角色绑定再问。"""
+    session, _conn, said, asked = _greet_session('{"intent":"unclear","title":""}')
+
+    asyncio.run(session.handle_text("今天天气不错"))
+    assert session.owner_title is None
+    assert session.state == session.ASK_PHONE
+    assert asked == ["好的，请说出您的手机号码，一共十一位。"]
+
+    began = []
+
+    async def _persona():
+        began.append(True)
+
+    session._begin_persona = _persona
+    session.nickname = "小源"
+    asyncio.run(session._begin_owner())
+    assert session.state == session.ASK_OWNER
+    assert not began
+    assert any("我该怎么称呼您呢" in text for text in said)
+
+
+def test_denied_title_asks_once_more_then_goes_to_phone():
+    session, _conn, said, asked = _greet_session('{"intent":"answer","title":"老王"}')
+    asyncio.run(session.handle_text("叫我老王"))
+
+    session.conn = _FakeConn('{"intent":"decline","value":""}')
+    asyncio.run(session.handle_text("不对"))
+    assert session.owner_title is None
+    assert session.state == session.GREET
+    assert any("我该怎么称呼您呢" in text for text in said)
+
+    asyncio.run(session.handle_text("今天天气不错"))
+    assert session.state == session.ASK_PHONE
+    assert asked[-1] == "好的，请说出您的手机号码，一共十一位。"
+
+
+def test_keeping_the_current_persona_is_offered_and_worded_as_no_change():
+    conn = _FakeConn('{"intent":"answer","template":"可爱女生"}')
+    assert asyncio.run(resolve_persona(conn, "不用换了，就这样", TEMPLATES)) == "可爱女生"
+    assert "第一个" in conn.calls[0][0]
+
+    session, said = _guided_session(conn, "role", VoiceActivationSession.ASK_PERSONA)
+    session.persona_templates = TEMPLATES
+    asyncio.run(session.handle_text("不用换了，就这样"))
+    assert session.state == session.CONFIRM_PERSONA
+    assert session.persona_name == "可爱女生"
+    assert said == ["性格就保持可爱女生，不换了，对吗？"]
+
+
+def test_nickname_retries_give_progressively_clearer_hints():
+    conn = _FakeConn('{"intent":"unclear","nickname":""}')
+    session, said = _guided_session(conn, "nickname", VoiceActivationSession.ASK_NICKNAME)
+    for _ in range(3):
+        asyncio.run(session.handle_text("嗯。"))
+    assert session.state == session.ASK_NICKNAME
+    assert len(said) == 3
+    assert len(set(said)) == 3  # 不再原样重复「没有听清昵称，请再说一次。」
+    assert any("比如" in text for text in said)
+    assert any("默认昵称" in text for text in said)
+
+
+def test_misheard_short_name_is_corrected_in_one_turn():
+    conn = _FakeConn('{"intent":"answer","nickname":"初期"}')
+    session, said = _guided_session(conn, "nickname", VoiceActivationSession.ASK_NICKNAME)
+    # ASR 把「初五」听成「初期」：模型按宽松候选返回 answer，直接进入确认。
+    asyncio.run(session.handle_text("初期。"))
+    assert session.state == session.CONFIRM_NICKNAME
+    assert session.nickname == "初期"
+    assert said == ["我的名字是初期，对吗？"]
+
+    # 用户一句改口即可纠正。
+    session.conn = _FakeConn('{"intent":"correct","value":"初五"}')
+    asyncio.run(session.handle_text("不对，是初五"))
+    assert session.nickname == "初五"
+    assert session.state == session.CONFIRM_NICKNAME
+    assert said[-1] == "我的名字是初五，对吗？"
+
+
+def test_nickname_skip_uses_default():
+    conn = _FakeConn('{"intent":"skip","nickname":""}')
+    session, said = _guided_session(conn, "nickname", VoiceActivationSession.ASK_NICKNAME)
+    asyncio.run(session.handle_text("算了"))
+    assert session.state == session.CONFIRM_NICKNAME
+    assert session.nickname == "牛小七"
+    assert "牛小七" in said[-1]
+
+
+def test_owner_retries_give_progressively_clearer_hints():
+    conn = _FakeConn('{"intent":"unclear","title":""}')
+    session, said = _guided_session(conn, "role", VoiceActivationSession.ASK_OWNER)
+    for _ in range(3):
+        asyncio.run(session.handle_text("嗯。"))
+    assert session.state == session.ASK_OWNER
+    assert len(said) == 3
+    assert len(set(said)) == 3  # 不再原样重复「没有听清。您希望我怎么称呼您？」
+    assert any("比如" in text for text in said)
+    assert any("默认称呼" in text for text in said)
+
+
+def test_misheard_owner_title_is_corrected_in_one_turn():
+    conn = _FakeConn('{"intent":"answer","title":"一维"}')
+    session, said = _guided_session(conn, "role", VoiceActivationSession.ASK_OWNER)
+    # ASR 误识别的称呼：模型按宽松候选返回 answer，直接进入确认。
+    asyncio.run(session.handle_text("一维。"))
+    assert session.state == session.CONFIRM_OWNER
+    assert session.owner_title == "一维"
+    assert said == ["我称呼您为一维，对吗？"]
+
+    # 用户一句改口即可纠正。
+    session.conn = _FakeConn('{"intent":"correct","value":"李工"}')
+    asyncio.run(session.handle_text("不对，叫我李工"))
+    assert session.owner_title == "李工"
+    assert session.state == session.CONFIRM_OWNER
+    assert said[-1] == "我称呼您为李工，对吗？"
+
+
+def test_owner_skip_uses_default():
+    conn = _FakeConn('{"intent":"skip","title":""}')
+    session, said = _guided_session(conn, "role", VoiceActivationSession.ASK_OWNER)
+    asyncio.run(session.handle_text("算了"))
+    assert session.state == session.CONFIRM_OWNER
+    assert session.owner_title == "主人"
+    assert "主人" in said[-1]
+
+
+def test_extract_owner_title():
+    bare = _FakeConn('{"intent":"answer","title":"老板"}')
+    assert asyncio.run(extract_owner_title(bare, "老板")) == "老板"
+    assert bare.calls
+    assert asyncio.run(extract_owner_title(_FakeConn('{"intent":"answer","title":"老板"}'), "嗯，老板")) == "老板"
+    assert asyncio.run(extract_owner_title(_FakeConn('{"intent":"unclear","title":""}'), "确认")) is None
+
+    called = _FakeConn('{"title":"张先生"}')
+    assert asyncio.run(extract_owner_title(called, "你可以称呼我为张先生")) == "张先生"
+    assert called.calls and "你可以称呼我为张先生" in called.calls[0][1]
+
+    corrected = _FakeConn('{"title":"妈妈"}')
+    assert asyncio.run(extract_owner_title(corrected, "不对，叫我妈妈")) == "妈妈"
+    assert asyncio.run(extract_owner_title(_FakeConn('{"title":""}'), "我该怎么称呼您呢")) is None
+    assert asyncio.run(extract_owner_title(_FakeConn(RuntimeError("down")), "叫我老板")) is None
+
+    skipped = _FakeConn('{"intent":"skip","title":""}')
+    assert asyncio.run(extract_owner_title(skipped, "不想设置了")) is SKIP
+
+
+def test_persona_catalog_keeps_voice_codes():
+    names, voices = parse_persona_catalog(
+        [
+            {"name": "湾湾小何", "voice": "zh_female_xiaohe_uranus_bigtts"},
+            {"name": "星际游子", "voice": "zh_male_m191_uranus_bigtts"},
+            {"name": "英语老师", "voice": "zh_female_vv_uranus_bigtts"},
+        ]
+    )
+    assert names == ["湾湾小何", "星际游子", "英语老师"]
+    assert voices["英语老师"] == "zh_female_vv_uranus_bigtts"
+    plain, empty = parse_persona_catalog(["湾湾小何"])
+    assert plain == ["湾湾小何"]
+    assert empty == {}
+
+
+def test_asr_keeps_speech_until_reconnect():
+    from core.providers.asr.doubao_stream import merge_replay, stash_unsent
+
+    buffer = []
+    for index in range(40):
+        stash_unsent(buffer, index, speaking=False)
+    assert buffer == list(range(10, 40))
+    for index in range(40, 45):
+        stash_unsent(buffer, index, speaking=True)
+    assert buffer[0] == 10
+    assert buffer[-1] == 44
+
+    replay = merge_replay([1, 2, 3], [4])
+    assert replay == [1, 2, 3, 4]
+    assert merge_replay([], [9]) == [9]
+
+
+def test_utterance_end_keeps_asr_socket():
+    from core.providers.asr.doubao_stream import ASRProvider, playback_blocks_upload
+
+    provider = ASRProvider(
+        {"appid": "1", "access_token": "token", "sample_rate": 16000},
+        True,
+    )
+    socket = object()
+    provider.asr_ws = socket
+    provider.is_processing = True
+    provider._is_stopping = False
+    provider._recent = [b"a"]
+    provider._unsent = [b"b"]
+    provider.stop_ws_connection()
+    assert provider.asr_ws is socket
+    assert provider.is_processing is True
+    assert provider._recent == []
+    assert provider._unsent == []
+
+    blocked, resume_at = playback_blocks_upload(True, False, False, 10.0, 0.0, True)
+    assert blocked is True
+    assert resume_at == 11.0
+    blocked, resume_at = playback_blocks_upload(False, False, False, 10.5, resume_at, True)
+    assert blocked is True
+    blocked, _ = playback_blocks_upload(False, False, False, 11.0, resume_at, True)
+    assert blocked is False
+    blocked, _ = playback_blocks_upload(True, True, False, 10.0, 0.0, True)
+    assert blocked is False
+    blocked, _ = playback_blocks_upload(True, False, False, 10.0, 0.0, True, realtime=True)
+    assert blocked is False
+    blocked, resume_at = playback_blocks_upload(True, False, False, 10.0, 0.0, False)
+    assert blocked is True
+    assert resume_at == 10.0
+    blocked, _ = playback_blocks_upload(False, False, False, 10.1, resume_at, False)
+    assert blocked is False
+
+
+def test_apply_persona_voice_updates_tts():
+    class _TTS:
+        voice = "old"
+
+    tts = _TTS()
+    assert apply_persona_voice(tts, "zh_male_m191_uranus_bigtts") is True
+    assert tts.voice == "zh_male_m191_uranus_bigtts"
+    assert apply_persona_voice(tts, "") is False
+
+
+def test_resolve_persona_always_asks_the_model():
+    named = _FakeConn('{"intent":"answer","template":"英语老师"}')
+    assert asyncio.run(resolve_persona(named, "英语老师", TEMPLATES)) == "英语老师"
+    assert named.calls
+    indexed = _FakeConn('{"intent":"answer","template":"星际游子"}')
+    assert asyncio.run(resolve_persona(indexed, "第三个", TEMPLATES)) == "星际游子"
+    assert indexed.calls
+
+    described = _FakeConn('{"intent":"answer","template":"温婉珊珊"}')
+    assert asyncio.run(resolve_persona(described, "我想要那个杭州女生", TEMPLATES)) == "温婉珊珊"
+    refused = _FakeConn('{"intent":"unclear","template":""}')
+    assert asyncio.run(resolve_persona(refused, "不要英语老师", TEMPLATES)) is None
+    assert asyncio.run(resolve_persona(_FakeConn('{"intent":"unclear","template":"外星人不存在"}'), "今天天气不错", TEMPLATES)) is None
+    assert asyncio.run(resolve_persona(_FakeConn('{"intent":"repeat","template":""}'), "没听清", TEMPLATES)) is REPEAT
+
+
+def test_supplement_always_asks_the_model():
+    ended = _FakeConn('{"action":"end"}')
+    assert asyncio.run(resolve_supplement_turn(ended, "没有")) == ("end", "")
+    assert ended.calls
+    assert "没有" in ended.calls[0][1]
+    direct = _FakeConn('{"action":"content","text":"说话温柔一点"}')
+    assert asyncio.run(resolve_supplement_turn(direct, "说话温柔一点")) == ("content", "说话温柔一点")
+    assert direct.calls
+    # 先说没有、后面又给了要求：仍然算补充内容
+    mixed = _FakeConn('{"action":"content","text":"说话温柔一点"}')
+    assert asyncio.run(resolve_supplement_turn(mixed, "没有，说话温柔一点")) == ("content", "说话温柔一点")
+    assert asyncio.run(resolve_supplement_turn(_FakeConn('{"action":"repeat"}'), "没听清")) == ("repeat", "")
+    assert asyncio.run(resolve_supplement_turn(_FakeConn('{"action":"unclear"}'), "嗯")) == ("unclear", "")
+    failed = _FakeConn(RuntimeError("down"))
+    assert asyncio.run(resolve_supplement_turn(failed, "少讲道理")) == ("unclear", "")
+
+
+def test_supplement_confirm_asks_the_model():
+    accepted = _FakeConn('{"intent":"accept"}')
+    assert asyncio.run(resolve_supplement_confirm(accepted, "对", "说话温柔一点")) == ("accept", "")
+    assert accepted.calls
+    assert "说话温柔一点" in accepted.calls[0][1]
+    more = _FakeConn('{"intent":"more","text":"少讲道理"}')
+    assert asyncio.run(resolve_supplement_confirm(more, "还要加一句，少讲道理", "说话温柔一点")) == (
+        "more",
+        "少讲道理",
+    )
+    assert asyncio.run(resolve_supplement_confirm(_FakeConn('{"intent":"restart"}'), "不对", "说话温柔一点")) == (
+        "restart",
+        "",
+    )
+
+
+def _supplement_session(conn):
+    session = VoiceActivationSession(conn, stage="role")
+    session.state = session.ASK_SUPPLEMENT
+    said = []
+    saved = []
+
+    async def _say(text):
+        said.append(text)
+
+    async def _send(_text):
+        return None
+
+    async def _save(supplement):
+        saved.append(supplement)
+
+    session._say = _say
+    session._send_recognized_text = _send
+    session._save_role = _save
+    return session, said, saved
+
+
+def test_supplement_collects_several_sentences_until_end():
+    """用户一句一句补充，说「没有了」之前不提交。"""
+    conn = _FakeConn('{"action":"content","text":"说话温柔一点"}')
+    session, said, saved = _supplement_session(conn)
+    asyncio.run(session.handle_text("说话温柔一点"))
+    assert session.supplement_parts == ["说话温柔一点"]
+    assert session.state == session.ASK_SUPPLEMENT
+    assert saved == []
+    assert said[-1].startswith("好的，记下了")
+
+    session.conn = _FakeConn('{"action":"content","text":"少讲道理"}')
+    asyncio.run(session.handle_text("还有，少讲道理"))
+    assert session.supplement_parts == ["说话温柔一点", "少讲道理"]
+    assert saved == []
+
+    session.conn = _FakeConn('{"action":"end"}')
+    asyncio.run(session.handle_text("没有了"))
+    assert session.state == session.CONFIRM_SUPPLEMENT
+    assert saved == []
+    assert said[-1] == "记下的补充是：说话温柔一点。少讲道理。对吗？"
+
+    session.conn = _FakeConn('{"intent":"accept"}')
+    asyncio.run(session.handle_text("对"))
+    assert saved == ["说话温柔一点。少讲道理"]
+
+
+def test_supplement_end_without_content_saves_empty():
+    conn = _FakeConn('{"action":"end"}')
+    session, said, saved = _supplement_session(conn)
+    asyncio.run(session.handle_text("没有"))
+    assert saved == [""]
+    assert session.state == session.ASK_SUPPLEMENT
+
+
+def test_supplement_confirm_can_add_more_and_restart():
+    conn = _FakeConn('{"action":"content","text":"说话温柔一点"}')
+    session, said, saved = _supplement_session(conn)
+    asyncio.run(session.handle_text("说话温柔一点"))
+    asyncio.run(session._finish_supplement())
+    assert session.state == session.CONFIRM_SUPPLEMENT
+
+    session.conn = _FakeConn('{"intent":"more","text":"少讲道理"}')
+    asyncio.run(session.handle_text("还要加一句，少讲道理"))
+    assert session.state == session.ASK_SUPPLEMENT
+    assert session.supplement_parts == ["说话温柔一点", "少讲道理"]
+    assert saved == []
+
+    asyncio.run(session._finish_supplement())
+    session.conn = _FakeConn('{"intent":"restart"}')
+    asyncio.run(session.handle_text("不对，重说"))
+    assert session.state == session.ASK_SUPPLEMENT
+    assert session.supplement_parts == []
+    assert saved == []
+
+
+def test_supplement_stops_at_the_eighty_char_limit():
+    long_text = "一" * 79
+    conn = _FakeConn('{"action":"content","text":"' + long_text + '"}')
+    session, said, saved = _supplement_session(conn)
+    asyncio.run(session.handle_text(long_text))
+    assert session.supplement_parts == [long_text]
+
+    over = _FakeConn('{"action":"content","text":"再多一句"}')
+    session.conn = over
+    asyncio.run(session.handle_text("再多一句"))
+    assert session.supplement_parts == [long_text]
+    assert any("八十个字" in text for text in said)
+
+
+def test_supplement_silence_submits_what_was_collected():
+    """用户说完就不再开口：先再问一次，仍无回应就提交已记下的内容。"""
+    import core.handle.voice_activation as voice_activation
+
+    conn = _FakeConn('{"action":"content","text":"说话温柔一点"}')
+    session, said, saved = _supplement_session(conn)
+    asyncio.run(session.handle_text("说话温柔一点"))
+    task = session._supplement_wait_task
+    assert task is not None
+
+    async def _run():
+        await session._supplement_timeout()
+        await session._supplement_timeout()
+
+    asyncio.run(_run())
+    assert any("还有要补充的吗" in text for text in said)
+    assert saved == ["说话温柔一点"]
+    assert session._supplement_wait_task is None
+
+
+def test_supplement_repeat_keeps_what_was_collected():
+    conn = _FakeConn('{"action":"repeat"}')
+    session, said, saved = _supplement_session(conn)
+    session.supplement_parts = ["说话温柔一点"]
+    asyncio.run(session.handle_text("你再说一遍"))
+    assert session.state == session.ASK_SUPPLEMENT
+    assert session.supplement_parts == ["说话温柔一点"]
+    assert saved == []
+    assert "已经记下的补充是：说话温柔一点" in said[-1]
+
+
+def test_config_finished_reboots_without_asking():
+    """配置完毕不再确认：播报「配置完毕，设备即将重启」后直接重启。"""
+    said = []
+    posts = []
+    rebooted = []
+    conn = _skill_conn("skills")
+    session = VoiceActivationSession(conn, stage="skills")
+    conn.voice_activation_handler = session
+
+    async def _post(path, payload):
+        posts.append(path)
+
+    async def _say(text):
+        said.append(text)
+
+    async def _reboot():
+        rebooted.append(True)
+
+    session._post = _post
+    session._say = _say
+    session._reboot_device = _reboot
+    asyncio.run(session._finish_skills_and_reboot("瑞幸咖啡已开通。"))
+    assert posts == ["/device/voice-activation/skills/complete"]
+    assert said == ["瑞幸咖啡已开通。配置完毕，设备即将重启。"]
+    assert "是否重启" not in "".join(said)
+    assert rebooted == [True]
+    assert session.state == session.REBOOTING
+    assert conn.voice_onboarding is None
+    assert conn.skills_pending is False
+
+
+def test_complete_failure_still_reboots():
+    conn = _skill_conn("skills")
+    session = VoiceActivationSession(conn, stage="skills")
+    said = []
+    rebooted = []
+
+    async def _post(path, payload):
+        raise RuntimeError("API返回错误: complete 失败")
+
+    async def _say(text):
+        said.append(text)
+
+    async def _reboot():
+        rebooted.append(True)
+
+    session._post = _post
+    session._say = _say
+    session._reboot_device = _reboot
+    asyncio.run(session._finish_skills_and_reboot())
+    assert said == ["技能引导已结束。配置完毕，设备即将重启。"]
+    assert rebooted == [True]
+
+
+def test_empty_auth_queue_goes_straight_to_reboot():
+    conn = _skill_conn("skills")
+    session = VoiceActivationSession(conn, stage="skills", include_auth=True)
+    session.auth_queue = []
+    session.auth_done = ["瑞幸咖啡"]
+    finished = []
+
+    async def _finish(prefix):
+        finished.append(prefix)
+
+    session._finish_skills_and_reboot = _finish
+    asyncio.run(session._run_next_auth())
+    assert finished == ["瑞幸咖啡已开通。"]
+
+
+def test_rebooting_state_ignores_user_text():
+    """播报「即将重启」后到重启下发之间，用户输入不再触发任何提问。"""
+    conn = _FakeConn('{"intent":"accept","value":""}')
+    session, said = _guided_session(conn, "skills", VoiceActivationSession.REBOOTING)
+    asyncio.run(session.handle_text("不要重启"))
+    assert conn.calls == []
+    assert said == []
+    assert session.state == session.REBOOTING
+
+
+def test_skill_command_ignores_negation_and_questions():
+    refused = _FakeConn('{"intent":"none"}')
+    assert asyncio.run(resolve_skills_request(refused, "不要绑定技能")) is None
+    assert refused.calls
+    assert asyncio.run(resolve_skills_request(_FakeConn('{"intent":"none"}'), "绑定技能是什么意思")) is None
+
+    bare = _FakeConn('{"intent":"bind"}')
+    assert asyncio.run(resolve_skills_request(bare, "绑定技能。")) == "bind"
+    assert bare.calls
+    unrelated = _FakeConn('{"intent":"none"}')
+    assert asyncio.run(resolve_skills_request(unrelated, "今天天气不错")) is None
+    assert unrelated.calls
+
+
+def test_retry_negation_does_not_retry():
+    conn = _FakeConn('{"intent":"unclear","rebind":false}')
+    session = VoiceActivationSession(conn, stage="skills")
+    session.state = session.RETRY_SKILLS
+    said = []
+    bound = []
+
+    async def _say(text):
+        said.append(text)
+
+    async def _bind():
+        bound.append(True)
+
+    session._say = _say
+    session._bind_skills = _bind
+    asyncio.run(session._on_retry_skills("不要重试"))
+    assert bound == []
+    assert conn.calls
+    assert any("稍后再说" in text for text in said)
+    assert asyncio.run(resolve_skill_retry(_FakeConn('{"intent":"skip","rebind":false}'), "稍后再说")) == ("skip", False)
+
+
+def test_auth_question_does_not_skip():
+    conn = _FakeConn('{"intent":"unclear"}')
+    session = VoiceActivationSession(conn, stage="skills")
+    session.state = session.ASK_AUTH_CODE
+    session.auth_label = "瑞幸咖啡"
+    session.auth_task_id = "t1"
+    said = []
+    cancelled = []
+
+    async def _say(text):
+        said.append(text)
+
+    async def _cancel():
+        cancelled.append(True)
+
+    session._say = _say
+    session._cancel_auth_task = _cancel
+    asyncio.run(session._on_auth_code("能不跳过吗"))
+    assert cancelled == []
+    assert conn.calls
+    assert any("验证码" in text for text in said)
+
+    skipped = _FakeConn('{"intent":"skip"}')
+    assert asyncio.run(resolve_auth_reply(skipped, "跳过")) == ("skip", None)
+    assert skipped.calls
+    coded = _FakeConn('{"intent":"skip"}')
+    assert asyncio.run(resolve_auth_reply(coded, "327124")) == ("code", "327124")
+    assert coded.calls == []
+    mixed = _FakeConn('{"intent":"code"}')
+    assert asyncio.run(resolve_auth_reply(mixed, "验证码是327124")) == ("code", "327124")
+    assert mixed.calls
+
+
+def test_did_not_hear_repeats_the_current_question():
+    conn = _FakeConn('{"intent":"repeat","nickname":""}')
+    session = VoiceActivationSession(conn, stage="nickname")
+    session.state = session.ASK_NICKNAME
+    said = []
+
+    async def _say(text):
+        said.append(text)
+
+    async def _send(_text):
+        return None
+
+    session._say = _say
+    session._send_recognized_text = _send
+    asyncio.run(session.handle_text("没听清"))
+    assert session.state == session.ASK_NICKNAME
+    assert session.nickname is None
+    assert len(said) == 1 and "给我起个名字吧" in said[0] and "比如" in said[0]
+    assert conn.calls
+
+    said.clear()
+    session.conn = _FakeConn('{"intent":"repeat","value":""}')
+    session.phone = "13800138000"
+    session.state = session.CONFIRM_PHONE
+    asyncio.run(session.handle_text("你再说一遍"))
+    assert session.state == session.CONFIRM_PHONE
+    assert session.phone == "13800138000"
+    assert any("1，3，8" in text for text in said)
+
+    said.clear()
+    session.conn = _FakeConn('{"intent":"decline","value":""}')
+    asyncio.run(session.handle_text("重说"))
+    assert session.state == session.ASK_PHONE
+    assert any("重新" in text for text in said)
+
+
+def test_confirm_intent_asks_the_model():
+    local = _FakeConn('{"intent":"accept","value":""}')
+    assert asyncio.run(confirm_intent(local, "没错", "助手昵称是不是豆豆")) == "accept"
+    assert local.calls
+    asked = _FakeConn('{"intent":"decline","value":""}')
+    assert asyncio.run(confirm_intent(asked, "不对", "助手昵称是不是豆豆")) == "decline"
+    assert asked.calls
+    failed = _FakeConn(RuntimeError("down"))
+    assert asyncio.run(confirm_intent(failed, "必须设置吗", "助手昵称是不是豆豆")) == "unclear"
+
+
+def test_supplement_and_menu():
+    assert clean_supplement("  说话温柔一点。 ") == "说话温柔一点"
+    menu = persona_menu(TEMPLATES)
+    assert menu.startswith("接下来选一个性格。一，可爱女生，也就是现在的我，不换也可以。二，甜美小源。")
+    assert "五，英语老师" in menu
+
+
+def test_prompt_connects_asr_as_prompt_ends():
+    """开场打招呼和报手机号都走同一条「播完再连 ASR」路径。"""
+    order = []
+
+    class _ASR:
+        async def ensure_connected(self, conn):
+            order.append("connect")
+
+        def finish_prompt_guard(self):
+            order.append("listen")
+
+    class _Conn:
+        def __init__(self):
+            self.asr = _ASR()
+            self.logger = _FakeLogger()
+            self.client_is_speaking = False
+
+    session = VoiceActivationSession(_Conn(), stage="bind")
+
+    async def _say(text):
+        order.append(text)
+
+    session._say = _say
+
+    async def _run():
+        await session.start()
+        await session._asr_ready_task
+        session._idle_task.cancel()
+        try:
+            await session._idle_task
+        except asyncio.CancelledError:
+            pass
+
+    asyncio.run(_run())
+    assert order == ["你好，我是 X-Atom，新一代物理AI智能体，让AI走进现实。第一次见面，我该怎么称呼您呢？", "connect", "listen"]
+
+    order.clear()
+
+    async def _phone():
+        await session._start_phone()
+        await session._asr_ready_task
+
+    asyncio.run(_phone())
+    assert order == ["好的，请说出您的手机号码，一共十一位。", "connect", "listen"]
+
+
+def test_silence_packet_only_after_audio_gap():
+    from core.providers.asr import doubao_stream
+
+    sent = []
+    provider = doubao_stream.ASRProvider(
+        {"appid": "1", "access_token": "token", "sample_rate": 16000},
+        True,
+    )
+    ws = object()
+    provider.asr_ws = ws
+    provider._is_stopping = False
+    provider._last_audio_at = 0
+    provider._silence_keepalive_logged = False
+
+    async def _send(_ws, frame, remember=True):
+        sent.append(frame)
+        provider.asr_ws = None
+
+    provider._send_pcm = _send
+    original_sleep = doubao_stream.asyncio.sleep
+
+    async def _fast_sleep(_seconds):
+        return None
+
+    async def _run():
+        doubao_stream.asyncio.sleep = _fast_sleep
+        try:
+            await provider._silence_before_packet_timeout(ws)
+        finally:
+            doubao_stream.asyncio.sleep = original_sleep
+
+    asyncio.run(_run())
+    assert len(sent) == 1
+    assert len(sent[0]) == 6400
+
+
+def test_long_silence_stops_asr_then_prompts_sleep():
+    order = []
+
+    class _ASR:
+        def stop_ws_connection(self):
+            order.append("stop")
+
+    class _Conn:
+        def __init__(self):
+            self.asr = _ASR()
+            self.logger = _FakeLogger()
+            self.client_is_speaking = False
+            self.close_after_chat = False
+            self.vad_last_voice_time = 0
+            self.config = {"close_connection_no_voice_time": 1}
+            self.voice_activation_handler = None
+
+    session = VoiceActivationSession(_Conn(), stage="bind")
+    session.conn.voice_activation_handler = session
+
+    async def _say(text):
+        order.append(text)
+
+    session._say = _say
+
+    async def _run():
+        session._start_idle_watch()
+        await asyncio.wait_for(session._idle_task, timeout=3)
+
+    asyncio.run(_run())
+    assert order[0] == "stop"
+    assert "休息" in order[1]
+    assert session.conn.close_after_chat is True
+
+
+def test_first_skill_skip_is_spoken_later_failure_is_silent():
+    said = []
+    posts = []
+
+    class _Conn:
+        def __init__(self):
+            self.logger = _FakeLogger()
+            self.headers = {"device-id": "aa:bb"}
+            self.voice_onboarding = "skills"
+            self.voice_activation_handler = None
+            self.skills_pending = False
+
+    conn = _Conn()
+    conn.llm = _FakeConn('{"intent":"skip","rebind":false}')
+    session = VoiceActivationSession(conn, stage="skills")
+    conn.voice_activation_handler = session
+
+    async def _post(path, payload):
+        posts.append(path)
+        if path.endswith("/skills"):
+            raise RuntimeError("API返回错误: 技能服务暂不可用")
+
+    async def _say(text):
+        said.append(text)
+
+    session._post = _post
+    session._say = _say
+
+    async def _first():
+        await session._bind_skills()
+        await session._on_retry_skills("稍后再说")
+
+    asyncio.run(_first())
+    assert any("稍后再说" in text for text in said)
+    assert "/device/voice-activation/skills/defer" in posts
+    assert any("绑定技能" in text for text in said)
+
+    said.clear()
+    conn.voice_onboarding = "skills_quiet"
+    conn.voice_activation_handler = session
+    conn.skills_pending = False
+
+    async def _later():
+        await session._bind_skills()
+
+    asyncio.run(_later())
+    assert said == []
+    assert conn.voice_activation_handler is None
+    assert conn.skills_pending is True
+    assert conn.voice_onboarding is None
+
+
+def test_user_asked_skill_bind_announces_failure_during_quiet_retry():
+    said = []
+
+    class _Conn:
+        def __init__(self):
+            self.logger = _FakeLogger()
+            self.headers = {"device-id": "aa:bb"}
+            self.voice_onboarding = "skills_quiet"
+            self.voice_activation_handler = None
+            self.skills_pending = False
+            self.speak_skill_failure = False
+            self.config = {}
+
+    conn = _Conn()
+    conn.llm = _FakeConn('{"intent":"bind"}')
+    session = VoiceActivationSession(conn, stage="skills")
+    conn.voice_activation_handler = session
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def _post(path, payload):
+        started.set()
+        await release.wait()
+        raise RuntimeError("API返回错误: 技能绑定失败")
+
+    async def _say(text):
+        said.append(text)
+
+    async def _send_recognized_text(text):
+        return None
+
+    session._post = _post
+    session._say = _say
+    session._send_recognized_text = _send_recognized_text
+
+    async def _run():
+        task = asyncio.create_task(session._bind_skills())
+        await started.wait()
+        await session.handle_text("绑定技能。")
+        release.set()
+        await task
+
+    asyncio.run(_run())
+    assert any("开始绑定技能" in text for text in said)
+    assert any("技能绑定失败" in text for text in said)
+    assert conn.voice_activation_handler is session
+
+
+def _skill_conn(onboarding="skills"):
+    class _Conn:
+        def __init__(self):
+            self.logger = _FakeLogger()
+            self.headers = {"device-id": "aa:bb"}
+            self.voice_onboarding = onboarding
+            self.voice_activation_handler = None
+            self.skills_pending = False
+
+    return _Conn()
+
+
+def test_later_skill_bind_skips_authorization():
+    said = []
+    posts = []
+    conn = _skill_conn("skills_quiet")
+    session = VoiceActivationSession(conn, stage="skills", include_auth=False)
+    conn.voice_activation_handler = session
+
+    async def _post(path, payload):
+        posts.append(path)
+
+    async def _say(text):
+        said.append(text)
+
+    session._post = _post
+    session._say = _say
+
+    asyncio.run(session._bind_skills())
+    assert posts == [
+        "/device/voice-activation/skills",
+        "/device/voice-activation/skills/complete",
+    ]
+    assert said == ["通用技能已绑定。开通瑞幸或滴滴可以说绑定技能。"]
+    assert conn.voice_activation_handler is None
+    assert conn.voice_onboarding is None
+
+
+def test_first_skill_bind_starts_authorization():
+    said = []
+    posts = []
+    auth_started = []
+    conn = _skill_conn("skills")
+    session = VoiceActivationSession(conn, stage="skills", include_auth=True)
+    conn.voice_activation_handler = session
+
+    async def _post(path, payload):
+        posts.append(path)
+
+    async def _say(text):
+        said.append(text)
+
+    async def _run_next_auth():
+        auth_started.append(True)
+
+    session._post = _post
+    session._say = _say
+    session._run_next_auth = _run_next_auth
+
+    asyncio.run(session._bind_skills())
+    assert posts == ["/device/voice-activation/skills"]
+    assert auth_started == [True]
+    assert any(text == "通用技能已绑定。" for text in said)
+    assert conn.voice_activation_handler is session
+
+
+def test_user_request_during_quiet_bind_starts_authorization():
+    said = []
+    auth_started = []
+    conn = _skill_conn("skills_quiet")
+    conn.llm = _FakeConn('{"intent":"bind"}')
+    session = VoiceActivationSession(conn, stage="skills", include_auth=False)
+    conn.voice_activation_handler = session
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def _post(path, payload):
+        started.set()
+        await release.wait()
+
+    async def _say(text):
+        said.append(text)
+
+    async def _send_recognized_text(text):
+        return None
+
+    async def _run_next_auth():
+        auth_started.append(True)
+
+    session._post = _post
+    session._say = _say
+    session._send_recognized_text = _send_recognized_text
+    session._run_next_auth = _run_next_auth
+
+    async def _run():
+        task = asyncio.create_task(session._bind_skills())
+        await started.wait()
+        await session.handle_text("绑定技能。")
+        release.set()
+        await task
+
+    asyncio.run(_run())
+    assert auth_started == [True]
+    assert any(text == "通用技能已绑定。" for text in said)
+
+
+def test_bound_auth_skill_is_skipped_unless_rebind():
+    said = []
+    payloads = []
+    conn = _skill_conn()
+    session = VoiceActivationSession(conn, stage="skills", include_auth=True)
+    session.auth_queue = [("luckin", "瑞幸咖啡"), ("didi", "滴滴出行")]
+
+    async def _post(path, payload):
+        payloads.append(payload)
+        service = payload.get("service")
+        if service == "luckin":
+            return {"status": "already_bound", "service": "luckin"}
+        return {"status": "waiting_code", "service": "didi", "taskId": "t2"}
+
+    async def _say(text):
+        said.append(text)
+
+    async def _handle_auth_result(result):
+        said.append("handle:" + str((result or {}).get("status")))
+
+    session._post = _post
+    session._say = _say
+    session._handle_auth_result = _handle_auth_result
+
+    asyncio.run(session._run_next_auth())
+    assert payloads[0]["rebind"] is False
+    assert "瑞幸咖啡已经开通。" in said
+    assert "正在开通瑞幸咖啡。" not in said
+    assert "正在开通滴滴出行。" in said
+    assert "handle:waiting_code" in said
+
+    said.clear()
+    payloads.clear()
+    session.rebind_auth = True
+    session.auth_queue = [("luckin", "瑞幸咖啡")]
+
+    async def _post_rebind(path, payload):
+        payloads.append(payload)
+        return {"status": "waiting_code", "service": "luckin", "taskId": "t3"}
+
+    session._post = _post_rebind
+    asyncio.run(session._run_next_auth())
+    assert payloads[0]["rebind"] is True
+    assert "正在开通瑞幸咖啡。" in said
+    assert "瑞幸咖啡已经开通。" not in said
+
+
+def test_submitted_code_does_not_repeat_prompt_and_announces_success():
+    import core.handle.voice_activation as voice_activation
+
+    said = []
+    conn = _skill_conn()
+    session = VoiceActivationSession(conn, stage="skills")
+    session.auth_label = "瑞幸咖啡"
+    session.auth_task_id = "t1"
+    session.state = session.ASK_AUTH_CODE
+    replies = [
+        {"status": "pending", "taskId": "t1"},
+        {"status": "waiting_code", "taskId": "t1", "message": "已向手机发送验证码"},
+        {"status": "done", "taskId": "t1"},
+    ]
+
+    async def _post(path, payload):
+        return replies.pop(0)
+
+    async def _say(text):
+        said.append(text)
+
+    async def _run_next_auth():
+        return None
+
+    session._post = _post
+    session._say = _say
+    session._run_next_auth = _run_next_auth
+    original_sleep = voice_activation.asyncio.sleep
+
+    async def _sleep(_seconds):
+        return None
+
+    voice_activation.asyncio.sleep = _sleep
+    try:
+        asyncio.run(session._on_auth_code("327124"))
+    finally:
+        voice_activation.asyncio.sleep = original_sleep
+
+    spoken = "".join(said)
+    assert "请说出瑞幸咖啡短信里的验证码" not in spoken
+    assert "验证码已提交，正在登录。" in spoken
+    assert "瑞幸咖啡已开通。" in spoken
+    assert replies == []
+
+
+def _auth_poll_session(reply):
+    """只跑 _poll_auth 的会话：post 只回状态，say / wait / next 都记顺序。"""
+    import core.handle.voice_activation as voice_activation
+
+    conn = _skill_conn("skills")
+    session = VoiceActivationSession(conn, stage="skills", include_auth=True)
+    session.auth_label = "瑞幸咖啡"
+    session.auth_task_id = "t1"
+    order = []
+    polls = []
+
+    async def _post(path, payload):
+        if path.endswith("/auth/status"):
+            polls.append(path)
+        return reply
+
+    async def _say(text):
+        order.append(("say", text))
+
+    async def _wait_spoken():
+        order.append(("wait", ""))
+
+    async def _run_next_auth():
+        order.append(("next", ""))
+
+    session._post = _post
+    session._say = _say
+    session._wait_spoken = _wait_spoken
+    session._run_next_auth = _run_next_auth
+    return session, voice_activation, order, polls
+
+
+def _run_poll(session, voice_activation, after_code):
+    original_sleep = voice_activation.asyncio.sleep
+
+    async def _sleep(_seconds):
+        return None
+
+    voice_activation.asyncio.sleep = _sleep
+    try:
+        asyncio.run(session._poll_auth(after_code=after_code))
+    finally:
+        voice_activation.asyncio.sleep = original_sleep
+
+
+def test_code_wait_timeout_announces_failure_before_next_auth():
+    """提交验证码后一直没结果：先播报开通失败并等它说完，再切下一项。"""
+    session, voice_activation, order, polls = _auth_poll_session(
+        {"status": "pending", "taskId": "t1"}
+    )
+    _run_poll(session, voice_activation, after_code=True)
+
+    assert [text for kind, text in order if kind == "say"] == [
+        "瑞幸咖啡开通失败，没有收到授权结果。"
+    ]
+    assert "瑞幸咖啡" in session.auth_failed
+    assert [kind for kind, _ in order] == ["say", "wait", "next"]
+    # 15 秒 / 1.5 秒 = 10 次查询，不再干等 90 秒
+    assert len(polls) == 10
+
+
+def test_automation_without_code_keeps_the_longer_wait():
+    """没有验证码环节的自动化登录仍按 90 秒等，别跟着缩短。"""
+    session, voice_activation, _order, polls = _auth_poll_session(
+        {"status": "pending", "taskId": "t1"}
+    )
+    _run_poll(session, voice_activation, after_code=False)
+    assert len(polls) == 60
+
+
+def test_failed_auth_waits_for_prompt_before_next_auth():
+    """服务端明确返回失败时，也要等失败提示播完再开下一项。"""
+    conn = _skill_conn("skills")
+    session = VoiceActivationSession(conn, stage="skills", include_auth=True)
+    session.auth_label = "瑞幸咖啡"
+    order = []
+
+    async def _say(text):
+        order.append(("say", text))
+
+    async def _wait_spoken():
+        order.append(("wait", ""))
+
+    async def _run_next_auth():
+        order.append(("next", ""))
+
+    session._say = _say
+    session._wait_spoken = _wait_spoken
+    session._run_next_auth = _run_next_auth
+
+    asyncio.run(session._handle_auth_result({"status": "failed", "message": "未收到短信"}))
+    assert order == [
+        ("say", "瑞幸咖啡开通失败：未收到短信。"),
+        ("wait", ""),
+        ("next", ""),
+    ]
+    assert session.auth_failed == ["瑞幸咖啡"]
+
+
+def test_short_definite_text_is_committed():
+    from core.providers.asr.doubao_stream import should_commit_definite
+
+    assert should_commit_definite("对。", False, False, 8) is True
+    assert should_commit_definite("", False, False, 40) is False
+    assert should_commit_definite("对", True, False, 20) is False
+    assert should_commit_definite("对", True, True, 3) is True
+
+
+def test_mimo_asr_receives_audio_artifacts():
+    import inspect
+
+    from core.providers.asr.mimo import ASRProvider
+
+    params = list(inspect.signature(ASRProvider.speech_to_text).parameters)
+    assert params[:4] == ["self", "opus_data", "session_id", "artifacts"]
+
+
+def test_confirm_reply_interrupts_playback():
+    import core.handle.abortHandle as abort_mod
+
+    dispatched = []
+    aborted = []
+
+    class _Queues:
+        def __init__(self, size):
+            self._size = size
+
+        def empty(self):
+            return self._size == 0
+
+    class _Conn:
+        def __init__(self):
+            self.logger = _FakeLogger()
+            self.config = {}
+            self.headers = {"device-id": "aa:bb"}
+            self.client_is_speaking = True
+            self.tts = type("T", (), {"tts_text_queue": _Queues(1), "tts_audio_queue": _Queues(0)})()
+
+    conn = _Conn()
+    session = VoiceActivationSession(conn, stage="role")
+    session.state = session.CONFIRM_OWNER
+    session.owner_title = "意为"
+
+    async def _abort(target):
+        aborted.append(True)
+        target.client_is_speaking = False
+
+    async def _send(_text):
+        return None
+
+    async def _dispatch(text):
+        dispatched.append(text)
+
+    original = abort_mod.handleAbortMessage
+    abort_mod.handleAbortMessage = _abort
+    session._send_recognized_text = _send
+    session._dispatch = _dispatch
+    try:
+        asyncio.run(session.handle_text("对。"))
+    finally:
+        abort_mod.handleAbortMessage = original
+
+    assert aborted == [True]
+    assert dispatched == ["对。"]
+    assert conn.client_is_speaking is False
+
+
+def test_role_bind_announces_success_before_skills():
+    order = []
+
+    class _Conn:
+        def __init__(self):
+            self.logger = _FakeLogger()
+            self.headers = {"device-id": "aa:bb"}
+
+        async def refresh_agent_prompt(self):
+            order.append("refresh")
+
+    session = VoiceActivationSession(_Conn(), stage="role")
+    session.owner_title = "意为"
+    session.persona_name = "可爱女生"
+
+    async def _post(_path, _payload):
+        order.append("save")
+
+    async def _say(text):
+        order.append(text)
+
+    async def _wait():
+        order.append("wait")
+
+    async def _bind():
+        order.append("bind")
+
+    session._post = _post
+    session._say = _say
+    session._wait_spoken = _wait
+    session._bind_skills = _bind
+    asyncio.run(session._save_role(""))
+    assert order == [
+        "save",
+        "refresh",
+        "角色性格绑定成功。",
+        "wait",
+        "接下来绑定技能。",
+        "wait",
+        "bind",
+    ]
+
+
+def _speaking_conn(provider):
+    import threading
+
+    class _Conn:
+        client_listen_mode = "auto"
+        client_have_voice = False
+        client_voice_stop = False
+        client_is_speaking = True
+        client_aec = False
+        voice_activation_handler = None
+        asr_audio = []
+        stop_event = threading.Event()
+
+        def __init__(self):
+            self.asr = provider
+
+    return _Conn()
+
+
+def test_barge_in_uploads_preroll_without_waiting_for_send():
+    """播放中打断要带上前面几帧，而且不能等网络发完才收下一帧。"""
+    from core.providers.asr.doubao_stream import ASRProvider, _BARGE_IN_FRAMES
+
+    provider = ASRProvider({}, True)
+    conn = _speaking_conn(provider)
+    provider.asr_ws = object()
+    provider.is_processing = True
+    sent = []
+    release = asyncio.Event()
+
+    async def _slow_send(_ws, frame, remember=True):
+        sent.append(frame)
+        await release.wait()
+
+    provider._send_pcm = _slow_send
+
+    async def _run():
+        import core.handle.abortHandle as abort_mod
+
+        aborted = []
+
+        async def _abort(_conn):
+            aborted.append(True)
+
+        original = abort_mod.handleAbortMessage
+        abort_mod.handleAbortMessage = _abort
+        try:
+            for index in range(_BARGE_IN_FRAMES - 1):
+                await provider.receive_audio(conn, bytes([index]), True)
+            assert provider._unsent == []
+            assert provider._upload_task is None
+            await asyncio.wait_for(
+                provider.receive_audio(conn, bytes([_BARGE_IN_FRAMES]), True),
+                timeout=0.5,
+            )
+            await asyncio.sleep(0)
+            assert len(provider._barge_preroll) == 0
+            assert provider._barge_in is True
+            assert aborted == [True]
+            assert bytes([_BARGE_IN_FRAMES]) in provider._unsent or bytes([_BARGE_IN_FRAMES]) in sent
+            assert len(provider._unsent) + len(sent) == _BARGE_IN_FRAMES
+            await asyncio.wait_for(
+                provider.receive_audio(conn, b"\x06", True),
+                timeout=0.5,
+            )
+            assert b"\x06" in provider._unsent
+        finally:
+            abort_mod.handleAbortMessage = original
+            release.set()
+            provider._is_stopping = True
+            provider._unsent = []
+            provider._cancel_barge_close()
+            task = provider._upload_task
+            if task is not None and not task.done():
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+
+    asyncio.run(_run())
+
+
+def test_realtime_keeps_the_utterance_while_stopping_playback():
+    """实时模式播放中不能丢麦。第一句就要上送，并在持续人声时停播。"""
+    from core.providers.asr.doubao_stream import ASRProvider, _BARGE_IN_FRAMES
+
+    provider = ASRProvider({}, True)
+    conn = _speaking_conn(provider)
+    conn.client_listen_mode = "realtime"
+    provider.asr_ws = object()
+    provider.is_processing = True
+    sent = []
+
+    async def _send(_ws, frame, remember=True):
+        sent.append(frame)
+
+    provider._send_pcm = _send
+
+    async def _run():
+        import core.handle.abortHandle as abort_mod
+
+        aborted = []
+
+        async def _abort(_conn):
+            aborted.append(True)
+
+        original = abort_mod.handleAbortMessage
+        abort_mod.handleAbortMessage = _abort
+        try:
+            frames = [bytes([index + 1]) for index in range(_BARGE_IN_FRAMES + 3)]
+            for frame in frames:
+                await provider.receive_audio(conn, frame, True)
+            await asyncio.sleep(0)
+            assert provider._barge_close_task is None
+            assert aborted == [True]
+            uploaded = list(sent) + list(provider._unsent)
+            for frame in frames:
+                assert frame in uploaded
+        finally:
+            abort_mod.handleAbortMessage = original
+            provider._is_stopping = True
+            provider._cancel_barge_close()
+            task = provider._upload_task
+            if task is not None and not task.done():
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+
+    asyncio.run(_run())
+
+
+def test_barge_in_sends_silence_when_the_mic_goes_quiet():
+    """打断后麦停了也要补静音，不能干等下一句或 6 秒保活才识别。"""
+    from core.providers.asr.doubao_stream import ASRProvider, _BARGE_IN_FRAMES
+
+    provider = ASRProvider({}, True)
+    provider._barge_quiet_seconds = 0.05
+    provider._barge_gap_seconds = 0.05
+    conn = _speaking_conn(provider)
+    provider.asr_ws = object()
+    provider.is_processing = True
+    sent = []
+
+    async def _send(_ws, frame, remember=True):
+        sent.append(frame)
+
+    provider._send_pcm = _send
+
+    async def _run():
+        import core.handle.abortHandle as abort_mod
+
+        async def _abort(_conn):
+            return None
+
+        original = abort_mod.handleAbortMessage
+        abort_mod.handleAbortMessage = _abort
+        try:
+            for index in range(_BARGE_IN_FRAMES):
+                await provider.receive_audio(conn, bytes([index + 1]), True)
+            await asyncio.sleep(0.2)
+            silence = b"\x00" * int(provider.rate * 2 * 0.2)
+            assert provider._barge_silence_sent is True
+            assert silence in sent or silence in provider._unsent
+        finally:
+            abort_mod.handleAbortMessage = original
+            provider._is_stopping = True
+            provider._cancel_barge_close()
+            task = provider._upload_task
+            if task is not None and not task.done():
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+
+    asyncio.run(_run())
+
+
+def test_reconnect_flush_does_not_block_the_mic_thread():
+    from core.providers.asr.doubao_stream import ASRProvider, _BARGE_IN_FRAMES
+
+    provider = ASRProvider({}, True)
+    conn = _speaking_conn(provider)
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def _slow_open(_conn, flush_cache=True):
+        started.set()
+        await release.wait()
+        return False
+
+    provider._open_session = _slow_open
+
+    async def _run():
+        import core.handle.abortHandle as abort_mod
+
+        async def _abort(_conn):
+            return None
+
+        original = abort_mod.handleAbortMessage
+        abort_mod.handleAbortMessage = _abort
+        try:
+            for index in range(_BARGE_IN_FRAMES):
+                await asyncio.wait_for(
+                    provider.receive_audio(conn, bytes([index]), True),
+                    timeout=0.5,
+                )
+            await asyncio.wait_for(started.wait(), timeout=0.5)
+            assert provider._session_alive() is False
+            assert len(provider._unsent) == _BARGE_IN_FRAMES
+        finally:
+            abort_mod.handleAbortMessage = original
+            provider._is_stopping = True
+            provider._want_connect = False
+            provider._unsent = []
+            provider._cancel_barge_close()
+            release.set()
+            task = provider._upload_task
+            if task is not None and not task.done():
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+
+    asyncio.run(_run())
+
+
+def test_phone_prompt_is_not_treated_as_barge_in():
+    from core.providers.asr.doubao_stream import ASRProvider, _BARGE_IN_FRAMES
+
+    provider = ASRProvider({}, True)
+    conn = _speaking_conn(provider)
+
+    class _Handler:
+        def _allow_barge_in(self):
+            return False
+
+    conn.voice_activation_handler = _Handler()
+
+    async def _run():
+        for index in range(_BARGE_IN_FRAMES + 2):
+            await provider.receive_audio(conn, bytes([index]), True)
+        assert provider._unsent == []
+        assert provider._barge_in is False
+        assert provider._barge_abort_sent is False
+        assert provider._upload_task is None
+
+    asyncio.run(_run())
+
+
+def test_aborted_tts_audio_is_not_queued():
+    import queue
+
+    from core.providers.tts.base import TTSProviderBase
+
+    class _Conn:
+        client_abort = True
+        tts_epoch = 1
+
+    class _Player(TTSProviderBase):
+        async def text_to_speak(self, text, output_file):
+            return None
+
+    player = _Player.__new__(_Player)
+    player.conn = _Conn()
+    player.tts_audio_queue = queue.Queue()
+    player._tts_epoch = 0
+    player.handle_opus(b"old")
+    assert player.tts_audio_queue.empty()
+    player.conn.client_abort = False
+    player.handle_opus(b"late")
+    assert player.tts_audio_queue.empty()
+    player._tts_epoch = 1
+    player.handle_opus(b"new")
+    assert player.tts_audio_queue.get_nowait()[1] == b"new"

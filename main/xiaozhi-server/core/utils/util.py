@@ -685,13 +685,73 @@ def validate_mcp_endpoint(mcp_endpoint: str) -> bool:
 
     return True
 
-def get_system_error_response(config: dict) -> str:
+# 系统错误（例如所有 LLM provider 都不可用）时的兜底话术。
+# 刻意不带「主人」这类通用称呼、不自称助手名字，也不推说自己「有点忙」：
+# 直接说清是后台服务出了问题，比含糊的「忙」更诚实。
+# 也不引导用户重试：provider 全挂时，用户说多少遍都一样，让他重复说
+# 只会加深挫败感。所以这里只如实承认，不做「再说一遍 / 稍后再试」的承诺。
+# 称呼从角色设定的 [主人称呼] 段落解析后拼在句首，没配称呼就不带。
+DEFAULT_SYSTEM_ERROR_RESPONSE = "{title}抱歉，我的后台服务出了一点问题，暂时帮不了您。"
+
+# 历史默认话术。库里/旧配置文件里可能还留着，命中时直接换成新话术，
+# 避免升级后仍播报旧措辞。
+_LEGACY_SYSTEM_ERROR_RESPONSES = (
+    "主人，小智现在有点忙，我们稍后再试吧。",
+    "{title}抱歉，刚才没接上，您再说一遍好吗？",
+    "{title}抱歉，我现在帮不了您。",
+)
+
+# 语音引导写入角色设定的固定格式：\n[主人称呼]\n请称呼用户为「张先生」。
+# 中间的换行允许是真换行，也允许是被转义过的字面 \\n。
+_OWNER_TITLE_RE = re.compile(
+    r"\[主人称呼\](?:\s|\\n)*请称呼用户为[「\"']([^」\"'\n]{1,12})[」\"']"
+)
+
+
+def get_owner_title(config: dict):
+    """从角色设定里取用户称呼，取不到（没做过语音引导）返回 None。"""
+    if not isinstance(config, dict):
+        return None
+    prompt = config.get("prompt")
+    if not isinstance(prompt, str) or not prompt:
+        return None
+    match = _OWNER_TITLE_RE.search(prompt)
+    if not match:
+        return None
+    return match.group(1).strip() or None
+
+
+def get_system_error_response(config: dict, conn=None) -> str:
     """获取系统错误时的回复
+
+    话术支持 {title} 占位，替换成用户自己的称呼（如「张先生」）；
+    没有设置称呼时占位与随之而来的标点会被清理掉。
 
     Args:
         config: 配置字典
+        conn: 连接对象，传入时优先用 conn.config（含最新角色设定）
 
     Returns:
         str: 系统错误时的回复
     """
-    return config.get("system_error_response", "主人，小智现在有点忙，我们稍后再试吧。")
+    source = config
+    if conn is not None and isinstance(getattr(conn, "config", None), dict):
+        source = conn.config
+    if not isinstance(source, dict):
+        source = {}
+
+    template = source.get("system_error_response")
+    if not isinstance(template, str) or not template.strip():
+        template = DEFAULT_SYSTEM_ERROR_RESPONSE
+    elif template.strip() in _LEGACY_SYSTEM_ERROR_RESPONSES:
+        template = DEFAULT_SYSTEM_ERROR_RESPONSE
+
+    title = get_owner_title(source)
+    text = template.replace("{title}", f"{title}，" if title else "")
+    # 称呼为空、或管理员在模板里自己带了标点时，避免出现「，抱歉」这种开头
+    text = re.sub(r"^[\s，,、。.]+", "", text)
+    text = re.sub(r"[，,]{2,}", "，", text)
+    text = text.strip()
+    if not text:
+        return DEFAULT_SYSTEM_ERROR_RESPONSE.replace("{title}", "")
+    return text

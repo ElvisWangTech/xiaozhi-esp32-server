@@ -5,6 +5,8 @@ import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 
+import java.util.List;
+
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.tags.Tag;
 import jakarta.validation.Valid;
@@ -12,6 +14,7 @@ import xiaozhi.common.utils.Result;
 import xiaozhi.modules.device.dto.VoiceActivationBindDTO;
 import xiaozhi.modules.device.dto.VoiceActivationMacDTO;
 import xiaozhi.modules.device.dto.VoiceActivationNicknameDTO;
+import xiaozhi.modules.device.dto.VoiceActivationRoleDTO;
 import xiaozhi.modules.device.dto.VoiceActivationSkillAuthDTO;
 import xiaozhi.modules.device.dto.VoiceActivationSkillCodeDTO;
 import xiaozhi.modules.device.dto.VoiceActivationSkillTaskDTO;
@@ -20,6 +23,7 @@ import xiaozhi.modules.device.service.VoiceActivationService;
 import xiaozhi.modules.device.vo.VoiceActivationBindVO;
 import xiaozhi.modules.device.vo.VoiceActivationSessionVO;
 import xiaozhi.modules.device.vo.VoiceActivationSkillAuthVO;
+import xiaozhi.modules.device.vo.VoiceActivationTemplateVO;
 
 @Tag(name = "语音激活")
 @RestController
@@ -58,6 +62,19 @@ public class VoiceActivationController {
         return new Result<>();
     }
 
+    @PostMapping("/role/templates")
+    @Operation(summary = "列出可选的角色性格模板")
+    public Result<List<VoiceActivationTemplateVO>> roleTemplates(@Valid @RequestBody VoiceActivationMacDTO dto) {
+        return new Result<List<VoiceActivationTemplateVO>>().ok(voiceActivationService.listRoleTemplates(dto.getMacAddress()));
+    }
+
+    @PostMapping("/role")
+    @Operation(summary = "保存主人称呼和角色性格")
+    public Result<Void> role(@Valid @RequestBody VoiceActivationRoleDTO dto) {
+        voiceActivationService.saveRole(dto);
+        return new Result<>();
+    }
+
     @PostMapping("/skills")
     @Operation(summary = "通用技能绑定并签发邀请令牌")
     public Result<Void> skills(@Valid @RequestBody VoiceActivationMacDTO dto) {
@@ -69,7 +86,8 @@ public class VoiceActivationController {
     @Operation(summary = "启动授权技能自动化（滴滴、瑞幸）")
     public Result<VoiceActivationSkillAuthVO> skillsAuth(@Valid @RequestBody VoiceActivationSkillAuthDTO dto) {
         return new Result<VoiceActivationSkillAuthVO>()
-                .ok(voiceActivationService.startSkillAuth(dto.getMacAddress(), dto.getService()));
+                .ok(voiceActivationService.startSkillAuth(
+                        dto.getMacAddress(), dto.getService(), Boolean.TRUE.equals(dto.getRebind())));
     }
 
     @PostMapping("/skills/auth/status")
@@ -92,6 +110,13 @@ public class VoiceActivationController {
     public Result<VoiceActivationSkillAuthVO> skillsAuthCancel(@Valid @RequestBody VoiceActivationSkillTaskDTO dto) {
         return new Result<VoiceActivationSkillAuthVO>()
                 .ok(voiceActivationService.cancelSkillAuth(dto.getMacAddress(), dto.getTaskId()));
+    }
+
+    @PostMapping("/skills/defer")
+    @Operation(summary = "用户跳过技能绑定，之后静默重试")
+    public Result<Void> skillsDefer(@Valid @RequestBody VoiceActivationMacDTO dto) {
+        voiceActivationService.deferSkills(dto.getMacAddress());
+        return new Result<>();
     }
 
     @PostMapping("/skills/complete")

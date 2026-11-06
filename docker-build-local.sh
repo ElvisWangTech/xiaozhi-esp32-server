@@ -88,6 +88,7 @@ build_base() {
 
 build_server() {
   echo "==> 构建 xiaozhi-server 镜像..."
+  echo "    会按当前 requirements.txt 补齐基础镜像缺少的依赖（含 mcp 2.x 的 httpx2）"
   docker build -f Dockerfile-server \
     --build-arg BASE_IMAGE="${SERVER_BASE_IMAGE}" \
     -t "${SERVER_IMAGE}" .

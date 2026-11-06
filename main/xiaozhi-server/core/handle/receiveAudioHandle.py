@@ -13,6 +13,44 @@ from core.handle.sendAudioHandle import send_stt_message, SentenceType
 
 TAG = __name__
 
+# ASR 连续失败多少次触发切换；切换失败后的冷却时间（秒）
+_ASR_FAILOVER_THRESHOLD = 3
+_ASR_FAILOVER_COOLDOWN = 60.0
+
+
+async def _maybe_failover_asr(conn):
+    """ASR 建连/处理连续失败的看门狗：切换到已配置的备用 provider。
+
+    在连接事件循环里执行；带冷却时间，切换失败时不逐帧重试。
+    """
+    failures = getattr(conn, "_asr_fail_count", 0)
+    if failures < _ASR_FAILOVER_THRESHOLD:
+        return
+    now = time.monotonic()
+    if now < getattr(conn, "_asr_failover_cooldown_until", 0.0):
+        return
+    conn._asr_failover_cooldown_until = now + _ASR_FAILOVER_COOLDOWN
+    conn._asr_fail_count = 0
+    conn.logger.bind(tag=TAG).warning(
+        f"ASR连续失败{failures}次，尝试切换备用provider"
+    )
+    try:
+        from core.utils import provider_failover
+
+        name = await provider_failover.failover_module(conn, "ASR")
+    except Exception as exc:
+        conn.logger.bind(tag=TAG).error(f"ASR切换备用provider失败: {exc}")
+        return
+    if name:
+        conn._asr_failover_cooldown_until = 0.0
+        # 新实例已 open_audio_channels；流式实现支持 ensure_connected 的立即建连
+        ensure = getattr(conn.asr, "ensure_connected", None)
+        if ensure is not None:
+            try:
+                await ensure(conn)
+            except Exception:
+                pass
+
 
 async def handleAudioMessage(conn: "ConnectionHandler", pcm_frame):
     # 当前片段是否有人说话
@@ -31,7 +69,20 @@ async def handleAudioMessage(conn: "ConnectionHandler", pcm_frame):
     # 设备长时间空闲检测，用于say goodbye
     await no_voice_close_connect(conn, have_voice)
     # 接收音频
-    await conn.asr.receive_audio(conn, pcm_frame, have_voice)
+    try:
+        await conn.asr.receive_audio(conn, pcm_frame, have_voice)
+    except Exception as exc:
+        conn.logger.bind(tag=TAG).warning(f"ASR接收音频失败: {exc}")
+        conn._asr_fail_count = getattr(conn, "_asr_fail_count", 0) + 1
+        await _maybe_failover_asr(conn)
+        return
+    # provider 侧的建连失败计数（如豆包流式握手失败）
+    provider_failures = getattr(conn.asr, "connect_failures", 0)
+    if provider_failures:
+        conn._asr_fail_count = max(
+            getattr(conn, "_asr_fail_count", 0), provider_failures
+        )
+        await _maybe_failover_asr(conn)
 
 
 async def resume_vad_detection(conn: "ConnectionHandler"):
@@ -75,13 +126,32 @@ async def startToChat(conn: "ConnectionHandler", text):
     else:
         conn.current_speaker = None
 
-    if getattr(conn, "voice_onboarding", None) in ("nickname", "skills") and getattr(
-        conn, "voice_activation_handler", None
-    ) is None:
-        return
-
     if getattr(conn, "voice_activation_handler", None) is not None:
         await conn.voice_activation_handler.handle_text(actual_text)
+        return
+
+    from core.handle.voice_activation import resolve_skills_request, start_skills_onboarding
+
+    onboarding = getattr(conn, "voice_onboarding", None)
+    # 昵称和角色设定进行中不抢「绑定技能」。其余时候整句口令直接进入，带否定或反问的先问模型。
+    skill_request = None
+    if onboarding not in ("nickname", "role"):
+        skill_request = await resolve_skills_request(conn, actual_text)
+
+    # 唤醒后的静默重试还没挂上会话时，用户已经说了绑定技能，不能把这句话丢掉。
+    if onboarding in ("skills", "skills_quiet") and skill_request:
+        conn.speak_skill_failure = True
+        conn.voice_onboarding = "skills"
+        await start_skills_onboarding(
+            conn,
+            announce="好的，重新绑定授权技能。" if skill_request == "rebind" else "好的，开始绑定技能。",
+            rebind=skill_request == "rebind",
+        )
+        return
+
+    if getattr(conn, "voice_onboarding", None) in ("nickname", "role", "skills", "skills_quiet") and getattr(
+        conn, "voice_activation_handler", None
+    ) is None:
         return
 
     if conn.need_bind:
@@ -100,11 +170,13 @@ async def startToChat(conn: "ConnectionHandler", text):
     if conn.client_is_speaking and conn.client_listen_mode != "manual":
         await handleAbortMessage(conn)
 
-    from core.handle.voice_activation import is_skills_command, start_skills_onboarding
-
     # 引导失败或稍后后，用户可主动说「绑定技能」重新进入（接口会校验 onboarding_status）
-    if is_skills_command(actual_text):
-        await start_skills_onboarding(conn, announce="好的，开始绑定技能。")
+    if skill_request:
+        await start_skills_onboarding(
+            conn,
+            announce="好的，重新绑定授权技能。" if skill_request == "rebind" else "好的，开始绑定技能。",
+            rebind=skill_request == "rebind",
+        )
         return
 
     # 首先进行意图分析，使用实际文本内容
@@ -147,8 +219,14 @@ async def no_voice_close_connect(conn: "ConnectionHandler", have_voice):
                 conn.logger.bind(tag=TAG).info("结束对话，无需发送结束提示语")
                 await conn.close()
                 return
-            if getattr(conn, "voice_activation_handler", None) is not None:
-                await conn.close()
+            handler = getattr(conn, "voice_activation_handler", None)
+            if handler is not None:
+                conn.close_after_chat = True
+                give_up = getattr(handler, "give_up_and_sleep", None)
+                if give_up is not None:
+                    await give_up()
+                else:
+                    await conn.close()
                 return
             prompt = end_prompt.get("prompt")
             if not prompt:
