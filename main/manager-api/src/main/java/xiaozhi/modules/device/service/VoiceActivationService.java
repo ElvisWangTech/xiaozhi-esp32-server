@@ -330,7 +330,8 @@ public class VoiceActivationService {
         body.put("code", smsCode);
         callPortalJson(portal.baseUrl, null, null, HttpMethod.POST, "/api/automation/code", body);
         VoiceActivationSkillAuthVO vo = skillAuthStatus(mac, tid);
-        if ("pending".equals(vo.getStatus()) || "waiting_code".equals(vo.getStatus())) {
+        if ("pending".equals(vo.getStatus())
+                || ("waiting_code".equals(vo.getStatus()) && !"INVALID_CODE".equals(vo.getErrorCode()))) {
             vo.setStatus("pending");
             if (StringUtils.isBlank(vo.getMessage())) {
                 vo.setMessage("验证码已提交，正在登录");
@@ -573,6 +574,7 @@ public class VoiceActivationService {
         if (view == null) {
             vo.setStatus("failed");
             vo.setMessage("任务不存在");
+            vo.setErrorCode("TASK_NOT_FOUND");
             return vo;
         }
         String taskId = textOrNull(view, "task_id");
@@ -580,6 +582,7 @@ public class VoiceActivationService {
         String message = textOrNull(view, "message");
         vo.setTaskId(taskId);
         vo.setMessage(message);
+        vo.setErrorCode(textOrNull(view, "error_code"));
         if (view.path("done").asBoolean(false) || "done".equals(state)) {
             vo.setStatus("done");
         } else if (view.path("canceled").asBoolean(false) || "canceled".equals(state)) {

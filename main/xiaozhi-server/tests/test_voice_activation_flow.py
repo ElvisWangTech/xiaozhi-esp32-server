@@ -1,0 +1,369 @@
+import unittest
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, Mock, patch
+
+from core.handle import voice_activation as voice
+
+
+class VoiceActivationFlowTest(unittest.IsolatedAsyncioTestCase):
+    def make_session(self, stage="bind", server=None):
+        conn = SimpleNamespace(
+            config={},
+            headers={"device-id": "test-device"},
+            logger=Mock(),
+            server=server,
+        )
+        session = voice.VoiceActivationSession(conn, stage=stage)
+        session._say = AsyncMock()
+        session._post = AsyncMock()
+        session._wait_spoken = AsyncMock()
+        session._schedule_phone_wait = Mock()
+        return session
+
+    async def test_onboarding_progresses_from_greeting_to_reboot(self):
+        session = self.make_session()
+        session._start_idle_watch = Mock()
+        session._schedule_asr_ready = Mock()
+        session._send_recognized_text = AsyncMock()
+        session._reboot_device = AsyncMock()
+        session.conn.complete_voice_bind_setup = AsyncMock(return_value=True)
+        session.conn.refresh_agent_prompt = AsyncMock()
+        session._post.side_effect = [
+            None, None, None, ["可爱女生", "星际游子"], None, None,
+            {"status": "waiting_code", "taskId": "luckin-test"},
+            {"status": "done"}, {"status": "waiting_code", "taskId": "didi-test"},
+            None, None,
+        ]
+        turns = [
+            ("叫我老周", {"intent": "answer", "title": "老周"}, session.CONFIRM_GREET),
+            ("对", {"intent": "accept"}, session.ASK_PHONE),
+            ("我的手机号是123然后456789，13", {"intent": "phone", "phone": "12345678913"}, session.CONFIRM_PHONE),
+            ("对", {"intent": "accept"}, session.ASK_CODE),
+            ("验证码是123456", {"intent": "code", "slot": 1}, session.ASK_NICKNAME),
+            ("你叫小七", {"intent": "answer", "nickname": "小七"}, session.CONFIRM_NICKNAME),
+            ("对", {"intent": "accept"}, session.ASK_PERSONA),
+            ("第二个", {"intent": "answer", "ordinal": 2}, session.CONFIRM_PERSONA),
+            ("就这个", {"intent": "accept"}, session.ASK_SUPPLEMENT),
+            ("说话温柔一点", {"action": "content", "text": "说话温柔一点"}, session.ASK_SUPPLEMENT),
+            ("就这样吧", {"action": "end"}, session.CONFIRM_SUPPLEMENT),
+            ("对", {"intent": "accept"}, session.ASK_AUTH_CODE),
+            ("123456", {"intent": "code", "slot": 1}, session.ASK_AUTH_CODE),
+            ("滴滴先不用", {"intent": "skip"}, session.REBOOTING),
+        ]
+        model = AsyncMock(side_effect=[reply for _, reply, _ in turns])
+        await session.start()
+        with patch.object(voice, "_ask_llm_json", model):
+            for utterance, _, expected_state in turns:
+                await session.handle_text(utterance)
+                self.assertEqual(session.state, expected_state, utterance)
+        self.assertEqual(session.auth_done, ["瑞幸咖啡"])
+        self.assertEqual(session.auth_skipped, ["滴滴出行"])
+        role_call = session._post.await_args_list[4]
+        self.assertEqual(role_call.args[1]["ownerTitle"], "老周")
+        self.assertEqual(role_call.args[1]["templateName"], "星际游子")
+        self.assertEqual(role_call.args[1]["supplement"], "说话温柔一点")
+        self.assertEqual(session._post.await_args.args[0], "/device/voice-activation/skills/complete")
+        session._reboot_device.assert_awaited_once()
+
+    async def test_first_sms_cooldown_requires_explicit_resend(self):
+        session = self.make_session()
+        session.phone = "13800138000"
+        cooldown = RuntimeError("cooldown")
+        cooldown.code = voice.VOICE_SMS_COOLDOWN
+        cooldown.data = {"retryAfterSeconds": 12}
+        session._post.side_effect = [cooldown, None]
+        await session._send_sms()
+        self.assertEqual(session.state, session.RETRY_SMS)
+        self.assertIn("12秒", session._say.await_args.args[0])
+        model = AsyncMock(side_effect=[{"intent": "accept"}, {"intent": "resend"}])
+        with patch.object(voice, "_ask_llm_json", model):
+            await session._on_retry_sms("好")
+            self.assertEqual(session._post.await_count, 1)
+            await session._on_retry_sms("再发一条")
+        self.assertEqual(session.state, session.ASK_CODE)
+        self.assertEqual(session._post.await_count, 2)
+
+    async def test_phone_ignores_unrelated_digits_and_applies_correction(self):
+        session = self.make_session()
+        session.state = session.ASK_PHONE
+        model = AsyncMock(side_effect=[
+            {"intent": "phone", "phone": "138"},
+            {"intent": "unclear"},
+            {"intent": "phone", "phone": "13900139000"},
+        ])
+        with patch.object(voice, "_ask_llm_json", model):
+            await session._on_phone("138")
+            await session._on_phone("周五吧")
+            self.assertEqual(session.phone_digits, "138")
+            await session._on_phone("13800138000，不对，是13900139000")
+        model_input = model.await_args.args[2]
+        self.assertEqual(model_input, "13800138000，不对，是13900139000")
+        self.assertEqual(session.phone, "13900139000")
+        self.assertEqual(session.state, session.CONFIRM_PHONE)
+
+    async def test_phone_from_one_utterance_with_several_groups_is_read_back(self):
+        session = self.make_session()
+        session.state = session.ASK_PHONE
+        text = "我的手机号是123然后456789，13"
+        model = AsyncMock(return_value={"intent": "phone", "phone": "12345678913"})
+        with patch.object(voice, "_ask_llm_json", model):
+            await session._on_phone(text)
+        self.assertEqual(model.await_args.args[2], text)
+        self.assertEqual(session.phone, "12345678913")
+        self.assertEqual(session.state, session.CONFIRM_PHONE)
+        self.assertIn(voice.spoken_digits(session.phone), session._say.await_args.args[0])
+        session._post.assert_not_awaited()
+
+    async def test_sms_resend_cooldown_stays_in_code_state(self):
+        session = self.make_session()
+        session.phone = "13800138000"
+        session.state = session.ASK_CODE
+        cooldown = RuntimeError("provider message can change")
+        cooldown.code = voice.VOICE_SMS_COOLDOWN
+        cooldown.data = {"retryAfterSeconds": 12}
+        session._post.side_effect = [cooldown, None]
+        model = AsyncMock(return_value={"intent": "resend"})
+        with patch.object(voice, "_ask_llm_json", model):
+            await session._on_code("重发")
+            self.assertEqual(session.state, session.ASK_CODE)
+            self.assertIn("12秒", session._say.await_args.args[0])
+            model.return_value = {"intent": "accept"}
+            await session._on_code("好")
+            self.assertEqual(session._post.await_count, 1)
+            self.assertNotIn("刚才还询问", model.await_args.args[1])
+            model.return_value = {"intent": "resend"}
+            await session._on_code("重新发送验证码")
+        self.assertEqual(session.state, session.ASK_CODE)
+        self.assertEqual(session._post.await_args.args[1]["phone"], session.phone)
+
+    async def test_wait_and_phone_input_use_one_intent_call_each(self):
+        session = self.make_session()
+        session.state = session.ASK_PHONE
+        session.phone_digits = "138"
+        session._send_recognized_text = AsyncMock()
+        session._schedule_asr_ready = Mock()
+        model = AsyncMock(side_effect=[
+            {"intent": "wait"},
+            {"intent": "phone", "phone": "00138000"},
+        ])
+        with patch.object(voice, "_ask_llm_json", model):
+            await session.handle_text("先留在这一步，我找一下")
+            self.assertEqual(model.await_count, 1)
+            self.assertEqual(session._say.await_args.args[0], "好，准备好了接着说。")
+            self.assertEqual(session.state, session.ASK_PHONE)
+            self.assertEqual(session.phone_digits, "138")
+            await session.handle_text("00138000")
+        self.assertEqual(model.await_count, 2)
+        self.assertEqual(session.state, session.CONFIRM_PHONE)
+        self.assertEqual(session.phone, "13800138000")
+
+    async def test_invalid_sms_uses_error_code_without_interpreting_message(self):
+        session = self.make_session()
+        session.state = session.ASK_CODE
+        session.phone = "13800138000"
+        error = RuntimeError("expired text is irrelevant")
+        error.code = voice.SMS_CODE_ERROR
+        session._post.side_effect = error
+        with patch.object(voice, "_ask_llm_json", AsyncMock(return_value={"intent": "code", "slot": 1})):
+            await session._on_code("123456")
+        self.assertIn("核对验证码", session._say.await_args.args[0])
+        self.assertIsNone(session._sms_retry_action)
+
+    async def test_persona_out_of_range_keeps_candidate(self):
+        session = self.make_session("role")
+        session.persona_templates = ["甲", "乙", "丙"]
+        session.persona_name = "乙"
+        session.state = session.CONFIRM_PERSONA
+        model = AsyncMock(return_value={"intent": "answer", "ordinal": 5})
+        with patch.object(voice, "_ask_llm_json", model):
+            await session._on_confirm_persona("不是第二个，还是第五个吧")
+        self.assertEqual(model.await_args.args[2], "不是第二个，还是第五个吧")
+        self.assertIn("三个角色", session._say.await_args.args[0])
+        self.assertEqual(session.state, session.CONFIRM_PERSONA)
+        self.assertEqual(session.persona_name, "乙")
+
+    async def test_persona_applies_only_the_models_final_choice(self):
+        session = self.make_session("role")
+        session.persona_templates = ["甲", "乙", "丙"]
+        session.persona_name = "乙"
+        session.state = session.CONFIRM_PERSONA
+        model = AsyncMock(side_effect=[
+            {"intent": "unclear", "ordinal": 3},
+            {"intent": "answer", "ordinal": 3},
+        ])
+        with patch.object(voice, "_ask_llm_json", model):
+            await session._on_confirm_persona("第三个是什么来着？")
+            self.assertEqual(session.persona_name, "乙")
+            await session._on_confirm_persona("不选第二个了，换第三个")
+        self.assertEqual(session.persona_name, "丙")
+        self.assertEqual(session.state, session.CONFIRM_PERSONA)
+
+    async def test_supplement_silence_restores_unsubmitted_draft(self):
+        server = SimpleNamespace()
+        session = self.make_session("role", server)
+        session.state = session.ASK_SUPPLEMENT
+        session.supplement_parts = ["说话温柔一点"]
+        await session.give_up_and_sleep()
+        session._post.assert_not_awaited()
+        resumed = self.make_session("role", server)
+        resumed._start_idle_watch = Mock()
+        await resumed.start()
+        self.assertEqual(resumed.state, resumed.ASK_SUPPLEMENT)
+        self.assertEqual(resumed.supplement_parts, ["说话温柔一点"])
+
+    async def test_supplement_waits_for_end_and_confirmation(self):
+        for supplement in ([], ["说话温柔一点"]):
+            with self.subTest(supplement=supplement):
+                session = self.make_session("role")
+                session.state = session.ASK_SUPPLEMENT
+                session.supplement_parts = supplement.copy()
+                session._send_recognized_text = AsyncMock()
+                session._save_role = AsyncMock()
+                model = AsyncMock(side_effect=[
+                    {"intent": "wait"}, {"action": "end"}, {"intent": "accept"},
+                ])
+                with patch.object(voice, "_ask_llm_json", model):
+                    await session.handle_text("我想一下")
+                    self.assertEqual(session.state, session.ASK_SUPPLEMENT)
+                    self.assertEqual(session.supplement_parts, supplement)
+                    await session.handle_text("就这样吧")
+                    self.assertEqual(session.state, session.CONFIRM_SUPPLEMENT)
+                    session._save_role.assert_not_awaited()
+                    await session.handle_text("可以")
+                session._save_role.assert_awaited_once_with("。".join(supplement))
+
+    async def test_stalled_playback_continues_after_legacy_wait(self):
+        session = self.make_session("skills")
+        session.conn.client_is_speaking = True
+        advance = AsyncMock()
+        del session._wait_spoken
+        sleep = AsyncMock()
+        with patch.object(voice.asyncio, "sleep", sleep):
+            await session._advance_after_skill_prompt("接下来开通瑞幸咖啡。", advance)
+        self.assertEqual(sleep.await_count, 80)
+        session._say.assert_awaited_once_with("接下来开通瑞幸咖啡。")
+        advance.assert_awaited_once()
+
+    async def test_role_confirmation_uses_requested_supplement_prompt(self):
+        session = self.make_session("role")
+        await session._ask_supplement()
+        self.assertEqual(session.state, session.ASK_SUPPLEMENT)
+        session._say.assert_awaited_once_with(
+            "接下来可以补充角色性格，比如，说话温柔一点，不要讲大道理"
+        )
+
+    async def test_new_sms_code_replaces_the_previous_resend_offer(self):
+        session = self.make_session()
+        session.state = session.ASK_CODE
+        session.phone = "13800138000"
+        session._sms_retry_action = "resend"
+        error = RuntimeError("invalid")
+        error.code = voice.SMS_CODE_ERROR
+        session._post.side_effect = error
+        model = AsyncMock(side_effect=[{"intent": "code", "slot": 1}, {"intent": "accept"}])
+        with patch.object(voice, "_ask_llm_json", model):
+            await session._on_code("123456")
+            self.assertIsNone(session._sms_retry_action)
+            await session._on_code("好")
+        self.assertEqual(session._post.await_count, 1)
+
+    async def test_role_save_error_uses_user_facing_prompt(self):
+        session = self.make_session("role")
+        session.state = session.CONFIRM_SUPPLEMENT
+        session._post.side_effect = RuntimeError("API 500: upstream exception")
+        await session._save_role("说话温柔一点")
+        self.assertEqual(session.state, session.CONFIRM_SUPPLEMENT)
+        session._say.assert_awaited_once_with("刚才没能保存角色设定，要我再试一次吗？")
+
+    async def test_skill_code_submission_error_uses_user_facing_prompt(self):
+        session = self.make_session("skills")
+        session.state = session.ASK_AUTH_CODE
+        session.auth_task_id = "test-task"
+        session._post.side_effect = RuntimeError("HTTP 503: upstream unavailable")
+        with patch.object(voice, "resolve_auth_reply", AsyncMock(return_value=("code", "123456"))):
+            await session._on_auth_code("123456")
+        self.assertEqual(session.state, session.ASK_AUTH_CODE)
+        session._say.assert_awaited_once_with("刚才没能提交验证码，请再念一遍。")
+
+    async def test_skill_failure_does_not_read_backend_details(self):
+        session = self.make_session("skills")
+        session.auth_label = "瑞幸咖啡"
+        session._run_next_auth = AsyncMock()
+        await session._handle_auth_result({
+            "status": "failed",
+            "errorCode": "PROVIDER_502",
+            "message": "HTTP 502 from upstream",
+        })
+        session._say.assert_awaited_once_with("瑞幸咖啡暂时没能开通。")
+
+    async def test_auth_status_error_keeps_the_existing_task(self):
+        session = self.make_session("skills")
+        session.auth_task_id = "existing"
+        session.auth_service = "luckin"
+        session.auth_label = "瑞幸咖啡"
+        session._post.side_effect = [RuntimeError("network"), {"status": "waiting_code"}]
+        session._run_next_auth = AsyncMock()
+        await session._resume_auth()
+        self.assertEqual(session.auth_task_id, "existing")
+        self.assertIs(session._auth_status_after_code, False)
+        session._run_next_auth.assert_not_awaited()
+        with patch.object(voice, "resolve_skill_retry", AsyncMock(return_value=("retry", False))):
+            await session._dispatch("再查一次")
+        self.assertEqual(session.auth_task_id, "existing")
+        self.assertIsNone(session._auth_status_after_code)
+        self.assertEqual(session._post.await_count, 2)
+
+    async def test_skills_completion_retries_only_the_failed_save(self):
+        session = self.make_session("skills")
+        session.conn.voice_onboarding = "skills"
+        session._reboot_device = AsyncMock()
+        session._bind_skills = AsyncMock()
+        session._post.side_effect = [RuntimeError("temporary failure"), None]
+        await session._finish_skills_and_reboot("瑞幸咖啡已开通。")
+        session._reboot_device.assert_not_awaited()
+        self.assertEqual(session.state, session.RETRY_SKILLS_COMPLETE)
+        self.assertEqual(session.conn.voice_onboarding, "skills")
+        with patch.object(voice, "resolve_skill_retry", AsyncMock(return_value=("retry", False))):
+            await session._dispatch("再试一次")
+        self.assertEqual(session._post.await_count, 2)
+        session._bind_skills.assert_not_awaited()
+        session._reboot_device.assert_awaited_once()
+        self.assertIn("瑞幸咖啡已开通", session._say.await_args.args[0])
+
+    async def test_failed_skill_waits_for_choice_and_retries_only_failed_skill(self):
+        session = self.make_session("skills")
+        session.auth_done = ["瑞幸咖啡"]
+        session.auth_failed = ["滴滴出行"]
+        session._finish_skills_and_reboot = AsyncMock()
+        await session._run_next_auth()
+        self.assertEqual(session.state, session.RETRY_AUTH_SUMMARY)
+        session._finish_skills_and_reboot.assert_not_awaited()
+        session._run_next_auth = AsyncMock()
+        with patch.object(voice, "_ask_llm_json", AsyncMock(return_value={"intent": "retry", "services": ["didi", "unknown"]})):
+            await session._on_auth_summary("再试一下滴滴")
+        self.assertEqual(session.auth_queue, [("didi", "滴滴出行")])
+        self.assertEqual(session.auth_done, ["瑞幸咖啡"])
+
+    async def test_code_uses_only_the_selected_masked_slot(self):
+        model = AsyncMock(side_effect=[
+            {"intent": "unclear"},
+            {"intent": "code", "slot": 2},
+            {"intent": "code", "slot": 3},
+        ])
+        with patch.object(voice, "_ask_llm_json", model):
+            conn = self.make_session().conn
+            self.assertEqual(await voice.resolve_sms_reply(conn, "验证码是旧的123456，别用"), ("unclear", None))
+            self.assertEqual(await voice.resolve_sms_reply(conn, "别用123456，换成654321"), ("code", "654321"))
+            self.assertEqual(await voice.resolve_sms_reply(conn, "654321"), ("code", None))
+        for call in model.await_args_list:
+            self.assertNotIn("123456", call.args[2])
+            self.assertNotIn("654321", call.args[2])
+
+    def test_invalid_or_ambiguous_code_is_not_truncated(self):
+        self.assertIsNone(voice.isolated_code("123456789"))
+        self.assertIsNone(voice.extract_code("123456或者654321"))
+        self.assertEqual(voice.extract_code("验证码是123456"), "123456")
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -492,12 +492,17 @@ def test_supplement_collects_several_sentences_until_end():
     assert saved == ["说话温柔一点。少讲道理"]
 
 
-def test_supplement_end_without_content_saves_empty():
+def test_supplement_end_without_content_requires_confirmation():
     conn = _FakeConn('{"action":"end"}')
     session, said, saved = _supplement_session(conn)
     asyncio.run(session.handle_text("没有"))
+    assert saved == []
+    assert session.state == session.CONFIRM_SUPPLEMENT
+    assert said[-1] == "那就用刚才选的角色，可以吗？"
+
+    session.conn = _FakeConn('{"intent":"accept"}')
+    asyncio.run(session.handle_text("对"))
     assert saved == [""]
-    assert session.state == session.ASK_SUPPLEMENT
 
 
 def test_supplement_confirm_can_add_more_and_restart():
@@ -533,26 +538,6 @@ def test_supplement_stops_at_the_eighty_char_limit():
     asyncio.run(session.handle_text("再多一句"))
     assert session.supplement_parts == [long_text]
     assert any("八十个字" in text for text in said)
-
-
-def test_supplement_silence_submits_what_was_collected():
-    """用户说完就不再开口：先再问一次，仍无回应就提交已记下的内容。"""
-    import core.handle.voice_activation as voice_activation
-
-    conn = _FakeConn('{"action":"content","text":"说话温柔一点"}')
-    session, said, saved = _supplement_session(conn)
-    asyncio.run(session.handle_text("说话温柔一点"))
-    task = session._supplement_wait_task
-    assert task is not None
-
-    async def _run():
-        await session._supplement_timeout()
-        await session._supplement_timeout()
-
-    asyncio.run(_run())
-    assert any("还有要补充的吗" in text for text in said)
-    assert saved == ["说话温柔一点"]
-    assert session._supplement_wait_task is None
 
 
 def test_supplement_repeat_keeps_what_was_collected():
@@ -597,7 +582,7 @@ def test_config_finished_reboots_without_asking():
     assert conn.skills_pending is False
 
 
-def test_complete_failure_still_reboots():
+def test_complete_failure_waits_for_retry_before_reboot():
     conn = _skill_conn("skills")
     session = VoiceActivationSession(conn, stage="skills")
     said = []
@@ -616,8 +601,11 @@ def test_complete_failure_still_reboots():
     session._say = _say
     session._reboot_device = _reboot
     asyncio.run(session._finish_skills_and_reboot())
-    assert said == ["技能引导已结束。配置完毕，设备即将重启。"]
-    assert rebooted == [True]
+    assert said == ["刚才没能保存技能配置进度，要我再试一次吗？"]
+    assert rebooted == []
+    assert session.state == session.RETRY_SKILLS_COMPLETE
+    assert conn.voice_onboarding == "skills"
+    assert conn.skills_pending is True
 
 
 def test_empty_auth_queue_goes_straight_to_reboot():
@@ -1275,7 +1263,7 @@ def test_failed_auth_waits_for_prompt_before_next_auth():
 
     asyncio.run(session._handle_auth_result({"status": "failed", "message": "未收到短信"}))
     assert order == [
-        ("say", "瑞幸咖啡开通失败：未收到短信。"),
+        ("say", "瑞幸咖啡暂时没能开通。"),
         ("wait", ""),
         ("next", ""),
     ]
