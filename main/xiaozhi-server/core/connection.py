@@ -630,10 +630,20 @@ class ConnectionHandler:
                 if self.vad is None:
                     self.vad = self._vad
                 if self.asr is None:
-                    self.asr = self._initialize_asr()
-                asyncio.run_coroutine_threadsafe(
-                    self.asr.open_audio_channels(self), self.loop
-                )
+                    # 同上：选中的 ASR 缺必填配置时不能炸掉初始化流程
+                    try:
+                        self.asr = self._initialize_asr()
+                    except Exception as e:
+                        self.logger.bind(tag=TAG).error(f"初始化ASR失败: {e}")
+                        self.asr = None
+                if self.asr is not None:
+                    asyncio.run_coroutine_threadsafe(
+                        self.asr.open_audio_channels(self), self.loop
+                    )
+                else:
+                    asyncio.run_coroutine_threadsafe(
+                        self._failover_missing_module("ASR"), self.loop
+                    )
                 self.bind_completed_event.set()
                 asyncio.run_coroutine_threadsafe(
                     self._start_voice_activation_prompt(), self.loop
@@ -658,14 +668,26 @@ class ConnectionHandler:
             if self.vad is None:
                 self.vad = self._vad
             if self.asr is None:
-                self.asr = self._initialize_asr()
+                # 选中的 ASR 可能缺必填配置（实例化直接抛错）：不能让
+                # 异常炸掉整个初始化流程，否则音频通道永远打不开，
+                # 连接会一直哑到超时。失败交给 failover 换可用备用。
+                try:
+                    self.asr = self._initialize_asr()
+                except Exception as e:
+                    self.logger.bind(tag=TAG).error(f"初始化ASR失败: {e}")
+                    self.asr = None
 
             # 初始化声纹识别
             self._initialize_voiceprint()
-            # 打开语音识别通道
-            asyncio.run_coroutine_threadsafe(
-                self.asr.open_audio_channels(self), self.loop
-            )
+            # 打开语音识别通道；初始化失败的 ASR 由 failover 切换成功后打开
+            if self.asr is not None:
+                asyncio.run_coroutine_threadsafe(
+                    self.asr.open_audio_channels(self), self.loop
+                )
+            else:
+                asyncio.run_coroutine_threadsafe(
+                    self._failover_missing_module("ASR"), self.loop
+                )
 
             """加载记忆"""
             self._initialize_memory()
@@ -881,6 +903,21 @@ class ConnectionHandler:
         )
         self.change_system_prompt(enhanced or prompt)
 
+    async def _failover_missing_module(self, module_type: str):
+        """关键组件初始化失败（如选中的 ASR 缺必填配置）时的救场切换。
+
+        在连接事件循环里执行；ASR/TTS 切换成功后音频通道由切换流程
+        负责打开。并发触发（两条初始化路径同时发现缺失）由切换锁去重。
+        """
+        try:
+            from core.utils import provider_failover
+
+            await provider_failover.failover_missing_module(self, module_type)
+        except Exception as e:
+            self.logger.bind(tag=TAG).error(
+                f"{module_type}初始化失败后切换备用provider异常: {e}"
+            )
+
     def _initialize_asr(self):
         """初始化ASR"""
         if (
@@ -1092,6 +1129,16 @@ class ConnectionHandler:
             self.intent = modules["intent"]
         if modules.get("memory", None) is not None:
             self.memory = modules["memory"]
+
+        # 请求初始化却拿不到实例的关键组件（典型：选中的 ASR 缺必填
+        # 配置，实例化直接抛错）：切换到候选池里可用的备用 provider，
+        # 否则音频通道打不开，连接会一直哑到超时。
+        if init_asr and self.asr is None:
+            await self._failover_missing_module("ASR")
+        if init_tts and self.tts is None:
+            await self._failover_missing_module("TTS")
+        if init_llm and self.llm is None:
+            await self._failover_missing_module("LLM")
 
     def _initialize_memory(self):
         if self.memory is None:

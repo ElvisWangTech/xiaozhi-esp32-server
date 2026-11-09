@@ -154,6 +154,8 @@ class TTSProvider(TTSProviderBase):
         self.activate_session = False
         self._tts_epoch = None
         self._abort_cancel_sent = False
+        # 服务端拒绝过会话（EVENT_SessionFailed）后，本条连接上继续发文本没有意义
+        self._session_failed = False
         if config.get("private_voice"):
             self.voice = config.get("private_voice")
         else:
@@ -219,6 +221,39 @@ class TTSProvider(TTSProviderBase):
             self.ws = None
             raise
 
+    async def probe_ready(self) -> bool:
+        """切换候选前的握手自检：临时建一次 WebSocket，不碰实例状态。
+
+        ws_url / appid / resource_id 配错时握手会直接被拒（如 HTTP 404），
+        必须在切换阶段就暴露，否则会在真正合成时才失败，整轮对话被钉死。
+        """
+        ws = None
+        try:
+            ws = await asyncio.wait_for(
+                websockets.connect(
+                    self.ws_url, additional_headers=self._ws_headers(), max_size=1000000000
+                ),
+                timeout=min(8.0, max(3.0, self.tts_timeout)),
+            )
+            return True
+        except Exception as e:
+            logger.bind(tag=TAG).warning(f"TTS 连接自检失败({self.ws_url}): {str(e)}")
+            return False
+        finally:
+            if ws is not None:
+                try:
+                    await ws.close()
+                except Exception:
+                    pass
+
+    def _ws_headers(self):
+        return {
+            "X-Api-App-Key": self.appId,
+            "X-Api-Access-Key": self.access_token,
+            "X-Api-Resource-Id": self.resource_id,
+            "X-Api-Connect-Id": uuid.uuid4(),
+        }
+
     async def _ensure_connection(self):
         """建立新的WebSocket连接，并启动监听任务（仅第一次）"""
         try:
@@ -236,14 +271,8 @@ class TTSProvider(TTSProviderBase):
             # 建立新连接前取消旧监听任务
             await self._cancel_monitor_task()
 
-            ws_header = {
-                "X-Api-App-Key": self.appId,
-                "X-Api-Access-Key": self.access_token,
-                "X-Api-Resource-Id": self.resource_id,
-                "X-Api-Connect-Id": uuid.uuid4(),
-            }
             self.ws = await websockets.connect(
-                self.ws_url, additional_headers=ws_header, max_size=1000000000
+                self.ws_url, additional_headers=self._ws_headers(), max_size=1000000000
             )
             logger.bind(tag=TAG).debug("WebSocket连接建立成功")
             
@@ -276,7 +305,7 @@ class TTSProvider(TTSProviderBase):
 
     def tts_text_priority_thread(self):
         """火山引擎双流式TTS的文本处理线程"""
-        while not self.conn.stop_event.is_set():
+        while not self._closed and not self.conn.stop_event.is_set():
             try:
                 message = self.tts_text_queue.get(timeout=1)
 
@@ -325,7 +354,9 @@ class TTSProvider(TTSProviderBase):
                         )
                         future.result(timeout=self.tts_timeout)
                         self.before_stop_play_files.clear()
-                        self._note_tts_success()
+                        self._session_failed = False
+                        # 会话启动成功不代表服务可用（音频要等下行），
+                        # 成功计数只在真正收到音频帧时累加/清零。
                         logger.bind(tag=TAG).debug("TTS会话启动成功")
                     except Exception as e:
                         logger.bind(tag=TAG).error(f"启动TTS会话失败: {str(e)}")
@@ -344,7 +375,6 @@ class TTSProvider(TTSProviderBase):
                                 loop=self.conn.loop,
                             )
                             future.result(timeout=self.tts_timeout)
-                            self._note_tts_success()
                         except Exception as e:
                             logger.bind(tag=TAG).error(f"发送TTS文本失败: {str(e)}")
                             self._note_tts_failure(message.content_detail)
@@ -366,11 +396,11 @@ class TTSProvider(TTSProviderBase):
                             loop=self.conn.loop,
                         )
                         future.result(timeout=self.tts_timeout)
-                        self._note_tts_success()
                     except Exception as e:
                         logger.bind(tag=TAG).error(f"结束TTS会话失败: {str(e)}")
                         self._note_tts_failure("")
-                        self._maybe_failover_tts()
+                        # LAST 已被本实例消费，切换成功时把收尾标记补给新实例
+                        self._maybe_failover_tts(last_pending=True)
                         continue
 
             except queue.Empty:
@@ -386,8 +416,11 @@ class TTSProvider(TTSProviderBase):
         try:
             # 建立新连接
             if self.ws is None:
-                logger.bind(tag=TAG).warning(f"WebSocket连接不存在，终止发送文本")
-                return
+                # 不能静默 return：线程会把“没抛异常”当成合成成功，
+                # 失败计数被清零，整轮对话就再也切不走了。
+                raise ConnectionError("TTS WebSocket 连接不存在")
+            if self._session_failed:
+                raise ConnectionError("TTS 会话已被服务端拒绝")
 
             #  过滤Markdown
             filtered_text = MarkdownCleaner.clean_markdown(text)
@@ -566,6 +599,10 @@ class TTSProvider(TTSProviderBase):
                             f"TTS 会话被服务端拒绝: {self.conn.sentence_id}"
                         )
                         self.activate_session = False
+                        # 这条连接上继续发文本只会静默丢字：标记后由文本线程
+                        # 计入失败并触发切换（speaker/resource_id 配错属硬错误）。
+                        self._session_failed = True
+                        self._note_tts_failure("")
                     elif not self.resource_type and res.optional.event == EVENT_TTSSentenceStart:
                         json_data = json.loads(res.payload.decode("utf-8"))
                         self.tts_text = json_data.get("text", "")
@@ -588,6 +625,8 @@ class TTSProvider(TTSProviderBase):
                                     (SentenceType.FIRST, [], tts_text)
                                 )
                                 self.clear_tts_text(self.conn.sentence_id)
+                        # 真正产出音频才算服务可用（发送成功、会话启动都不算）
+                        self._note_tts_success()
                         self.wav_to_opus_data_audio_raw_stream(res.payload, callback=self.handle_opus)
                     elif not self.resource_type and res.optional.event == EVENT_TTSSentenceEnd:
                         logger.bind(tag=TAG).info(f"句子语音生成成功：{self.tts_text}")

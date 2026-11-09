@@ -1,6 +1,7 @@
 import os
 import re
 import math
+import time
 import uuid
 import queue
 import asyncio
@@ -108,9 +109,14 @@ class TTSProviderBase(ABC):
         self.tts_stop_request = False
         self.processed_chars = 0
         self.is_first_sentence = True
-        # 连续合成失败计数与失败文本列表：正常对话链路的 TTS 故障切换依据
-        self.consecutive_tts_failures = 0
+        # 本句是否出现过明确失败（布尔标记，不是计数）+ 待重放的失败文本
+        self._tts_failed = False
         self._failed_tts_texts = []
+        # 实例生命周期：shutdown() 后两个工作线程都要退出，否则热切换会新旧并存
+        self._closed = False
+        # 故障切换元信息（由 provider_failover 写入）
+        self._failover_name = None
+        self._from_failover = False
 
     def generate_filename(self, extension=".wav"):
         return os.path.join(
@@ -120,15 +126,28 @@ class TTSProviderBase(ABC):
 
     def handle_opus(self, opus_data: bytes):
         conn = getattr(self, "conn", None)
-        if conn is not None and getattr(conn, "client_abort", False):
+        drop_reason = None
+        if getattr(self, "_closed", False):
+            drop_reason = "实例已退役(_closed)"
+        elif conn is not None and getattr(conn, "client_abort", False):
+            drop_reason = "client_abort"
+        else:
+            epoch = getattr(self, "_tts_epoch", None)
+            if (
+                conn is not None
+                and epoch is not None
+                and epoch != getattr(conn, "tts_epoch", 0)
+            ):
+                drop_reason = f"tts_epoch不匹配({epoch}!={conn.tts_epoch})"
+
+        if drop_reason:
+            # 只记录原因变化，避免每个音频帧刷屏
+            if drop_reason != getattr(self, "_last_opus_drop_reason", None):
+                logger.bind(tag=TAG).warning(f"TTS音频帧被丢弃: {drop_reason}")
+                self._last_opus_drop_reason = drop_reason
             return
-        epoch = getattr(self, "_tts_epoch", None)
-        if (
-            conn is not None
-            and epoch is not None
-            and epoch != getattr(conn, "tts_epoch", 0)
-        ):
-            return
+
+        self._last_opus_drop_reason = None
         logger.bind(tag=TAG).debug(f"推送数据到队列里面帧数～～ {len(opus_data)}")
         self.tts_audio_queue.put((SentenceType.MIDDLE, opus_data, None, getattr(self, 'current_sentence_id', None)))
 
@@ -362,24 +381,42 @@ class TTSProviderBase(ABC):
     # ------------------------------------------------------------------
     # TTS 故障切换（正常对话链路）
     #
-    # to_tts/to_tts_stream 内部会重试并吞掉异常，上层只能靠“连续合成
-    # 失败次数”感知服务是否可用。达到阈值即在文本线程里触发切换：
-    # 真正的切换回到连接事件循环执行，本线程阻塞等待，成功后把本句
-    # 还没播出去的文本移交给新实例。
+    # 不做失败计数：provider 明确报错（异常 / 返回失败）就是一次硬失败，
+    # 立即切换；「没识别出文本」「静音」这类软结果不参与判断。
+    # 这里只留一个布尔标记，因为 LAST 收尾处会再问一次「本句有没有
+    # 明确失败」，避免正常播报时每句话都白跑一次切换流程。
     # ------------------------------------------------------------------
 
     def _note_tts_failure(self, text=None):
-        self.consecutive_tts_failures += 1
+        self._tts_failed = True
         if text:
+            # 只留最近若干段，避免整句文本无限堆积
             self._failed_tts_texts.append(text)
+            if len(self._failed_tts_texts) > 32:
+                del self._failed_tts_texts[:-32]
 
     def _note_tts_success(self):
-        self.consecutive_tts_failures = 0
-        self._failed_tts_texts = []
+        # 真的产出音频帧：本句无硬失败。不是「计数清零」。
+        self._tts_failed = False
 
-    def _maybe_failover_tts(self):
-        if self.consecutive_tts_failures < 2:
+    async def probe_ready(self) -> bool:
+        """切换候选时的可用性自检。
+
+        默认无需自检（HTTP 类 provider 只能靠首次合成暴露问题）；
+        会建长连接的 provider 必须重写，否则配置错误（如 ws_url 404）的
+        候选会被当成“切换成功”，把整轮对话钉死在一个更不可用的服务上。
+        """
+        return True
+
+    def _maybe_failover_tts(self, last_pending=False):
+        """本句出现过明确失败就立即切一次；没有就直接返回。
+
+        无阈值、无计数、无冷却：切换流程自己会扫描全部已配置候选并逐个
+        验证，全部不可用就返回 None，本轮把未合成的文本丢掉即可。
+        """
+        if not self._tts_failed:
             return
+        self._tts_failed = False
         conn = getattr(self, "conn", None)
         if conn is None:
             return
@@ -387,19 +424,29 @@ class TTSProviderBase(ABC):
         try:
             from core.utils.provider_failover import failover_module_sync
 
-            new_name = failover_module_sync(conn, "TTS")
+            new_name = failover_module_sync(
+                conn, "TTS", provider_name=self._failover_name
+            )
         except Exception as e:
             logger.bind(tag=TAG).error(f"TTS 切换备用provider失败: {e}")
         new_tts = getattr(conn, "tts", None)
         if new_name and new_tts is not None and new_tts is not self:
             try:
-                self._replay_pending_to_new_tts(new_tts)
+                self._replay_pending_to_new_tts(new_tts, send_last=last_pending)
             except Exception as e:
                 logger.bind(tag=TAG).error(f"重放未播文本到备用TTS失败: {e}")
-        self.consecutive_tts_failures = 0
+        elif new_name is None:
+            dropped = len(self._failed_tts_texts)
+            if dropped:
+                logger.bind(tag=TAG).warning(
+                    f"TTS 无可用备用provider，本轮丢弃 {dropped} 段未合成的文本"
+                )
         self._failed_tts_texts = []
 
-    def _replay_pending_to_new_tts(self, new_tts):
+    def _drop_failed_texts(self):
+        self._failed_tts_texts = []
+
+    def _replay_pending_to_new_tts(self, new_tts, send_last=False):
         """把本句还没播出去的文本移交给新 TTS 实例。"""
         sid = (
             getattr(self, "current_sentence_id", None)
@@ -445,8 +492,10 @@ class TTSProviderBase(ABC):
             )
         for m in pending:
             new_tts.tts_text_queue.put(m)
-        # 本句已收到 LAST 但还没处理时补一个收尾标记，让新实例正常收口
-        if not has_last and getattr(self, "tts_stop_request", False) and sid:
+        # 本句的 LAST 已被本实例消费（或正在消费）时，切换后必须给新实例补一个
+        # 收尾标记，否则新实例永远等不到句尾，音频通道不关、播放线程不结算。
+        need_last = send_last or getattr(self, "tts_stop_request", False)
+        if not has_last and need_last and sid:
             new_tts.tts_text_queue.put(
                 TTSMessageDTO(
                     sentence_id=sid,
@@ -485,7 +534,7 @@ class TTSProviderBase(ABC):
     # 这里默认是非流式的处理方式
     # 流式处理方式请在子类中重写
     def tts_text_priority_thread(self):
-        while not self.conn.stop_event.is_set():
+        while not self._closed and not self.conn.stop_event.is_set():
             try:
                 message = self.tts_text_queue.get(timeout=1)
                 if self.conn.client_abort:
@@ -516,7 +565,10 @@ class TTSProviderBase(ABC):
                         )
                 if message.sentence_type == SentenceType.LAST:
                     self._process_remaining_text_stream(opus_handler=self.handle_opus)
-                    self._maybe_failover_tts()
+                    # LAST 已被本实例消费：切换成功时要把收尾标记补给新实例
+                    self._maybe_failover_tts(last_pending=True)
+                    if self._closed:
+                        continue
                     self.tts_audio_queue.put(
                         (message.sentence_type, [], message.content_detail, message.sentence_id)
                     )
@@ -534,7 +586,7 @@ class TTSProviderBase(ABC):
         # 需要上报的文本和音频列表
         enqueue_text = None
         enqueue_audio = []
-        while not self.conn.stop_event.is_set():
+        while not self._closed and not self.conn.stop_event.is_set():
             text = None
             try:
                 try:
@@ -597,10 +649,19 @@ class TTSProviderBase(ABC):
         pass
 
     async def close(self):
-        """资源清理方法"""
+        """资源清理方法
+
+        注意：这是“关连接”语义，多个流式 provider 在重连前也会调它。
+        实例退役（热切换后不再使用）走 shutdown()，两者必须分开，
+        否则重连一次就把自己的文本线程停掉了。
+        """
         self._sentence_text_map.clear()
         if hasattr(self, "ws") and self.ws:
             await self.ws.close()
+
+    def shutdown(self):
+        """实例退役：标记后两个工作线程会在下一轮循环退出。"""
+        self._closed = True
 
     # 右引号/右括号，以及它们对应的左侧符号
     _QUOTE_PAIRS = (

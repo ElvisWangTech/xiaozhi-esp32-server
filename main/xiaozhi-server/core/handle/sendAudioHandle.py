@@ -50,6 +50,12 @@ async def sendAudioMessage(conn: "ConnectionHandler", sentenceType, audios, text
     if sentenceType is not SentenceType.MIDDLE:
         conn.logger.bind(tag=TAG).info(f"发送音频消息: {sentenceType}, {text}")
 
+    if sentenceType == SentenceType.LAST:
+        frame_count = (getattr(conn, "audio_flow_control", {}) or {}).get(
+            "packet_count", 0
+        )
+        conn.logger.bind(tag=TAG).info(f"本句实际下发音频帧: {frame_count}")
+
     # 发送结束消息（如果是最后一个文本）
     # 通话需要维持speaking状态
     if not conn.calling and sentenceType == SentenceType.LAST:
@@ -248,6 +254,7 @@ async def _send_audio_with_rate_control(
     """
     for packet in audio_list:
         if conn.client_abort:
+            conn.logger.bind(tag=TAG).warning("sendAudio 跳过音频帧: client_abort")
             return
 
         conn.last_activity_time = time.time() * 1000
@@ -269,6 +276,11 @@ async def _do_send_audio(conn: "ConnectionHandler", opus_packet, flow_control):
     """
     packet_index = flow_control.get("packet_count", 0)
     sequence = flow_control.get("sequence", 0)
+
+    if packet_index == 0:
+        conn.logger.bind(tag=TAG).info(
+            f"首个TTS音频帧写入WebSocket: {len(opus_packet)}字节"
+        )
 
     if conn.conn_from_mqtt_gateway:
         # 计算时间戳（基于播放位置）

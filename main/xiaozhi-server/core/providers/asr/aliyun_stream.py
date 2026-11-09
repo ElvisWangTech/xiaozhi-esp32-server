@@ -135,8 +135,11 @@ class ASRProvider(ASRProviderBase):
         if audio_have_voice and not self.is_processing and not self.asr_ws:
             try:
                 await self._start_recognition(conn)
+                self.connect_failures = 0
             except Exception as e:
                 logger.bind(tag=TAG).error(f"开始识别失败: {str(e)}")
+                # 连续建连失败计数：由 receiveAudioHandle 的看门狗触发切换
+                self.connect_failures = getattr(self, "connect_failures", 0) + 1
                 await self._cleanup()
                 return
 

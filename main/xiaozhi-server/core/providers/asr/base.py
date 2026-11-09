@@ -14,10 +14,9 @@ import threading
 from abc import ABC, abstractmethod
 from config.logger import setup_logging
 from core.providers.asr.dto.dto import InterfaceType
-from core.handle.receiveAudioHandle import startToChat
+from core.handle.receiveAudioHandle import startToChat, handleAudioMessage, _maybe_failover_asr
 from core.handle.reportHandle import enqueue_asr_report
 from core.utils.util import remove_punctuation_and_length
-from core.handle.receiveAudioHandle import handleAudioMessage
 from typing import Optional, Tuple, List, NamedTuple, TYPE_CHECKING
 
 
@@ -113,11 +112,16 @@ class ASRProviderBase(ABC):
                 voiceprint_result = None
 
             # 记录识别结果 - 检查是否为异常
+            asr_hard_failure = False
             if isinstance(asr_result, Exception):
                 logger.bind(tag=TAG).error(f"ASR识别失败: {asr_result}")
                 raw_text = ""
+                asr_hard_failure = True
             else:
                 raw_text, _ = asr_result
+                # wrapper 吞掉异常时返回 None；空字符串只是「没听清」，
+                # 属于软结果，不能据此切换 provider。
+                asr_hard_failure = raw_text is None
 
             if isinstance(voiceprint_result, Exception):
                 logger.bind(tag=TAG).error(f"声纹识别失败: {voiceprint_result}")
@@ -153,7 +157,7 @@ class ASRProviderBase(ABC):
 
                 # 构建包含说话人信息的JSON字符串
                 enhanced_text = self._build_enhanced_text(raw_text, speaker_name)
-                content_for_length_check = raw_text
+                content_for_length_check = raw_text or ""
 
             # 性能监控
             total_time = time.monotonic() - total_start_time
@@ -168,6 +172,14 @@ class ASRProviderBase(ABC):
                 enqueue_asr_report(conn, enhanced_text, audio_snapshot)
                 # 使用自定义模块进行上报
                 await startToChat(conn, enhanced_text)
+            elif asr_hard_failure:
+                # 明确的接口/连接错误：立即切换到下一个已配置且能连上的
+                # provider，不累计次数、不设阈值。
+                await _maybe_failover_asr(conn)
+            else:
+                logger.bind(tag=TAG).debug(
+                    f"ASR 未识别出文本（静音或没听清），audio={len(combined_pcm_data)}字节"
+                )
         except Exception as e:
             logger.bind(tag=TAG).error(f"处理语音停止失败: {e}")
             import traceback

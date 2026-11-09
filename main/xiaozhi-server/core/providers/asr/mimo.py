@@ -124,5 +124,6 @@ class ASRProvider(ASRProviderBase):
             )
             return text, file_path
         except Exception as e:
+            # 不能吞掉：调用方靠「识别结果为 None」累计失败次数触发 failover
             logger.bind(tag=TAG).error(f"语音识别失败: {e}")
-            return "", file_path
+            raise

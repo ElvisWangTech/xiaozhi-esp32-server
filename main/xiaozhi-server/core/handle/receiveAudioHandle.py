@@ -13,43 +13,34 @@ from core.handle.sendAudioHandle import send_stt_message, SentenceType
 
 TAG = __name__
 
-# ASR 连续失败多少次触发切换；切换失败后的冷却时间（秒）
-_ASR_FAILOVER_THRESHOLD = 3
-_ASR_FAILOVER_COOLDOWN = 60.0
-
-
 async def _maybe_failover_asr(conn):
-    """ASR 建连/处理连续失败的看门狗：切换到已配置的备用 provider。
+    """ASR 明确建连/识别失败时立即切换（无计数、无阈值、无冷却）。
 
-    在连接事件循环里执行；带冷却时间，切换失败时不逐帧重试。
+    切换流程自带每模块一把锁 + expect_active 去重；这里再加一个 busy
+    标记，避免同一帧音频被多条路径重复触发切换。
     """
-    failures = getattr(conn, "_asr_fail_count", 0)
-    if failures < _ASR_FAILOVER_THRESHOLD:
+    if getattr(conn, "_asr_failover_busy", False):
         return
-    now = time.monotonic()
-    if now < getattr(conn, "_asr_failover_cooldown_until", 0.0):
-        return
-    conn._asr_failover_cooldown_until = now + _ASR_FAILOVER_COOLDOWN
-    conn._asr_fail_count = 0
-    conn.logger.bind(tag=TAG).warning(
-        f"ASR连续失败{failures}次，尝试切换备用provider"
-    )
+    conn._asr_failover_busy = True
     try:
-        from core.utils import provider_failover
+        conn.logger.bind(tag=TAG).warning("ASR 连接/识别失败，尝试切换备用provider")
+        try:
+            from core.utils import provider_failover
 
-        name = await provider_failover.failover_module(conn, "ASR")
-    except Exception as exc:
-        conn.logger.bind(tag=TAG).error(f"ASR切换备用provider失败: {exc}")
-        return
-    if name:
-        conn._asr_failover_cooldown_until = 0.0
-        # 新实例已 open_audio_channels；流式实现支持 ensure_connected 的立即建连
-        ensure = getattr(conn.asr, "ensure_connected", None)
-        if ensure is not None:
-            try:
-                await ensure(conn)
-            except Exception:
-                pass
+            name = await provider_failover.failover_module(conn, "ASR")
+        except Exception as exc:
+            conn.logger.bind(tag=TAG).error(f"ASR切换备用provider失败: {exc}")
+            return
+        if name:
+            # 新实例已 open_audio_channels；流式实现支持立即建连
+            ensure = getattr(conn.asr, "ensure_connected", None)
+            if ensure is not None:
+                try:
+                    await ensure(conn)
+                except Exception:
+                    pass
+    finally:
+        conn._asr_failover_busy = False
 
 
 async def handleAudioMessage(conn: "ConnectionHandler", pcm_frame):
@@ -73,15 +64,10 @@ async def handleAudioMessage(conn: "ConnectionHandler", pcm_frame):
         await conn.asr.receive_audio(conn, pcm_frame, have_voice)
     except Exception as exc:
         conn.logger.bind(tag=TAG).warning(f"ASR接收音频失败: {exc}")
-        conn._asr_fail_count = getattr(conn, "_asr_fail_count", 0) + 1
         await _maybe_failover_asr(conn)
         return
-    # provider 侧的建连失败计数（如豆包流式握手失败）
-    provider_failures = getattr(conn.asr, "connect_failures", 0)
-    if provider_failures:
-        conn._asr_fail_count = max(
-            getattr(conn, "_asr_fail_count", 0), provider_failures
-        )
+    # provider 侧的建连失败标记（如豆包流式握手失败）：只看真假，不累计次数
+    if getattr(conn.asr, "connect_failures", 0):
         await _maybe_failover_asr(conn)
 
 

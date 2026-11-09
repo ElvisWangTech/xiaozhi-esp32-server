@@ -2338,8 +2338,8 @@ class VoiceActivationSession:
                     self.conn, "warning",
                     f"连接ASR失败({exc})，尝试切换备用provider",
                 )
-                _mark_current_failed(self.conn, "ASR")
-                if not await _swap_to_fallback(self.conn, "ASR"):
+                marked = _mark_current_failed(self.conn, "ASR")
+                if not await _swap_to_fallback(self.conn, "ASR", expect_active=marked):
                     return
 
     async def _say(self, text):
@@ -2369,8 +2369,8 @@ class VoiceActivationSession:
                     self.conn, "warning",
                     f"TTS服务失败({exc})，尝试切换备用provider",
                 )
-                _mark_current_failed(self.conn, "TTS")
-                if not await _swap_to_fallback(self.conn, "TTS"):
+                marked = _mark_current_failed(self.conn, "TTS")
+                if not await _swap_to_fallback(self.conn, "TTS", expect_active=marked):
                     break
                 # 换一个 sentence_id 重播，避免和刚才半失败的队列内容冲突。
                 self.conn.sentence_id = uuid.uuid4().hex

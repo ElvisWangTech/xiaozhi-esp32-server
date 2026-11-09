@@ -27,11 +27,19 @@ def initialize_modules(
     """
     modules = {}
 
+    # 每个模块独立隔离：选中的 ASR 缺必填配置时只丢 ASR，
+    # 不能让一个坏配置把已初始化成功的 TTS/LLM 一起带走。
+    def _init(key, name, factory):
+        try:
+            modules[key] = factory()
+            logger.bind(tag=TAG).info(f"初始化组件: {key}成功 {name}")
+        except Exception as e:
+            logger.bind(tag=TAG).error(f"初始化组件: {key}失败 {name}: {e}")
+
     # 初始化TTS模块
     if init_tts:
         select_tts_module = config["selected_module"]["TTS"]
-        modules["tts"] = initialize_tts(config)
-        logger.bind(tag=TAG).info(f"初始化组件: tts成功 {select_tts_module}")
+        _init("tts", select_tts_module, lambda: initialize_tts(config))
 
     # 初始化LLM模块
     if init_llm:
@@ -41,11 +49,13 @@ def initialize_modules(
             if "type" not in config["LLM"][select_llm_module]
             else config["LLM"][select_llm_module]["type"]
         )
-        modules["llm"] = llm.create_instance(
-            llm_type,
-            config["LLM"][select_llm_module],
+        _init(
+            "llm",
+            select_llm_module,
+            lambda: llm.create_instance(
+                llm_type, config["LLM"][select_llm_module]
+            ),
         )
-        logger.bind(tag=TAG).info(f"初始化组件: llm成功 {select_llm_module}")
 
     # 初始化Intent模块
     if init_intent:
@@ -55,11 +65,13 @@ def initialize_modules(
             if "type" not in config["Intent"][select_intent_module]
             else config["Intent"][select_intent_module]["type"]
         )
-        modules["intent"] = intent.create_instance(
-            intent_type,
-            config["Intent"][select_intent_module],
+        _init(
+            "intent",
+            select_intent_module,
+            lambda: intent.create_instance(
+                intent_type, config["Intent"][select_intent_module]
+            ),
         )
-        logger.bind(tag=TAG).info(f"初始化组件: intent成功 {select_intent_module}")
 
     # 初始化Memory模块
     if init_memory:
@@ -69,12 +81,15 @@ def initialize_modules(
             if "type" not in config["Memory"][select_memory_module]
             else config["Memory"][select_memory_module]["type"]
         )
-        modules["memory"] = memory.create_instance(
-            memory_type,
-            config["Memory"][select_memory_module],
-            config.get("summaryMemory", None),
+        _init(
+            "memory",
+            select_memory_module,
+            lambda: memory.create_instance(
+                memory_type,
+                config["Memory"][select_memory_module],
+                config.get("summaryMemory", None),
+            ),
         )
-        logger.bind(tag=TAG).info(f"初始化组件: memory成功 {select_memory_module}")
 
     # 初始化VAD模块
     if init_vad:
@@ -84,17 +99,18 @@ def initialize_modules(
             if "type" not in config["VAD"][select_vad_module]
             else config["VAD"][select_vad_module]["type"]
         )
-        modules["vad"] = vad.create_instance(
-            vad_type,
-            config["VAD"][select_vad_module],
+        _init(
+            "vad",
+            select_vad_module,
+            lambda: vad.create_instance(
+                vad_type, config["VAD"][select_vad_module]
+            ),
         )
-        logger.bind(tag=TAG).info(f"初始化组件: vad成功 {select_vad_module}")
 
     # 初始化ASR模块
     if init_asr:
         select_asr_module = config["selected_module"]["ASR"]
-        modules["asr"] = initialize_asr(config)
-        logger.bind(tag=TAG).info(f"初始化组件: asr成功 {select_asr_module}")
+        _init("asr", select_asr_module, lambda: initialize_asr(config))
     return modules
 
 
@@ -112,6 +128,11 @@ def initialize_tts(config):
         tts_config,
         str(config.get("delete_audio", True)).lower() in ("true", "1", "yes"),
     )
+    # 记录自身 provider 名：故障切换时实例报障要能准确记账，不能靠全局 active 猜
+    try:
+        new_tts._failover_name = select_tts_module
+    except Exception:
+        pass
     return new_tts
 
 
