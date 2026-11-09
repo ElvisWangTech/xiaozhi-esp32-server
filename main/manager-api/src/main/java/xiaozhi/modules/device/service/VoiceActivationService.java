@@ -66,7 +66,7 @@ public class VoiceActivationService {
     public static final String ONBOARDING_SKILLS_MANUAL = "skills_manual";
     public static final String ONBOARDING_DONE = "done";
     public static final String ACTIVATION_VOICE = "voice";
-    private static final String DEFAULT_AGENT_NAME = "小智";
+    private static final String DEFAULT_AGENT_NAME = "XATOM";
     private static final String PARAM_PORTAL_BASE_URL = "portal_lite.base_url";
     private static final String PARAM_PORTAL_BIND_TOKEN = "portal_lite.bind_token";
     private static final String PARAM_PORTAL_ADMIN_TOKEN = "portal_lite.admin_token";

@@ -1,5 +1,6 @@
 import asyncio
 import json
+import math
 import re
 import time
 import uuid
@@ -16,6 +17,7 @@ from core.utils.provider_failover import (
 TAG = __name__
 SMS_CODE_ERROR = 10075
 VOICE_SMS_COOLDOWN = 10205
+VOICE_SMS_COOLDOWN_SECONDS = 60
 VOICE_SMS_EXPIRED = 10206
 VOICE_SMS_ATTEMPTS_EXHAUSTED = 10207
 PLAYBACK_STOP_TIMEOUT_SECONDS = 2
@@ -198,7 +200,11 @@ _SUPPLEMENT_SYSTEM_PROMPT = (
     '{"action":"content","text":"说话温柔一点"}、{"action":"end","text":""}、'
     '{"action":"repeat","text":""} 或 {"action":"unclear","text":""}。\n'
     "content：这一句提出了新的具体要求。text 写这个要求本身，去掉「还有」「然后」「再补充」这类连接词。\n"
-    "end：整句都在表示补充说完了、没有了。\n"
+    "end：整句都在表示补充说完了、没有了。ASR 可能在一个短语中间插入标点，"
+    "理解整句时不要把逗号当成意思反转。"
+    "例如「没有，要补充的。」和「没有要补充的」都表示没有补充，输出 end。"
+    "「还有，要补充的。」表示想继续但尚未说内容，输出 continue。"
+    "如果否定后确实提出了具体要求，例如「没有，要补充的就是回答短一点」，输出 content。\n"
     "repeat：没听清，让你把刚才的问题再说一遍。\n"
     "unclear：语气词、纯确认、反问，或听不清在说什么。\n"
     "先说没有、后面又给了具体要求时，是 content，不是 end。不要因为出现「没有」「不用」「算了」就判成 end，"
@@ -394,6 +400,7 @@ async def resolve_code_turn(conn, text, prompt, extra_intents):
     prompt += (
         '数字已替换为编号。明确提交验证码时返回 {"intent":"code","slot":1}，'
         "slot 指用户最终要提交的数字组。旧码、被否定的码、只提及的码不要提交。"
+        "询问是否在线或要求继续不等于同意重发或重试校验。"
         "技能授权时明确结束当前及所有剩余技能用 skip_all，仅跳过当前技能用 skip。"
         "如果只想略过后续项目但还要继续当前项目，不能判为 skip_all。"
     )
@@ -461,18 +468,23 @@ def parse_nickname_reply(text):
     return name
 
 
-class WaitRequested(Exception):
-    """The current onboarding turn explicitly requested more time."""
+class OnboardingTurnControl(Exception):
+    def __init__(self, intent):
+        self.intent = intent
 
 
 async def _ask_turn_json(conn, prompt, text, label):
     prompt += (
-        '只有用户明确要求先等他、暂缓当前步骤时，返回 {"intent":"wait"}。'
+        '只有用户明确要求等他一下时，返回 {"intent":"wait"}。'
+        '明确向设备询问是否还在、现在该做什么，或要求继续当前步骤时，返回 {"intent":"help"}。'
+        '例如「还在吗」「你好，犀牛，继续吧」。这些话不能视为同意执行当前操作。'
+        '只有明确是旁人对话或无关背景语音时返回 {"intent":"background"}。'
         "用户已经给出有效答案、只是在迟疑或转述时，按本步骤的规则返回结果。"
     )
     data = await _ask_llm_json(conn, prompt, text, label)
-    if _intent_of(data, {"wait"}) == "wait":
-        raise WaitRequested
+    control = _intent_of(data, {"wait", "help", "background"})
+    if control:
+        raise OnboardingTurnControl(control)
     return data
 
 
@@ -803,6 +815,7 @@ class VoiceActivationSession:
         saved_title = re.search(r"\[主人称呼\]\s*请称呼用户为「([^」\n]{1,12})」。", config.get("prompt") or "")
         self.owner_title = saved_title[1] if saved_title and stage != "bind" else None
         self._sms_retry_action = None
+        self._last_sms_send = None
         self._retry_bind_code = None
         self.persona_name = None
         self.persona_templates = []
@@ -846,7 +859,7 @@ class VoiceActivationSession:
             if self.persona_name:
                 self._use_persona_voice(self.persona_name)
             if self.state == self.ASK_AUTH_CODE:
-                await self._resume_auth()
+                await self._resume_auth(after_code=bool(self._auth_status_after_code))
             else:
                 await self._repeat_prompt()
             return
@@ -915,20 +928,34 @@ class VoiceActivationSession:
         content = unwrap_user_text(text)
         if not content:
             return
-        await self._send_recognized_text(content)
-        if await self._speak_if_user_requests_skills(content):
-            return
-        wakeup_words = self.conn.config.get("wakeup_words") or []
-        if content in wakeup_words:
-            await self._repeat_prompt()
-            return
         self._busy = True
         try:
+            await self._send_recognized_text(content)
+            if await self._speak_if_user_requests_skills(content):
+                return
+            wakeup_words = self.conn.config.get("wakeup_words") or []
+            if content in wakeup_words:
+                await self._repeat_prompt()
+                return
             await self._dispatch(content)
-        except WaitRequested:
-            await self._wait_for_user()
+        except OnboardingTurnControl as control:
+            if control.intent == "wait":
+                await self._wait_for_user()
+            elif control.intent == "help":
+                await self._help_current_step()
         finally:
             self._busy = False
+
+    async def _help_current_step(self):
+        if self._auth_status_after_code is not None or self._sms_retry_action in {"resend", "verify"}:
+            await self._repeat_prompt()
+        elif self.state == self.ASK_CODE:
+            await self._say("我在。收到短信后，把验证码念给我就好。")
+        elif self.state == self.ASK_AUTH_CODE:
+            label = self.auth_label or "技能"
+            await self._say(f"我在。收到{label}的短信后，把验证码念给我就好。")
+        else:
+            await self._repeat_prompt()
 
     async def _wait_for_user(self):
         hint = "好，你慢慢想。"
@@ -1133,18 +1160,21 @@ class VoiceActivationSession:
             self.conn.logger.bind(tag=TAG).warning("发送绑定验证码失败")
             error_code = getattr(exc, "code", None)
             details = getattr(exc, "data", None)
-            seconds = details.get("retryAfterSeconds") if isinstance(details, dict) else None
             self._sms_retry_action = "resend" if resending and error_code != VOICE_SMS_COOLDOWN else None
             self._retry_bind_code = None
             if error_code == VOICE_SMS_COOLDOWN:
                 self._sms_retry_action = "cooldown"
                 self.state = self.ASK_CODE if resending else self.RETRY_SMS
-                hint = f"还要等{seconds}秒。" if type(seconds) is int and seconds > 0 else "现在还不能重发。"
+                seconds = self._sms_cooldown_remaining(details)
+                if seconds is None:
+                    self.conn.logger.bind(tag=TAG).warning("绑定验证码冷却响应缺少有效剩余秒数")
+                hint = f"还要等{seconds}秒。" if seconds is not None else "现在还不能重发。"
                 await self._say(hint + "时间到了，可以说‘再发一条’。")
             else:
                 self.state = self.ASK_CODE if resending else self.RETRY_SMS
                 await self._say("刚才验证码没发出去，要我再试一次吗？")
             return
+        self._last_sms_send = (self.phone, time.monotonic())
         self._sms_retry_action = None
         self._retry_bind_code = None
         self.state = self.ASK_CODE
@@ -1153,6 +1183,22 @@ class VoiceActivationSession:
             await self._say("验证码重新发了，请念一下新收到的验证码。")
         else:
             await self._say("验证码已发送，是四位数字。请念一下短信里的验证码，没收到可以说重发。")
+
+    def _sms_cooldown_remaining(self, details):
+        seconds = details.get("retryAfterSeconds") if isinstance(details, dict) else None
+        if isinstance(seconds, str) and re.fullmatch(r"[0-9]{1,2}", seconds):
+            seconds = int(seconds)
+        if type(seconds) is int and 0 < seconds <= VOICE_SMS_COOLDOWN_SECONDS:
+            return seconds
+        if self._last_sms_send and self._last_sms_send[0] == self.phone:
+            elapsed = time.monotonic() - self._last_sms_send[1]
+            remaining = math.ceil(VOICE_SMS_COOLDOWN_SECONDS - elapsed)
+            if remaining > 0:
+                self.conn.logger.bind(tag=TAG).info(
+                    f"绑定验证码冷却响应缺少有效剩余秒数，使用会话估算: remaining={remaining}s"
+                )
+                return remaining
+        return None
 
     async def _on_retry_sms(self, text):
         waiting_for_cooldown = self._sms_retry_action == "cooldown"
@@ -1164,7 +1210,7 @@ class VoiceActivationSession:
             await self._start_phone()
         elif action == "resend" or (action == "accept" and not waiting_for_cooldown):
             await self._send_sms()
-        elif action == "repeat" or not waiting_for_cooldown:
+        else:
             await self._repeat_prompt()
 
     async def _on_code(self, text):
@@ -1199,6 +1245,7 @@ class VoiceActivationSession:
         if action == "accept" and self._sms_retry_action == "verify":
             code = self._retry_bind_code
         elif action != "code":
+            await self._repeat_prompt()
             return
         self._sms_retry_action = None
         self._retry_bind_code = None
@@ -1422,6 +1469,7 @@ class VoiceActivationSession:
             await self._say("好，改好了。还有吗？")
             return
         if action != "content" or not content:
+            await self._say("你可以接着补充，也可以说就这样吧。")
             return
         if not self._add_supplement(content):
             await self._say("补充已经到八十个字的上限了，先记这些。请说没有了，结束补充。")
@@ -1828,6 +1876,7 @@ class VoiceActivationSession:
             await self._say(f"请把{label}短信里的验证码完整念一遍。")
             return
         if action != "code":
+            await self._repeat_prompt()
             return
         if not self.auth_task_id:
             await self._report_auth_failure(label, "这次验证已失效")
@@ -1858,7 +1907,7 @@ class VoiceActivationSession:
             return
         # 验证码已收下。登录完成前状态常常仍是 waiting_code，不能再把要验证码的那句说一遍。
         await self._advance_after_skill_prompt(
-            "我还在确认开通结果，稍等一下。",
+            "验证码已经收到了，我正在确认开通结果，稍等一下。",
             partial(self._handle_auth_result, result or {}, after_code=True),
         )
 
@@ -2070,7 +2119,12 @@ class VoiceActivationSession:
             else:
                 await self._say("刚才验证码没发出去，要我再试一次吗？")
         elif self.state == self.ASK_CODE:
-            await self._say("请念一下短信里的验证码。")
+            if self._sms_retry_action == "resend":
+                await self._say("要我再发一条验证码吗？")
+            elif self._sms_retry_action == "verify":
+                await self._say("要再试一次校验刚才的验证码吗？")
+            else:
+                await self._say("请念一下短信里的验证码。")
         elif self.state == self.ASK_NICKNAME:
             await self._say(_ASK_NICKNAME_PROMPT)
         elif self.state == self.CONFIRM_NICKNAME:
@@ -2187,7 +2241,7 @@ class VoiceActivationSession:
                 "state", "nickname", "owner_title", "persona_name", "persona_templates",
                 "persona_voices", "supplement_parts", "auth_queue", "auth_service", "auth_label",
                 "auth_task_id", "auth_done", "auth_failed", "auth_skipped", "include_auth",
-                "rebind_auth", "ask_auth_consent", "_completion_prefix",
+                "rebind_auth", "ask_auth_consent", "_completion_prefix", "_auth_status_after_code",
             )
             snapshot = {field: getattr(self, field) for field in fields}
             if self.stage == "bind":

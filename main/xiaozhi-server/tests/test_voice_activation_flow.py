@@ -134,6 +134,59 @@ class VoiceActivationFlowTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(resumed.state, resumed.ASK_PERSONA)
         self.assertIn("星际游子", resumed._say.await_args.args[0])
 
+    async def test_sms_cooldown_missing_seconds_uses_last_successful_send(self):
+        session = self.make_session()
+        session.phone = "13800138000"
+        cooldown = RuntimeError("cooldown")
+        cooldown.code = voice.VOICE_SMS_COOLDOWN
+        session._post.side_effect = [None, cooldown]
+        with patch.object(voice.time, "monotonic", return_value=100):
+            await session._send_sms()
+        with patch.object(voice.time, "monotonic", return_value=120):
+            await session._send_sms(resending=True)
+            self.assertIn("还要等40秒", session._say.await_args.args[0])
+            self.assertEqual(session._sms_cooldown_remaining({"retryAfterSeconds": "12"}), 12)
+            session.phone = "13900139000"
+            self.assertIsNone(session._sms_cooldown_remaining(None))
+
+    async def test_code_stage_help_answers_without_submitting_or_resending(self):
+        for stage, utterance, expected in (
+            ("bind", "你好，犀牛，继续吧。", "我在。收到短信后，把验证码念给我就好。"),
+            ("skills", "还在吗？在吗？", "我在。收到滴滴出行的短信后，把验证码念给我就好。"),
+        ):
+            session = self.make_session(stage)
+            session.state = session.ASK_CODE if stage == "bind" else session.ASK_AUTH_CODE
+            session.auth_label = "滴滴出行"
+            session._send_recognized_text = AsyncMock()
+            model = AsyncMock(side_effect=[{"intent": "help"}, {"intent": "background"}])
+            with patch.object(voice, "_ask_llm_json", model):
+                await session.handle_text(utterance)
+                await session.handle_text("他没有休眠，灯还亮着。")
+            session._say.assert_awaited_once_with(expected)
+            session._post.assert_not_awaited()
+            self.assertEqual(session.state, session.ASK_CODE if stage == "bind" else session.ASK_AUTH_CODE)
+
+    async def test_help_is_available_at_each_interactive_step(self):
+        session = self.make_session()
+        session._send_recognized_text = AsyncMock()
+        session._help_current_step = AsyncMock()
+        states = (
+            session.GREET, session.CONFIRM_GREET, session.ASK_PHONE, session.CONFIRM_PHONE,
+            session.RETRY_SMS, session.ASK_CODE, session.ASK_NICKNAME, session.CONFIRM_NICKNAME,
+            session.ASK_PERSONA, session.CONFIRM_PERSONA, session.ASK_SUPPLEMENT,
+            session.CONFIRM_SUPPLEMENT, session.RETRY_SKILLS, session.ASK_AUTH_CONSENT,
+            session.ASK_AUTH_CODE, session.RETRY_AUTH_SUMMARY, session.RETRY_SKILLS_COMPLETE,
+        )
+        session.persona_templates = ["可爱女生"]
+        model = AsyncMock(return_value={"intent": "help"})
+        with patch.object(voice, "_ask_llm_json", model):
+            for state in states:
+                session.state = state
+                await session.handle_text("还在吗？现在要做什么？")
+                self.assertEqual(session.state, state)
+        self.assertEqual(session._help_current_step.await_count, len(states))
+        session._post.assert_not_awaited()
+
     async def test_first_sms_cooldown_requires_explicit_resend(self):
         session = self.make_session()
         session.phone = "13800138000"
@@ -295,7 +348,7 @@ class VoiceActivationFlowTest(unittest.IsolatedAsyncioTestCase):
                     await session.handle_text("我想一下")
                     self.assertEqual(session.state, session.ASK_SUPPLEMENT)
                     self.assertEqual(session.supplement_parts, supplement)
-                    await session.handle_text("就这样吧")
+                    await session.handle_text("没有，要补充的。")
                     self.assertEqual(session.state, session.CONFIRM_SUPPLEMENT)
                     session._save_role.assert_not_awaited()
                     await session.handle_text("可以")
@@ -343,6 +396,17 @@ class VoiceActivationFlowTest(unittest.IsolatedAsyncioTestCase):
         await session._save_role("说话温柔一点")
         self.assertEqual(session.state, session.CONFIRM_SUPPLEMENT)
         session._say.assert_awaited_once_with("刚才没能保存角色设定，要我再试一次吗？")
+
+    async def test_skill_code_pending_acknowledges_receipt_before_polling(self):
+        session = self.make_session("skills")
+        session.state = session.ASK_AUTH_CODE
+        session.auth_task_id = "test-task"
+        session._post.return_value = {"status": "pending"}
+        session._poll_auth = AsyncMock()
+        with patch.object(voice, "resolve_auth_reply", AsyncMock(return_value=("code", "123456"))):
+            await session._on_auth_code("123456")
+        session._say.assert_awaited_once_with("验证码已经收到了，我正在确认开通结果，稍等一下。")
+        session._poll_auth.assert_awaited_once_with(after_code=True)
 
     async def test_skill_code_submission_error_uses_user_facing_prompt(self):
         session = self.make_session("skills")
