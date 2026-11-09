@@ -39,7 +39,7 @@ class VoiceActivationFlowTest(unittest.IsolatedAsyncioTestCase):
             ("对", {"intent": "accept"}, session.ASK_PHONE),
             ("我的手机号是123然后456789，13", {"intent": "phone", "phone": "12345678913"}, session.CONFIRM_PHONE),
             ("对", {"intent": "accept"}, session.ASK_CODE),
-            ("验证码是123456", {"intent": "code", "slot": 1}, session.ASK_NICKNAME),
+            ("验证码是0123", {"intent": "code", "slot": 1}, session.ASK_NICKNAME),
             ("你叫小七", {"intent": "answer", "nickname": "小七"}, session.CONFIRM_NICKNAME),
             ("对", {"intent": "accept"}, session.ASK_PERSONA),
             ("第二个", {"intent": "answer", "ordinal": 2}, session.CONFIRM_PERSONA),
@@ -287,7 +287,7 @@ class VoiceActivationFlowTest(unittest.IsolatedAsyncioTestCase):
         error.code = voice.SMS_CODE_ERROR
         session._post.side_effect = error
         with patch.object(voice, "_ask_llm_json", AsyncMock(return_value={"intent": "code", "slot": 1})):
-            await session._on_code("123456")
+            await session._on_code("0123")
         self.assertIn("核对验证码", session._say.await_args.args[0])
         self.assertIsNone(session._sms_retry_action)
 
@@ -384,7 +384,7 @@ class VoiceActivationFlowTest(unittest.IsolatedAsyncioTestCase):
         session._post.side_effect = error
         model = AsyncMock(side_effect=[{"intent": "code", "slot": 1}, {"intent": "accept"}])
         with patch.object(voice, "_ask_llm_json", model):
-            await session._on_code("123456")
+            await session._on_code("0123")
             self.assertIsNone(session._sms_retry_action)
             await session._on_code("好")
         self.assertEqual(session._post.await_count, 1)
@@ -501,11 +501,21 @@ class VoiceActivationFlowTest(unittest.IsolatedAsyncioTestCase):
         with patch.object(voice, "_ask_llm_json", model):
             conn = self.make_session().conn
             self.assertEqual(await voice.resolve_sms_reply(conn, "验证码是旧的123456，别用"), ("unclear", None))
-            self.assertEqual(await voice.resolve_sms_reply(conn, "别用123456，换成654321"), ("code", "654321"))
+            self.assertEqual(await voice.resolve_sms_reply(conn, "别用123456，换成0123"), ("code", "0123"))
             self.assertEqual(await voice.resolve_sms_reply(conn, "654321"), ("code", None))
         for call in model.await_args_list:
             self.assertNotIn("123456", call.args[2])
             self.assertNotIn("654321", call.args[2])
+
+    async def test_device_rejects_six_digits_but_skill_still_accepts_them(self):
+        session = self.make_session()
+        session.state = session.ASK_CODE
+        model = AsyncMock(return_value={"intent": "code", "slot": 1})
+        with patch.object(voice, "_ask_llm_json", model):
+            await session._on_code("123456")
+            self.assertEqual(await voice.resolve_auth_reply(session.conn, "123456"), ("code", "123456"))
+        session._post.assert_not_awaited()
+        session._say.assert_awaited_once_with("请把短信里的四位验证码完整念一遍。")
 
     def test_invalid_or_ambiguous_code_is_not_truncated(self):
         self.assertIsNone(voice.isolated_code("123456789"))

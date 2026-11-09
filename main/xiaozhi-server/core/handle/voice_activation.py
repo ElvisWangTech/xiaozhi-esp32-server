@@ -388,7 +388,10 @@ async def resolve_sms_reply(conn, text, retry=None):
             "明确给了新验证码时仍然返回 code。"
         )
         intents.add("accept")
-    return await resolve_code_turn(conn, text, prompt, intents)
+    action, code = await resolve_code_turn(conn, text, prompt, intents)
+    if action == "code" and (code is None or len(code) != 4):
+        return action, None
+    return action, code
 
 
 async def resolve_auth_reply(conn, text):
@@ -1180,7 +1183,7 @@ class VoiceActivationSession:
         self.state = self.ASK_CODE
         self.conn.last_activity_time = time.time() * 1000
         if resending:
-            await self._say("验证码重新发了，请念一下新收到的验证码。")
+            await self._say("验证码重新发了，请念一下新收到的四位验证码。")
         else:
             await self._say("验证码已发送，是四位数字。请念一下短信里的验证码，没收到可以说重发。")
 
@@ -1237,7 +1240,7 @@ class VoiceActivationSession:
         if action == "code" and not code:
             self._sms_retry_action = None
             self._retry_bind_code = None
-            await self._say("请把短信里的验证码完整念一遍。")
+            await self._say("请把短信里的四位验证码完整念一遍。")
             return
         if action == "accept" and self._sms_retry_action == "resend":
             await self._send_sms(resending=True)
