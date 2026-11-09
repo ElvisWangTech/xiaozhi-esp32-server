@@ -223,7 +223,7 @@ public class VoiceActivationService {
         DeviceEntity device = requireRoleDevice(mac);
         String ownerTitle = normalizeOwnerTitle(dto.getOwnerTitle());
         String templateName = normalizeTemplateName(dto.getTemplateName());
-        String supplement = normalizeSupplement(dto.getSupplement());
+        String supplement = StringUtils.trimToEmpty(dto.getSupplement());
         AgentEntity agent = requireAgent(device);
         QueryWrapper<AgentTemplateEntity> wrapper = new QueryWrapper<>();
         wrapper.eq("agent_name", templateName);
@@ -443,14 +443,6 @@ public class VoiceActivationService {
         String trimmed = StringUtils.trimToEmpty(name);
         if (trimmed.isEmpty() || trimmed.length() > 32) {
             throw new RenException("请选择性格模板");
-        }
-        return trimmed;
-    }
-
-    private static String normalizeSupplement(String supplement) {
-        String trimmed = StringUtils.trimToEmpty(supplement);
-        if (trimmed.length() > 80) {
-            throw new RenException("补充请控制在八十个字以内");
         }
         return trimmed;
     }

@@ -349,9 +349,13 @@ class VoiceActivationFlowTest(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(session.state, session.ASK_SUPPLEMENT)
                     self.assertEqual(session.supplement_parts, supplement)
                     await session.handle_text("没有，要补充的。")
-                    self.assertEqual(session.state, session.CONFIRM_SUPPLEMENT)
-                    session._save_role.assert_not_awaited()
-                    await session.handle_text("可以")
+                    if supplement:
+                        self.assertEqual(session.state, session.CONFIRM_SUPPLEMENT)
+                        session._save_role.assert_not_awaited()
+                        await session.handle_text("可以")
+                    else:
+                        self.assertNotEqual(session.state, session.CONFIRM_SUPPLEMENT)
+                self.assertEqual(model.await_count, 3 if supplement else 2)
                 session._save_role.assert_awaited_once_with("。".join(supplement))
 
     async def test_stalled_playback_continues_after_legacy_wait(self):

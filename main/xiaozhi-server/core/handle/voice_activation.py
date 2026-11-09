@@ -280,7 +280,6 @@ _AUTH_PROMPT = (
     "出现「跳过」「重发」「绑定」不等于要执行对应动作。"
 )
 _SHORT_NAME_LIMIT = 12
-_SUPPLEMENT_LIMIT = 80
 # 首次提问就给例子，减少用户不知道该说多短而反复失败。
 _ASK_NICKNAME_PROMPT = "给我起个名字吧，比如豆豆、小美。"
 # 模型判 unclear 时逐级给出更具体的引导，不重复同一句话。
@@ -1446,13 +1445,6 @@ class VoiceActivationSession:
     def _supplement_text(self):
         return "。".join(self.supplement_parts)
 
-    def _add_supplement(self, content):
-        """后端最多收八十个字，超了就不记这一句。"""
-        if not content or len("。".join(self.supplement_parts + [content])) > _SUPPLEMENT_LIMIT:
-            return False
-        self.supplement_parts.append(content)
-        return True
-
     async def _on_supplement(self, text):
         action, content = await resolve_supplement_turn(self.conn, text, self._supplement_text())
         if action == "repeat":
@@ -1465,21 +1457,19 @@ class VoiceActivationSession:
             await self._say("好，你说，我听着。")
             return
         if action == "edit" and content:
-            if len(content) > _SUPPLEMENT_LIMIT:
-                await self._say("修改后的设定太长了，可以说得简短一点吗？")
-                return
             self.supplement_parts = [content]
             await self._say("好，改好了。还有吗？")
             return
         if action != "content" or not content:
             await self._say("你可以接着补充，也可以说就这样吧。")
             return
-        if not self._add_supplement(content):
-            await self._say("补充已经到八十个字的上限了，先记这些。请说没有了，结束补充。")
-            return
+        self.supplement_parts.append(content)
         await self._say("好的，记下了。还有吗？说完请说没有了。")
 
     async def _finish_supplement(self):
+        if not self.supplement_parts:
+            await self._save_role("")
+            return
         self.state = self.CONFIRM_SUPPLEMENT
         await self._repeat_prompt()
 
@@ -1500,9 +1490,8 @@ class VoiceActivationSession:
             self.state = self.ASK_SUPPLEMENT
             if not content:
                 await self._say("好的，请继续补充。说完请说没有了。")
-            elif not self._add_supplement(content):
-                await self._say("补充已经到八十个字的上限了，先记这些。请说没有了，结束补充。")
             else:
+                self.supplement_parts.append(content)
                 await self._say("好的，记下了。还有吗？说完请说没有了。")
             return
         await self._repeat_prompt()
@@ -1520,6 +1509,7 @@ class VoiceActivationSession:
             )
         except Exception as exc:
             self.conn.logger.bind(tag=TAG).warning(f"保存角色设定失败: {exc}")
+            self.state = self.CONFIRM_SUPPLEMENT
             await self._say("刚才没能保存角色设定，要我再试一次吗？")
             return
         await self.conn.refresh_agent_prompt()
