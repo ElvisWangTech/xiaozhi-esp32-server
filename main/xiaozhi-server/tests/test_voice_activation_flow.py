@@ -151,7 +151,7 @@ class VoiceActivationFlowTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_code_stage_help_answers_without_submitting_or_resending(self):
         for stage, utterance, expected in (
-            ("bind", "你好，犀牛，继续吧。", "我在。收到短信后，把验证码念给我就好。"),
+            ("bind", "继续吧。", "我在。收到短信后，把验证码念给我就好。"),
             ("skills", "还在吗？在吗？", "我在。收到滴滴出行的短信后，把验证码念给我就好。"),
         ):
             session = self.make_session(stage)
