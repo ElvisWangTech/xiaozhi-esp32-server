@@ -64,6 +64,13 @@ public class ConfigController {
         return new Result<String>().ok(deviceService.getDevicePublicIp(dto.getMacAddress()));
     }
 
+    @PostMapping("device-cell-location")
+    @Operation(summary = "获取设备通过基站信息得到的粗略位置（城市级，未取到时返回 null）")
+    public Result<Object> getDeviceCellLocation(@Valid @RequestBody VoiceActivationMacDTO dto) {
+        ValidatorUtils.validateEntity(dto);
+        return new Result<Object>().ok(deviceService.getDeviceCellLocation(dto.getMacAddress()));
+    }
+
     @PostMapping("correct-words")
     @Operation(summary = "获取智能体替换词")
     public Result<Object> getCorrectWords(@Valid @RequestBody CorrectWordsDTO dto) {

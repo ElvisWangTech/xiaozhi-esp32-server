@@ -788,6 +788,7 @@ export default {
   'paramManagement.subgroup.metrics': 'Metrics',
   'paramManagement.subgroup.tracing': 'Tracing',
   'paramManagement.subgroup.plugin': 'Plugin · {name}',
+  'paramManagement.subgroup.cellLocation': 'Cell location',
   'paramManagement.addParam': 'Add Parameter',
   'paramManagement.editParam': 'Edit Parameter',
   'paramManagement.getParamsListFailed': 'Failed to get parameter list',

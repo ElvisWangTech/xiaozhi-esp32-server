@@ -788,6 +788,7 @@ export default {
   'paramManagement.subgroup.metrics': '指標',
   'paramManagement.subgroup.tracing': '鏈路追蹤',
   'paramManagement.subgroup.plugin': '外掛 · {name}',
+  'paramManagement.subgroup.cellLocation': '基地臺定位',
   'paramManagement.addParam': '新增參數',
   'paramManagement.editParam': '編輯參數',
   'paramManagement.getParamsListFailed': '獲取參數列表失敗',

@@ -59,6 +59,7 @@ import xiaozhi.modules.device.dto.DeviceReportReqDTO;
 import xiaozhi.modules.device.dto.DeviceReportRespDTO;
 import xiaozhi.modules.device.entity.DeviceEntity;
 import xiaozhi.modules.device.entity.OtaEntity;
+import xiaozhi.modules.device.service.CellLocationService;
 import xiaozhi.modules.device.service.DeviceAddressBookService;
 import xiaozhi.modules.device.service.DeviceService;
 import xiaozhi.modules.device.service.OtaService;
@@ -78,6 +79,7 @@ public class DeviceServiceImpl extends BaseServiceImpl<DeviceDao, DeviceEntity> 
     private final RedisUtils redisUtils;
     private final OtaService otaService;
     private final DeviceAddressBookService deviceAddressBookService;
+    private final CellLocationService cellLocationService;
 
     @Async
     public void updateDeviceConnectionInfo(String agentId, String deviceId, String appVersion) {
@@ -203,6 +205,11 @@ public class DeviceServiceImpl extends BaseServiceImpl<DeviceDao, DeviceEntity> 
     @Override
     public DeviceReportRespDTO checkDeviceActive(String macAddress, String clientId, DeviceReportReqDTO deviceReport) {
         saveDevicePublicIp(macAddress, deviceReport);
+        // 4G 模组会在 board.cereg 中上报基站信息；基站查询在后台异步执行，
+        // 失败、超时都不影响 OTA 响应。未上报 cereg 时保持原样，位置获取继续走 public_ip。
+        if (cellLocationService != null) {
+            cellLocationService.scheduleRefresh(macAddress, deviceReport);
+        }
 
         DeviceReportRespDTO response = new DeviceReportRespDTO();
         response.setServer_time(buildServerTime());
@@ -308,6 +315,11 @@ public class DeviceServiceImpl extends BaseServiceImpl<DeviceDao, DeviceEntity> 
         }
         String publicIp = String.valueOf(value).trim();
         return StringUtils.isBlank(publicIp) ? null : publicIp;
+    }
+
+    @Override
+    public Map<String, Object> getDeviceCellLocation(String macAddress) {
+        return cellLocationService == null ? null : cellLocationService.getDeviceCellLocation(macAddress);
     }
 
     private void saveDevicePublicIp(String macAddress, DeviceReportReqDTO deviceReport) {

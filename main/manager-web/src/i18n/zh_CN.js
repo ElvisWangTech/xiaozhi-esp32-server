@@ -788,6 +788,7 @@ export default {
   'paramManagement.subgroup.metrics': '指标',
   'paramManagement.subgroup.tracing': '链路追踪',
   'paramManagement.subgroup.plugin': '插件 · {name}',
+  'paramManagement.subgroup.cellLocation': '基站定位',
   'paramManagement.addParam': '新增参数',
   'paramManagement.editParam': '编辑参数',
   'paramManagement.getParamsListFailed': '获取参数列表失败',

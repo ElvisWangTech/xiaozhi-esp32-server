@@ -64,3 +64,18 @@ mybatis-plus:
     prefix:
     blobType: BLOB
     boolValue: TRUE
+
+# 基站定位（4G 设备 OTA 上报 cereg 时异步查询）
+# 说明：基站定位与 IP 定位都只能得到城市级粗略位置，不可当作精确定位使用。
+# 以下是默认值；智控台「参数管理 -> 服务端配置 -> 基站定位」中的
+# server.cell_location.* 优先级更高，修改后下一次 OTA 上报即生效，无需重启。
+xiaozhi:
+  cell-location:
+    enabled: true
+    url: http://api.cellocation.com:84/cell/
+    connect-timeout-ms: 2000
+    read-timeout-ms: 3000
+    # 结果缓存有效期（小时），有效期内直接复用上一次接口返回
+    cache-hours: 3
+    # 同一基站并发查询去重锁的有效期（秒）
+    inflight-seconds: 30

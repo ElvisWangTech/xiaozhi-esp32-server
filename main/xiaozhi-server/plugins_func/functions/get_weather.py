@@ -175,8 +175,18 @@ async def get_weather(conn: "ConnectionHandler", location: str = None, lang: str
 
     # 优先使用用户提供的location参数
     if not location:
-        # 通过客户端IP解析城市
-        if client_ip:
+        # 基站定位优先：只取城市级粗略结果，经纬度与详细地址不用于天气查询
+        cell_location = getattr(conn, "cell_location", None)
+        cell_city = (
+            str(cell_location["city"]).strip()
+            if isinstance(cell_location, dict) and cell_location.get("city")
+            else ""
+        )
+        if cell_city:
+            location = cell_city
+            location_source = "基站定位（粗略/城市级）"
+        elif client_ip:
+            # 通过客户端IP解析城市
             # 先从缓存获取IP对应的城市信息
             cached_ip_info = cache_manager.get(CacheType.IP_INFO, client_ip)
             if cached_ip_info:
@@ -197,10 +207,13 @@ async def get_weather(conn: "ConnectionHandler", location: str = None, lang: str
             # 若无IP，使用默认位置
             location = default_location
             location_source = "默认城市（无客户端IP）"
+    # 基站与 IP 定位都只是城市级粗略结果，日志里显式标记，避免被当成精确定位
+    location_approximate = location_source.startswith(("基站", "IP"))
     logger.bind(tag=TAG).info(
         "天气定位: "
         f"client_ip={client_ip}, requested={requested_location}, resolved={location}, "
-        f"source={location_source}, default={default_location}"
+        f"source={location_source}, approximate={location_approximate}, "
+        f"default={default_location}"
     )
     # 尝试从缓存获取完整天气报告
     weather_cache_key = f"full_weather_{location}_{lang}"

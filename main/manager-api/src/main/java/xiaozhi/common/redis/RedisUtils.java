@@ -74,6 +74,18 @@ public class RedisUtils {
         set(key, value, DEFAULT_EXPIRE);
     }
 
+    /**
+     * 仅当 key 不存在时写入，用于短时并发去重。
+     * 不使用带过期参数的 setIfAbsent 重载，兼容不同 Spring Data Redis 版本。
+     */
+    public boolean setIfAbsent(String key, Object value, long expire) {
+        Boolean absent = redisTemplate.opsForValue().setIfAbsent(key, value);
+        if (Boolean.TRUE.equals(absent) && expire != NOT_EXPIRE) {
+            expire(key, expire);
+        }
+        return Boolean.TRUE.equals(absent);
+    }
+
     public Object get(String key, long expire) {
         Object value = redisTemplate.opsForValue().get(key);
         if (expire != NOT_EXPIRE) {

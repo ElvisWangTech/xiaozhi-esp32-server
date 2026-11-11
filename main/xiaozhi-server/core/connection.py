@@ -38,7 +38,7 @@ from plugins_func.loadplugins import auto_import_modules
 from plugins_func.register import Action, ActionResponse, all_function_registry, module_func_map
 from core.auth import AuthenticationError
 from config.config_loader import get_private_config_from_api
-from config.manage_api_client import get_device_public_ip
+from config.manage_api_client import get_device_public_ip, get_device_cell_location
 from core.providers.tts.dto.dto import ContentType, TTSMessageDTO, SentenceType
 from config.logger import setup_logging, build_module_string, create_connection_logger
 from config.manage_api_client import (
@@ -116,6 +116,8 @@ class ConnectionHandler:
         self.headers = None
         self.device_id = None
         self.client_ip = None
+        # 设备在 OTA 上报基站信息后得到的粗略位置；无结果时为 None，走 IP 定位
+        self.cell_location = None
         self.prompt = None
         self.welcome_msg = None
         self.max_output_size = 0
@@ -220,16 +222,53 @@ class ConnectionHandler:
             self.headers = dict(ws.request.headers)
             self.device_id = self.headers.get("device-id", None)
             public_ip = None
+            location_lookup_ms = None
+            cell_location_reason = "未查询（未启用管理端配置或无设备ID）"
             if self.device_id and self.read_config_from_api:
-                public_ip = await get_device_public_ip(self.device_id)
+                # 两个接口都只读管理端 Redis，并发发起不额外增加建连耗时。
+                # 外部基站接口的耗时与失败已被隔离在管理端后台线程，不影响这里。
+                lookup_started = time.monotonic()
+                public_ip, self.cell_location = await asyncio.gather(
+                    get_device_public_ip(self.device_id),
+                    get_device_cell_location(self.device_id),
+                    return_exceptions=True,
+                )
+                location_lookup_ms = round((time.monotonic() - lookup_started) * 1000, 1)
+                if isinstance(public_ip, BaseException):
+                    self.logger.bind(tag=TAG).info(
+                        f"读取设备公网IP失败，回退远端地址: {public_ip}"
+                    )
+                    public_ip = None
+                if isinstance(self.cell_location, BaseException):
+                    cell_location_reason = f"读取失败({type(self.cell_location).__name__})"
+                    self.logger.bind(tag=TAG).info(
+                        f"读取设备基站定位失败，回退IP定位: {self.cell_location}"
+                    )
+                    self.cell_location = None
+                elif not self.cell_location:
+                    cell_location_reason = "无结果（未上报cereg/缓存过期/接口失败）"
+                else:
+                    cell_location_reason = "已取得基站结果"
             if public_ip:
                 self.client_ip = public_ip
                 ip_source = "public_ip"
             else:
                 self.client_ip = ws.remote_address[0] if ws.remote_address else None
                 ip_source = "remote_address"
+            # 基站与 IP 定位都只是城市级粗略结果，不能当精确定位使用
+            location_source = "cell" if self.cell_location else "ip"
             self.logger.bind(tag=TAG).info(
-                f"{self.client_ip} conn - ip_source={ip_source} - Headers: {self.headers}"
+                f"{self.client_ip} conn - ip_source={ip_source} - "
+                f"location_source={location_source} - Headers: {self.headers}"
+            )
+            # 单独一行汇总定位链路：只看城市级字段，不打印经纬度与详细地址
+            cell_info = self.cell_location if isinstance(self.cell_location, dict) else {}
+            self.logger.bind(tag=TAG).info(
+                f"定位来源(粗略/城市级): device_id={self.device_id}, source={location_source}, "
+                f"reason={cell_location_reason}, city={cell_info.get('city') or '-'}, "
+                f"radius={cell_info.get('radius') or '-'}, cell={cell_info.get('cell') or '-'}, "
+                f"approximate={cell_info.get('approximate', False)}, "
+                f"ip_source={ip_source}, lookup_ms={location_lookup_ms}"
             )
 
             # 认证通过,继续处理

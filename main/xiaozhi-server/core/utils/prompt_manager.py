@@ -58,6 +58,9 @@ class PromptManager:
         self.logger = logger or setup_logging()
         self.base_prompt_template = None
         self.last_update_time = 0
+        # 本次连接的基站定位城市。只随连接存活，不写入手动失效的 LOCATION 缓存，
+        # 这样 3 小时缓存过期后能自然回退到 IP 定位，而不是一直沿用旧基站结果。
+        self.cell_location_city = ""
 
         # 导入全局缓存管理器
         from core.utils.cache.manager import cache_manager, CacheType
@@ -141,10 +144,42 @@ class PromptManager:
 
         return today_date, today_weekday, lunar_date
 
-    def _get_location_info(self, client_ip: str) -> str:
-        """获取位置信息"""
+    @staticmethod
+    def _cell_location_city(conn) -> str:
+        """只取基站定位的城市级结果。
+
+        基站定位与 IP 定位都是粗略位置，经纬度、radius 与详细地址都不注入提示词，
+        避免被当成精确定位使用。
+        """
+        cell_location = getattr(conn, "cell_location", None)
+        if not isinstance(cell_location, dict):
+            return ""
+        city = cell_location.get("city")
+        return str(city).strip() if city else ""
+
+    def _get_location_info(self, conn, client_ip: str) -> str:
+        """获取位置信息：优先基站定位（城市级粗略结果），不可用则回退原有 IP 定位。"""
         try:
-            # 先从缓存获取
+            city = self._cell_location_city(conn)
+            # 每次都重置：基站结果过期后必须回退到 IP 定位，不能沿用旧值
+            self.cell_location_city = city
+            if city:
+                self.logger.bind(tag=TAG).info(
+                    f"位置信息来自基站定位（粗略/城市级）: city={city}, approximate=True"
+                )
+                return city
+
+            cell_location = getattr(conn, "cell_location", None)
+            fallback_reason = (
+                "未上报cereg或缓存已过期"
+                if cell_location is None
+                else "基站结果缺少city字段（不使用经纬度/详细地址）"
+            )
+            self.logger.bind(tag=TAG).info(
+                f"基站定位不可用，回退IP定位（粗略/城市级）: reason={fallback_reason}"
+            )
+
+            # 基站定位不可用，保留原有 IP 定位链路
             cached_location = self.cache_manager.get(self.CacheType.LOCATION, client_ip)
             if cached_location is not None:
                 self.logger.bind(tag=TAG).info(
@@ -156,10 +191,10 @@ class PromptManager:
             from core.utils.util import get_ip_info
 
             ip_info = get_ip_info(client_ip, self.logger)
-            city = ip_info.get("city", "未知位置")
-            location = f"{city}"
+            ip_city = ip_info.get("city", "未知位置")
+            location = f"{ip_city}"
             self.logger.bind(tag=TAG).info(
-                f"位置信息解析完成: ip={client_ip}, city={city}"
+                f"位置信息解析完成(IP定位，粗略): ip={client_ip}, city={ip_city}"
             )
 
             # 存入缓存
@@ -226,8 +261,8 @@ class PromptManager:
                     or "weather_info" in self.base_prompt_template
                 )
             ):
-                # 获取位置信息（使用全局缓存）
-                local_address = self._get_location_info(client_ip)
+                # 获取位置信息（使用全局缓存）：优先基站定位，回退 IP 定位
+                local_address = self._get_location_info(conn, client_ip)
 
             if (
                 self.base_prompt_template
@@ -267,10 +302,15 @@ class PromptManager:
             local_address = ""
             weather_info = ""
 
-            if client_ip:
-                # 获取位置信息（从全局缓存）
-                local_address = (
+            if client_ip or self.cell_location_city:
+                # 基站定位优先（只在本次连接有效）；过期后回退 IP 定位缓存
+                local_address = self.cell_location_city or (
                     self.cache_manager.get(self.CacheType.LOCATION, client_ip) or ""
+                )
+                self.logger.bind(tag=TAG).debug(
+                    "提示词位置(粗略/城市级): "
+                    f"source={'基站定位' if self.cell_location_city else 'IP定位缓存'}, "
+                    f"city={local_address or '未知'}"
                 )
 
                 # 获取天气信息（从全局缓存）

@@ -1,5 +1,6 @@
 package xiaozhi.modules.device.dto;
 
+import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import io.swagger.v3.oas.annotations.media.Schema;
 import lombok.Getter;
@@ -125,6 +126,7 @@ public class DeviceReportReqDTO implements Serializable {
 
     @Getter
     @Setter
+    @JsonIgnoreProperties(ignoreUnknown = true)
     @Schema(description = "板子连接和网络信息")
     public static class BoardInfo {
         @Schema(description = "板子类型")
@@ -148,5 +150,33 @@ public class DeviceReportReqDTO implements Serializable {
 
         @Schema(description = "MAC 地址")
         private String mac;
+
+        @Schema(description = "蜂窝网络注册信息，仅 4G 模组联网时上报")
+        private CeregInfo cereg;
+    }
+
+    @Getter
+    @Setter
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    @Schema(description = "4G 模组 CEREG 注册信息，用于基站定位")
+    public static class CeregInfo {
+        @Schema(description = "注册状态")
+        private Integer stat;
+
+        @Schema(description = "位置区码（十进制）")
+        private String lac;
+
+        @Schema(description = "小区标识（十进制）")
+        private String ci;
+
+        @Schema(description = "接入技术")
+        @JsonProperty("AcT")
+        private Integer act;
+
+        @Schema(description = "移动国家码，中国为 460")
+        private String mcc;
+
+        @Schema(description = "移动网络码（十进制），00 表示中国移动")
+        private String mnc;
     }
 }

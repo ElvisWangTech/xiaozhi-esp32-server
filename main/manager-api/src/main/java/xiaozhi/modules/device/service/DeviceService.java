@@ -31,6 +31,12 @@ public interface DeviceService extends BaseService<DeviceEntity> {
     String getDevicePublicIp(String macAddress);
 
     /**
+     * 读取设备通过基站信息得到的粗略位置（城市级）。
+     * 无结果或缓存过期时返回 null，调用方回退到 IP 定位。
+     */
+    Map<String, Object> getDeviceCellLocation(String macAddress);
+
+    /**
      * 获取用户指定智能体的设备列表，
      */
     List<DeviceEntity> getUserDevices(Long userId, String agentId);

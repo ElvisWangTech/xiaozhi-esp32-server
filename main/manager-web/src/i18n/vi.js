@@ -788,6 +788,7 @@ export default {
   'paramManagement.subgroup.metrics': 'Chỉ số',
   'paramManagement.subgroup.tracing': 'Tracing',
   'paramManagement.subgroup.plugin': 'Plugin · {name}',
+  'paramManagement.subgroup.cellLocation': 'Định vị trạm gốc',
   'paramManagement.addParam': 'Thêm tham số',
   'paramManagement.editParam': 'Chỉnh sửa tham số',
   'paramManagement.getParamsListFailed': 'Không thể lấy danh sách tham số',

@@ -38,6 +38,16 @@
                 <span class="group-tab-label">{{ tab.label }}</span>
                 <span class="group-tab-count">{{ tab.count }}</span>
               </button>
+              <!-- 基站定位配置快捷入口：一键定位到 server.cell_location.* 分组 -->
+              <button
+                type="button"
+                class="group-tab group-tab-shortcut"
+                :class="{ active: activeCategory === 'server' && activeSubCategory === 'cell_location' }"
+                @click="showCellLocationParams"
+              >
+                <span class="group-tab-label">{{ $t('paramManagement.subgroup.cellLocation') }}</span>
+                <span class="group-tab-count">{{ cellLocationCount }}</span>
+              </button>
             </div>
 
             <!-- 二级子分类 -->
@@ -208,7 +218,7 @@ const TOP_GROUP_ORDER = ['server', 'plugins', 'log', 'session_state', 'general']
 const FETCH_LIMIT = 500;
 
 const SERVER_SUB_ORDER = [
-  '_root', 'auth', 'connection', 'registry', 'resilience', 'metrics', 'tracing'
+  '_root', 'auth', 'connection', 'registry', 'resilience', 'metrics', 'tracing', 'cell_location'
 ];
 
 export default {
@@ -263,6 +273,12 @@ export default {
     },
     filteredTotal() {
       return this.filteredParams.length;
+    },
+    cellLocationCount() {
+      return this.allParams.filter(item =>
+        this.getTopGroup(item.paramCode) === 'server' &&
+        this.getSubGroup(item.paramCode) === 'cell_location'
+      ).length;
     },
     selectedCount() {
       return this.filteredParams.filter(item => item.selected).length;
@@ -426,7 +442,8 @@ export default {
         'server.registry': 'paramManagement.subgroup.registry',
         'server.resilience': 'paramManagement.subgroup.resilience',
         'server.metrics': 'paramManagement.subgroup.metrics',
-        'server.tracing': 'paramManagement.subgroup.tracing'
+        'server.tracing': 'paramManagement.subgroup.tracing',
+        'server.cell_location': 'paramManagement.subgroup.cellLocation'
       };
       const i18nKey = known[`${top}.${sub}`];
       if (i18nKey) return this.$t(i18nKey);
@@ -495,6 +512,14 @@ export default {
       if (this.activeCategory === key) return;
       this.activeCategory = key;
       this.activeSubCategory = 'all';
+      this.isAllSelected = false;
+      this.allParams.forEach(row => { row.selected = false; });
+    },
+    showCellLocationParams() {
+      this.searchCode = '';
+      this.appliedSearch = '';
+      this.activeCategory = 'server';
+      this.activeSubCategory = 'cell_location';
       this.isAllSelected = false;
       this.allParams.forEach(row => { row.selected = false; });
     },
@@ -862,6 +887,12 @@ export default {
       color: #fff;
     }
   }
+}
+
+.group-tab-shortcut {
+  border-style: dashed;
+  border-color: #b7c3ef;
+  background: #fbfcff;
 }
 
 .group-tab-count {

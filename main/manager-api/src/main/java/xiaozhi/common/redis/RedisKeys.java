@@ -237,4 +237,25 @@ public class RedisKeys {
         return "device:public_ip:" + macAddress;
     }
 
+    /**
+     * 设备最近一次基站定位结果（供 xiaozhi-server 读取，带 TTL）
+     */
+    public static String getDeviceCellLocationKey(String macAddress) {
+        return "device:cell_location:" + macAddress;
+    }
+
+    /**
+     * 按基站标识缓存的查询结果，跨设备共享，避免同一小区重复调用外部接口
+     */
+    public static String getCellLocationCacheKey(String cellId) {
+        return "device:cell_location:cache:" + cellId;
+    }
+
+    /**
+     * 同一基站查询的并发去重锁（短 TTL）
+     */
+    public static String getCellLocationInflightKey(String cellId) {
+        return "device:cell_location:inflight:" + cellId;
+    }
+
 }
