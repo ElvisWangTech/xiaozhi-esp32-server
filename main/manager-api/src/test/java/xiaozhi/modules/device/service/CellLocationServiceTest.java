@@ -97,6 +97,73 @@ class CellLocationServiceTest {
     }
 
     @Test
+    @DisplayName("小半径基站解析出附近级结果，天气用区县，路口方位距离被丢弃")
+    void parseAddressResolvesNearbyLocation() {
+        CellLocationService.LocationParts parts = CellLocationService.parseAddress(
+                "上海市浦东新区张江镇徐油车;中环路华夏高架路出口与中环路出口路口西南363米", "1414");
+
+        assertEquals("上海市", parts.city());
+        assertEquals("浦东新区", parts.district());
+        assertEquals("张江镇", parts.town());
+        assertEquals("徐油车", parts.landmark());
+        assertEquals("上海市浦东新区张江镇徐油车附近", parts.nearby());
+        assertEquals("浦东新区", parts.weatherLocation());
+        assertEquals("nearby", parts.granularity());
+        assertEquals(Integer.valueOf(1414), parts.radiusMeters());
+        assertTrue(!parts.nearby().contains("363") && !parts.nearby().contains("出口"));
+    }
+
+    @Test
+    @DisplayName("radius 越大粒度越粗：>10km 只到区县，>20km 天气退回城市")
+    void radiusControlsGranularity() {
+        String address = "广东省深圳市南山区粤海街道科技园;某路口";
+
+        CellLocationService.LocationParts mid = CellLocationService.parseAddress(address, "5000");
+        assertEquals("深圳市南山区粤海街道附近", mid.nearby());
+        assertEquals("town", mid.granularity());
+        assertNull(mid.landmark());
+        assertEquals("南山区", mid.weatherLocation());
+
+        CellLocationService.LocationParts large = CellLocationService.parseAddress(address, "25000");
+        assertEquals("深圳市南山区附近", large.nearby());
+        assertEquals("district", large.granularity());
+        assertNull(large.town());
+        assertEquals("深圳市", large.weatherLocation());
+
+        // radius 缺失时按保守档：可用到镇/街道，不带具体 landmark
+        CellLocationService.LocationParts unknown = CellLocationService.parseAddress(address, "");
+        assertEquals("深圳市南山区粤海街道附近", unknown.nearby());
+        assertNull(unknown.radiusMeters());
+    }
+
+    @Test
+    @DisplayName("带数字/道路/方位的伪精确描述不进入 nearby")
+    void pseudoPreciseDescriptionIsDropped() {
+        CellLocationService.LocationParts parts = CellLocationService.parseAddress(
+                "上海市浦东新区张江镇中环路出口西南363米;另一段路口描述", "1414");
+        assertEquals("上海市浦东新区张江镇附近", parts.nearby());
+        assertNull(parts.landmark());
+
+        assertNull(CellLocationService.parseAddress("中环路出口西南363米", "1414"));
+        assertNull(CellLocationService.parseAddress("", "1414"));
+    }
+
+    @Test
+    @DisplayName("旧 Redis 缓存现场补算 nearby，无需等 3 小时过期")
+    void legacyCachedResultIsEnriched() {
+        when(redisUtils.get(DEVICE_KEY)).thenReturn(
+                "{\"city\":\"上海市\",\"approximate\":true,\"radius\":\"1414\","
+                        + "\"address\":\"上海市浦东新区张江镇徐油车;某路口\"}");
+
+        Map<String, Object> result = service.getDeviceCellLocation(MAC);
+
+        assertEquals("上海市", result.get("city"));
+        assertEquals("上海市浦东新区张江镇徐油车附近", result.get("nearby"));
+        assertEquals("浦东新区", result.get("weather_location"));
+        assertEquals("nearby", result.get("granularity"));
+    }
+
+    @Test
     @DisplayName("OTA 上报只提交后台任务，调用线程不打外部接口")
     void scheduleRefreshDoesNotBlockCaller() {
         service.scheduleRefresh(MAC, report("460", "00", "6334", "29434881"));
@@ -183,6 +250,9 @@ class CellLocationServiceTest {
         assertTrue(stored.path("approximate").asBoolean());
         assertEquals("cell", stored.path("source").asText());
         assertEquals("1414", stored.path("radius").asText());
+        assertEquals("上海市浦东新区张江镇徐油车附近", stored.path("nearby").asText());
+        assertEquals("浦东新区", stored.path("weather_location").asText());
+        assertEquals("nearby", stored.path("granularity").asText());
 
         ArgumentCaptor<String> url = ArgumentCaptor.forClass(String.class);
         verify(restTemplate).getForEntity(url.capture(), eq(byte[].class));
@@ -205,7 +275,7 @@ class CellLocationServiceTest {
     }
 
     @Test
-    @DisplayName("真实接口连通性：示例基站应解析出上海市")
+    @DisplayName("真实接口连通性：示例基站应解析出「附近」级结果")
     @EnabledIfEnvironmentVariable(named = "RUN_CELLOCATION_LIVE", matches = "1")
     void liveApiReturnsCityLevelLocation() {
         SimpleClientHttpRequestFactory factory = new SimpleClientHttpRequestFactory();
@@ -220,6 +290,10 @@ class CellLocationServiceTest {
         assertNotNull(result, "真实接口未返回可用结果（网络不通时该项可跳过）");
         assertEquals("上海市", result.get("city"));
         assertEquals(Boolean.TRUE, result.get("approximate"));
+        assertEquals("上海市浦东新区张江镇徐油车附近", result.get("nearby"));
+        assertEquals("浦东新区", result.get("weather_location"));
+        assertEquals("nearby", result.get("granularity"));
+        assertEquals(Integer.valueOf(1414), result.get("radius_m"));
     }
 
     @Test

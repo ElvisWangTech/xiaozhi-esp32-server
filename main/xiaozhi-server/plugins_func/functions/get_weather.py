@@ -173,16 +173,27 @@ async def get_weather(conn: "ConnectionHandler", location: str = None, lang: str
     requested_location = location
     location_source = "调用方传入"
 
+    cell_location = getattr(conn, "cell_location", None)
+    cell_city = (
+        str(cell_location["city"]).strip()
+        if isinstance(cell_location, dict) and cell_location.get("city")
+        else ""
+    )
+    # 管理端按基站精度解析出的区县级地名；旧缓存只有 city 时会降级为城市级
+    cell_weather_location = (
+        str(cell_location["weather_location"]).strip()
+        if isinstance(cell_location, dict) and cell_location.get("weather_location")
+        else ""
+    )
+
     # 优先使用用户提供的location参数
     if not location:
-        # 基站定位优先：只取城市级粗略结果，经纬度与详细地址不用于天气查询
-        cell_location = getattr(conn, "cell_location", None)
-        cell_city = (
-            str(cell_location["city"]).strip()
-            if isinstance(cell_location, dict) and cell_location.get("city")
-            else ""
-        )
-        if cell_city:
+        # 基站定位优先：区县级比城市级更贴近设备，但仍是粗略结果；
+        # 经纬度、详细地址与「XX附近」提示词文本都不用于天气查询
+        if cell_weather_location:
+            location = cell_weather_location
+            location_source = "基站定位（粗略/区县级）"
+        elif cell_city:
             location = cell_city
             location_source = "基站定位（粗略/城市级）"
         elif client_ip:
@@ -207,13 +218,18 @@ async def get_weather(conn: "ConnectionHandler", location: str = None, lang: str
             # 若无IP，使用默认位置
             location = default_location
             location_source = "默认城市（无客户端IP）"
-    # 基站与 IP 定位都只是城市级粗略结果，日志里显式标记，避免被当成精确定位
+    # 基站与 IP 定位都只是粗略结果，日志里显式标记，避免被当成精确定位
     location_approximate = location_source.startswith(("基站", "IP"))
+    cell_granularity = (
+        str(cell_location.get("granularity") or "-")
+        if isinstance(cell_location, dict)
+        else "-"
+    )
     logger.bind(tag=TAG).info(
         "天气定位: "
         f"client_ip={client_ip}, requested={requested_location}, resolved={location}, "
-        f"source={location_source}, approximate={location_approximate}, "
-        f"default={default_location}"
+        f"source={location_source}, granularity={cell_granularity}, "
+        f"approximate={location_approximate}, default={default_location}"
     )
     # 尝试从缓存获取完整天气报告
     weather_cache_key = f"full_weather_{location}_{lang}"
@@ -223,6 +239,22 @@ async def get_weather(conn: "ConnectionHandler", location: str = None, lang: str
 
     # 缓存未命中，获取实时天气数据
     city_info = await fetch_city_info(location, api_key, api_host)
+    if (
+        not city_info
+        and requested_location is None  # 用户显式指定的地点查不到时不能改查设备所在城市
+        and cell_city
+        and location != cell_city
+    ):
+        # 区县级地名可能不在和风 GeoAPI 索引里，退回城市级，避免天气能力整体失效
+        logger.bind(tag=TAG).info(
+            f"天气区县级地名无结果，回退城市级: from={location}, to={cell_city}"
+        )
+        location = cell_city
+        weather_cache_key = f"full_weather_{location}_{lang}"
+        cached_weather_report = cache_manager.get(CacheType.WEATHER, weather_cache_key)
+        if cached_weather_report:
+            return ActionResponse(Action.REQLLM, cached_weather_report, None)
+        city_info = await fetch_city_info(location, api_key, api_host)
     if not city_info:
         return ActionResponse(
             Action.REQLLM, f"未找到相关的城市: {location}，请确认地点是否正确", None

@@ -299,7 +299,7 @@ async def get_device_public_ip(instance, mac_address: str) -> Optional[str]:
 
 @api_guard("获取设备基站定位失败")
 async def get_device_cell_location(instance, mac_address: str) -> Optional[Dict]:
-    """读取设备在 OTA 上报基站信息后查询到的粗略位置（城市级）。
+    """读取设备在 OTA 上报基站信息后查询到的粗略位置（附近级）。
 
     外部基站接口的耗时与失败已被隔离在管理端后台线程；这里只读管理端 Redis。
     读不到、结构不完整或请求异常一律返回 None，由调用方回退到 IP 定位，
@@ -312,7 +312,8 @@ async def get_device_cell_location(instance, mac_address: str) -> Optional[Dict]
         "/config/device-cell-location",
         json={"macAddress": mac_address},
     )
-    if not isinstance(data, dict) or not data.get("city"):
+    # 新结果带 nearby，旧缓存由管理端现场补算；两者都缺说明结构不完整
+    if not isinstance(data, dict) or not (data.get("nearby") or data.get("city")):
         return None
     return data
 

@@ -41,8 +41,10 @@ import xiaozhi.modules.device.dto.DeviceReportReqDTO;
  * 任何失败/超时都只记日志，绝不阻塞 OTA 响应，也绝不影响 public_ip 定位链路。</li>
  * <li>结果按基站标识缓存（默认 3 小时，可配置），命中即复用；设备侧另存一份带同样 TTL 的结果，
  * 保证只有连 4G 时才上报 cereg 的设备，在切回 Wi-Fi 后仍能在有效期内取到位置。</li>
- * <li>基站定位是城市级粗略结果（返回带 approximate=true 与 radius），与 IP 定位一样
- * 不可当作精确定位使用；下游只消费解析出的城市名。</li>
+ * <li>基站定位是粗略结果（返回带 approximate=true 与 radius），与 IP 定位一样
+ * 不可当作精确定位使用。为了尽量贴近「附近」，按 radius 分级从 address 解析出
+ * 城市 / 区县 / 镇街 / 短地标，生成 nearby（提示词用）与 weather_location（天气用）。
+ * 经纬度、详细地址与「路口西南 363 米」这类伪精确描述一律不进入下游。</li>
  * </ol>
  */
 @Slf4j
@@ -159,8 +161,13 @@ public class CellLocationService {
             Map<String, Object> result = objectMapper.convertValue(node,
                     new TypeReference<Map<String, Object>>() {
                     });
-            log.debug("读取设备基站定位结果（粗略）: mac={}, city={}, approximate={}, radius={}, updated_at={}",
-                    macAddress, result.get("city"), result.get("approximate"),
+            // 兼容上线前写入的旧缓存（只有 city/address/radius）：现场补算分级字段，
+            // 无需等 3 小时缓存过期，设备立刻就能用上「附近」级结果。
+            enrichLegacyResult(result);
+            log.debug("读取设备基站定位结果（粗略）: mac={}, city={}, nearby={}, granularity={}, "
+                            + "weather_location={}, approximate={}, radius={}, updated_at={}",
+                    macAddress, result.get("city"), result.get("nearby"), result.get("granularity"),
+                    result.get("weather_location"), result.get("approximate"),
                     result.get("radius"), result.get("updated_at"));
             return result;
         } catch (Exception e) {
@@ -208,10 +215,12 @@ public class CellLocationService {
                 String json = objectMapper.writeValueAsString(result);
                 redisUtils.set(cacheKey, json, ttl);
                 redisUtils.set(deviceKey, json, ttl);
-                log.info("基站定位成功（粗略/城市级）: mac={}, cell={}, city={}, radius={}, "
+                log.info("基站定位成功（粗略/附近级）: mac={}, cell={}, city={}, nearby={}, "
+                                + "granularity={}, weather_location={}, radius={}, "
                                 + "ttl={}s, elapsed={}ms",
-                        macAddress, cellId, result.get("city"), result.get("radius"), ttl,
-                        System.currentTimeMillis() - startedAt);
+                        macAddress, cellId, result.get("city"), result.get("nearby"),
+                        result.get("granularity"), result.get("weather_location"),
+                        result.get("radius"), ttl, System.currentTimeMillis() - startedAt);
             } finally {
                 redisUtils.delete(inflightKey);
             }
@@ -287,27 +296,30 @@ public class CellLocationService {
             return null;
         }
         String address = root.path("address").asText("").trim();
-        String city = extractCity(address);
-        if (city == null) {
+        String radius = root.path("radius").asText("").trim();
+        LocationParts parts = parseAddress(address, radius);
+        if (parts == null) {
             // 日志只记地址长度，不打印详细地址、经纬度
-            log.info("基站地址未解析出城市，下游将回退 IP 定位: cell={}, address_length={}",
+            log.info("基站地址未解析出可用位置，下游将回退 IP 定位: cell={}, address_length={}",
                     cell.id(), address.length());
+            return null;
         }
         Map<String, Object> result = new LinkedHashMap<>();
         result.put("source", "cell");
         result.put("approximate", true);
-        result.put("city", city);
+        result.putAll(parts.toMap());
+        // address / lat / lon 只留在管理端 Redis 内，供排查与后续扩展，不注入提示词或天气
         result.put("address", address);
         result.put("lat", lat);
         result.put("lon", lon);
-        result.put("radius", root.path("radius").asText("").trim());
+        result.put("radius", radius);
         result.put("cell", cell.toMap());
         result.put("updated_at", Instant.now().toString());
         return result;
     }
 
     /**
-     * 从地址描述中取城市级名称，与 IP 定位返回的 city 对齐，供天气与提示词使用。
+     * 从地址描述中取城市级名称，与 IP 定位返回的 city 对齐。
      * 只取「省/自治区 + 市」前缀，不把街道级描述或经纬度当成精确位置。
      */
     static String extractCity(String address) {
@@ -330,6 +342,169 @@ public class CellLocationService {
         }
         String city = head.substring(start, cityEnd + 1).trim();
         return city.length() >= 2 && city.length() <= 12 ? city : null;
+    }
+
+    /**
+     * 把 address 解析成「附近」级结果，按 radius（基站覆盖半径，米）控制可用粒度。
+     *
+     * <p>cellocation 的 address 形如
+     * 「上海市浦东新区张江镇徐油车;中环路华夏高架路出口与中环路出口路口西南363米」：
+     * 分号前是行政区划 + 地名，分号后是路口方位距离。分号后一律丢弃，避免把
+     * 「西南363米」这类伪精确描述当成设备真实位置；分号前按 市 → 区/县 → 镇/街道 →
+     * 短地标 分级拼接，末尾统一加「附近」。</p>
+     *
+     * <p>分级阈值：radius ≤ 3000m 可用到地标；3000~10000m 只到镇/街道；
+     * &gt; 10000m 或缺失时只到区县/城市。radius 缺失按中间档处理，保证不会过度精确。</p>
+     */
+    static LocationParts parseAddress(String address, String radiusRaw) {
+        if (StringUtils.isBlank(address)) {
+            return null;
+        }
+        String head = address.split("[;；]", 2)[0].trim();
+        String city = extractCity(head);
+        if (city == null) {
+            return null;
+        }
+        int cityEnd = head.indexOf(city);
+        String rest = cityEnd >= 0 ? head.substring(cityEnd + city.length()).trim() : "";
+        // 直辖市常见的「市辖区」是占位词，不能当区县名使用
+        if (rest.startsWith("市辖区")) {
+            rest = rest.substring("市辖区".length()).trim();
+        }
+        String district = null;
+        int districtEnd = firstAdminEnd(rest);
+        if (districtEnd > 0 && districtEnd <= 12) {
+            district = rest.substring(0, districtEnd).trim();
+            rest = rest.substring(districtEnd).trim();
+        }
+        String town = null;
+        int townEnd = firstTownEnd(rest);
+        if (townEnd > 0 && townEnd <= 12) {
+            town = rest.substring(0, townEnd).trim();
+            rest = rest.substring(townEnd).trim();
+        }
+        String landmark = cleanLandmark(rest);
+
+        int radius = parseRadius(radiusRaw);
+        // radius 未知（-1）时按保守档：可用到镇/街道，不带具体 landmark
+        boolean allowTown = radius < 0 || radius <= 10000;
+        boolean allowLandmark = radius >= 0 && radius <= 3000;
+        boolean useLandmark = allowLandmark && landmark != null
+                && (town != null || district != null);
+
+        StringBuilder nearby = new StringBuilder(city);
+        String granularity = "city";
+        if (district != null) {
+            nearby.append(district);
+            granularity = "district";
+        }
+        if (allowTown && town != null) {
+            nearby.append(town);
+            granularity = "town";
+        }
+        if (useLandmark) {
+            nearby.append(landmark);
+            granularity = "nearby";
+        }
+        nearby.append("附近");
+        // 天气 API 按行政区名查询，区县级比城市级更贴近；误差过大时退回城市
+        String weatherLocation = district != null && (radius < 0 || radius <= 20000)
+                ? district : city;
+        return new LocationParts(city, district, allowTown ? town : null,
+                useLandmark ? landmark : null, nearby.toString(), weatherLocation,
+                granularity, radius >= 0 ? radius : null);
+    }
+
+    /** 找第一个区/县/旗的结束位置。 */
+    private static int firstAdminEnd(String text) {
+        int end = -1;
+        for (char marker : new char[]{'区', '县', '旗'}) {
+            int idx = text.indexOf(marker);
+            if (idx >= 0 && (end < 0 || idx + 1 < end)) {
+                end = idx + 1;
+            }
+        }
+        return end;
+    }
+
+    /** 找第一个镇/乡/街道的结束位置，取最短匹配（「XX街道」优先于更靠后的「XX镇」）。 */
+    private static int firstTownEnd(String text) {
+        int end = -1;
+        for (String marker : new String[]{"镇", "乡", "苏木", "街道", "办事处"}) {
+            int idx = text.indexOf(marker);
+            if (idx >= 0) {
+                int candidate = idx + marker.length();
+                if (end < 0 || candidate < end) {
+                    end = candidate;
+                }
+            }
+        }
+        return end;
+    }
+
+    /** 只保留纯中文短地名；含数字、道路门牌或方位词的描述属于伪精确信息，一律丢弃。 */
+    private static String cleanLandmark(String text) {
+        if (StringUtils.isBlank(text)) {
+            return null;
+        }
+        String value = text.split("[、,，\\s]", 2)[0].trim();
+        if (!value.matches("[\\u4e00-\\u9fa5]{2,8}")) {
+            return null;
+        }
+        if (value.matches(".*[路号栋幢室出口米公里桥道架匝东西南北侧旁内与村组].*")) {
+            return null;
+        }
+        return value;
+    }
+
+    private static int parseRadius(String raw) {
+        if (StringUtils.isBlank(raw) || !raw.matches("\\d{1,9}")) {
+            return -1;
+        }
+        try {
+            return Integer.parseInt(raw);
+        } catch (NumberFormatException e) {
+            return -1;
+        }
+    }
+
+    /** 兼容上线前写入的旧缓存：只有 city/address/radius，现场补算分级字段。 */
+    private static void enrichLegacyResult(Map<String, Object> result) {
+        if (result.containsKey("nearby")) {
+            return;
+        }
+        Object address = result.get("address");
+        Object radius = result.get("radius");
+        LocationParts parts = parseAddress(
+                address instanceof String s ? s : "",
+                radius == null ? "" : String.valueOf(radius));
+        if (parts != null) {
+            parts.toMap().forEach(result::putIfAbsent);
+        }
+    }
+
+    /** 分级结果；字段用 snake_case 与既有 Redis JSON 保持一致。 */
+    record LocationParts(String city, String district, String town, String landmark,
+            String nearby, String weatherLocation, String granularity, Integer radiusMeters) {
+
+        Map<String, Object> toMap() {
+            Map<String, Object> map = new LinkedHashMap<>();
+            put(map, "city", city);
+            put(map, "district", district);
+            put(map, "town", town);
+            put(map, "landmark", landmark);
+            put(map, "nearby", nearby);
+            put(map, "weather_location", weatherLocation);
+            put(map, "granularity", granularity);
+            put(map, "radius_m", radiusMeters);
+            return map;
+        }
+
+        private static void put(Map<String, Object> map, String key, Object value) {
+            if (value != null) {
+                map.put(key, value);
+            }
+        }
     }
 
     private static String normalizeMac(String macAddress) {

@@ -58,9 +58,12 @@ class PromptManager:
         self.logger = logger or setup_logging()
         self.base_prompt_template = None
         self.last_update_time = 0
-        # 本次连接的基站定位城市。只随连接存活，不写入手动失效的 LOCATION 缓存，
-        # 这样 3 小时缓存过期后能自然回退到 IP 定位，而不是一直沿用旧基站结果。
-        self.cell_location_city = ""
+        # 本次连接的基站定位结果。cell_location_text 是注入提示词的「附近」描述，
+        # weather_location 是天气查询用的区县级地名，两者必须分开：
+        # 「上海市浦东新区张江镇附近」适合给大模型当参考，却不适合直接丢给天气 API。
+        # 两者都只随连接存活，不写入手动失效的 LOCATION 缓存，3 小时过期后自然回退 IP。
+        self.cell_location_text = ""
+        self.weather_location = ""
 
         # 导入全局缓存管理器
         from core.utils.cache.manager import cache_manager, CacheType
@@ -144,36 +147,54 @@ class PromptManager:
 
         return today_date, today_weekday, lunar_date
 
-    @staticmethod
-    def _cell_location_city(conn) -> str:
-        """只取基站定位的城市级结果。
+    # 基站与 IP 定位都只是粗略结果，提示词里必须显式说明，避免大模型断言精确位置
+    _APPROXIMATE_HINT = "（基站粗略定位，仅供参考）"
 
-        基站定位与 IP 定位都是粗略位置，经纬度、radius 与详细地址都不注入提示词，
-        避免被当成精确定位使用。
+    @staticmethod
+    def _cell_location_parts(conn) -> tuple:
+        """取 (附近描述, 天气用地点, 粒度)。
+
+        基站结果是粗略位置：只消费管理端解析好的 nearby 与 weather_location，
+        经纬度、radius、详细地址、路口方位距离一律不进入提示词与天气查询。
+        管理端旧缓存只有 city 时自动降级为城市级，保证平滑兼容。
         """
         cell_location = getattr(conn, "cell_location", None)
         if not isinstance(cell_location, dict):
-            return ""
-        city = cell_location.get("city")
-        return str(city).strip() if city else ""
+            return "", "", ""
+        city = str(cell_location.get("city") or "").strip()
+        nearby = str(cell_location.get("nearby") or "").strip()
+        weather = str(cell_location.get("weather_location") or "").strip()
+        if nearby:
+            return nearby, weather or city, str(cell_location.get("granularity") or "-")
+        return city, city, "city(兼容旧缓存)" if city else ""
 
     def _get_location_info(self, conn, client_ip: str) -> str:
-        """获取位置信息：优先基站定位（城市级粗略结果），不可用则回退原有 IP 定位。"""
+        """获取位置信息：优先基站「附近」级粗略结果，不可用则回退原有 IP 定位。"""
         try:
-            city = self._cell_location_city(conn)
             # 每次都重置：基站结果过期后必须回退到 IP 定位，不能沿用旧值
-            self.cell_location_city = city
-            if city:
-                self.logger.bind(tag=TAG).info(
-                    f"位置信息来自基站定位（粗略/城市级）: city={city}, approximate=True"
+            self.cell_location_text = ""
+            self.weather_location = ""
+            nearby, weather_location, granularity = self._cell_location_parts(conn)
+            if nearby:
+                text = (
+                    f"{nearby}{self._APPROXIMATE_HINT}"
+                    if granularity != "city(兼容旧缓存)"
+                    else nearby
                 )
-                return city
+                self.cell_location_text = text
+                self.weather_location = weather_location
+                self.logger.bind(tag=TAG).info(
+                    "位置信息来自基站定位（粗略/附近级）: "
+                    f"nearby={nearby}, granularity={granularity}, "
+                    f"weather_location={weather_location}, approximate=True"
+                )
+                return text
 
             cell_location = getattr(conn, "cell_location", None)
             fallback_reason = (
                 "未上报cereg或缓存已过期"
                 if cell_location is None
-                else "基站结果缺少city字段（不使用经纬度/详细地址）"
+                else "基站结果缺少可用位置（不使用经纬度/详细地址）"
             )
             self.logger.bind(tag=TAG).info(
                 f"基站定位不可用，回退IP定位（粗略/城市级）: reason={fallback_reason}"
@@ -182,6 +203,7 @@ class PromptManager:
             # 基站定位不可用，保留原有 IP 定位链路
             cached_location = self.cache_manager.get(self.CacheType.LOCATION, client_ip)
             if cached_location is not None:
+                self.weather_location = str(cached_location)
                 self.logger.bind(tag=TAG).info(
                     f"位置信息命中缓存: ip={client_ip}, location={cached_location}"
                 )
@@ -193,6 +215,7 @@ class PromptManager:
             ip_info = get_ip_info(client_ip, self.logger)
             ip_city = ip_info.get("city", "未知位置")
             location = f"{ip_city}"
+            self.weather_location = location
             self.logger.bind(tag=TAG).info(
                 f"位置信息解析完成(IP定位，粗略): ip={client_ip}, city={ip_city}"
             )
@@ -269,8 +292,9 @@ class PromptManager:
                 and "weather_info" in self.base_prompt_template
                 and local_address
             ):
-                # 获取天气信息（使用全局缓存）
-                self._get_weather_info(conn, local_address)
+                # 天气缓存键用区县级地名，不能把「XX附近（粗略定位）」这段提示词文本
+                # 直接丢给天气 API；基站不可用时 weather_location 等于 IP 定位城市
+                self._get_weather_info(conn, self.weather_location or local_address)
 
             # 获取配置的上下文数据
             if hasattr(conn, "device_id") and conn.device_id:
@@ -302,22 +326,22 @@ class PromptManager:
             local_address = ""
             weather_info = ""
 
-            if client_ip or self.cell_location_city:
+            if client_ip or self.cell_location_text:
                 # 基站定位优先（只在本次连接有效）；过期后回退 IP 定位缓存
-                local_address = self.cell_location_city or (
+                local_address = self.cell_location_text or (
                     self.cache_manager.get(self.CacheType.LOCATION, client_ip) or ""
                 )
+                weather_key = self.weather_location or local_address
                 self.logger.bind(tag=TAG).debug(
-                    "提示词位置(粗略/城市级): "
-                    f"source={'基站定位' if self.cell_location_city else 'IP定位缓存'}, "
-                    f"city={local_address or '未知'}"
+                    "提示词位置(粗略): "
+                    f"source={'基站定位' if self.cell_location_text else 'IP定位缓存'}, "
+                    f"text={local_address or '未知'}, weather_key={weather_key or '未知'}"
                 )
 
-                # 获取天气信息（从全局缓存）
-                if local_address:
+                # 获取天气信息（从全局缓存，键与 _get_weather_info 写入时保持一致）
+                if weather_key:
                     weather_info = (
-                        self.cache_manager.get(self.CacheType.WEATHER, local_address)
-                        or ""
+                        self.cache_manager.get(self.CacheType.WEATHER, weather_key) or ""
                     )
 
             # 获取TTS选择的语言，默认值为中文

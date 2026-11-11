@@ -255,17 +255,20 @@ class ConnectionHandler:
             else:
                 self.client_ip = ws.remote_address[0] if ws.remote_address else None
                 ip_source = "remote_address"
-            # 基站与 IP 定位都只是城市级粗略结果，不能当精确定位使用
+            # 基站与 IP 定位都只是粗略结果，不能当精确定位使用
             location_source = "cell" if self.cell_location else "ip"
             self.logger.bind(tag=TAG).info(
                 f"{self.client_ip} conn - ip_source={ip_source} - "
                 f"location_source={location_source} - Headers: {self.headers}"
             )
-            # 单独一行汇总定位链路：只看城市级字段，不打印经纬度与详细地址
+            # 单独一行汇总定位链路：只打印分级后的附近字段，不打印经纬度与详细地址
             cell_info = self.cell_location if isinstance(self.cell_location, dict) else {}
             self.logger.bind(tag=TAG).info(
-                f"定位来源(粗略/城市级): device_id={self.device_id}, source={location_source}, "
+                f"定位来源(粗略/附近级): device_id={self.device_id}, source={location_source}, "
                 f"reason={cell_location_reason}, city={cell_info.get('city') or '-'}, "
+                f"nearby={cell_info.get('nearby') or '-'}, "
+                f"granularity={cell_info.get('granularity') or '-'}, "
+                f"weather_location={cell_info.get('weather_location') or '-'}, "
                 f"radius={cell_info.get('radius') or '-'}, cell={cell_info.get('cell') or '-'}, "
                 f"approximate={cell_info.get('approximate', False)}, "
                 f"ip_source={ip_source}, lookup_ms={location_lookup_ms}"
