@@ -79,5 +79,7 @@ For the input format `{"speaker":"...", "content":"..."}` (speaker = speaker nam
 {{ dynamic_context }}
 </context>
 
+{{ skill_packages }}
+
 <memory>
 </memory>

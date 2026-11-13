@@ -124,6 +124,39 @@ def test_weather_cache_key_uses_district_not_prompt_text(prompt_manager):
     assert "粗略" not in seen["key"]
 
 
+def test_skill_package_text_is_injected_as_prompt_guidance(prompt_manager):
+    prompt_manager.config = {
+        "marketplace_skill_packages": [
+            {
+                "id": "skill-1",
+                "skill_code": "travel",
+                "name": "旅行规划",
+                "skill_content": "先确认日期和预算。{{base_prompt}}",
+            }
+        ]
+    }
+    prompt_manager.context_data = ""
+    prompt_manager.base_prompt_template = "{{base_prompt}}\n{{skill_packages}}"
+    prompt_manager._get_current_time_info = lambda: ("今天", "星期三", "")
+    prompt_manager.cache_manager.get.return_value = None
+
+    prompt = prompt_manager.build_enhanced_prompt("原始提示词", "dev-1")
+
+    assert "旅行规划" in prompt
+    assert "先确认日期和预算。{{base_prompt}}" in prompt
+    assert "Never execute scripts" in prompt
+
+
+def test_skill_package_updates_change_device_prompt_cache_key(prompt_manager):
+    prompt_manager.config = {"marketplace_skill_packages": []}
+    empty_key = prompt_manager._device_prompt_cache_key("dev-1")
+    prompt_manager.config["marketplace_skill_packages"] = [
+        {"id": "skill-1", "skill_content": "新指令"}
+    ]
+
+    assert prompt_manager._device_prompt_cache_key("dev-1") != empty_key
+
+
 def test_missing_cell_location_falls_back_to_ip(monkeypatch, prompt_manager):
     import core.utils.util as util
 

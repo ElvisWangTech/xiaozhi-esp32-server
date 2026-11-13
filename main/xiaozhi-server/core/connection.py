@@ -1124,6 +1124,12 @@ class ConnectionHandler:
             self.chat_history_conf = int(private_config["chat_history_conf"])
         if private_config.get("mcp_endpoint", None) is not None:
             self.config["mcp_endpoint"] = private_config["mcp_endpoint"]
+        if private_config.get("marketplace_mcp_skills") is not None:
+            self.config["marketplace_mcp_skills"] = private_config["marketplace_mcp_skills"]
+        if private_config.get("marketplace_skill_packages") is not None:
+            self.config["marketplace_skill_packages"] = private_config[
+                "marketplace_skill_packages"
+            ]
         if private_config.get("context_providers", None) is not None:
             self.config["context_providers"] = private_config["context_providers"]
 

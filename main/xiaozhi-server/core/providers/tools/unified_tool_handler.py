@@ -13,6 +13,7 @@ from .server_mcp import ServerMCPExecutor
 from .device_iot import DeviceIoTExecutor
 from .device_mcp import DeviceMCPExecutor
 from .mcp_endpoint import MCPEndpointExecutor
+from .marketplace_mcp_executor import MarketplaceMCPExecutor
 from core.handle.sendAudioHandle import send_display_message
 
 
@@ -33,6 +34,7 @@ class UnifiedToolHandler:
         self.device_iot_executor = DeviceIoTExecutor(conn)
         self.device_mcp_executor = DeviceMCPExecutor(conn)
         self.mcp_endpoint_executor = MCPEndpointExecutor(conn)
+        self.marketplace_mcp_executor = MarketplaceMCPExecutor(conn)
 
         # 注册执行器
         self.tool_manager.register_executor(
@@ -50,6 +52,9 @@ class UnifiedToolHandler:
         self.tool_manager.register_executor(
             ToolType.MCP_ENDPOINT, self.mcp_endpoint_executor
         )
+        self.tool_manager.register_executor(
+            ToolType.MARKETPLACE_MCP, self.marketplace_mcp_executor
+        )
 
         # 初始化标志
         self.finish_init = False
@@ -65,6 +70,11 @@ class UnifiedToolHandler:
 
             # 初始化MCP接入点
             await self._initialize_mcp_endpoint()
+
+            # 初始化技能广场共享 MCP；与 agent 专属接入点保持独立
+            await self.marketplace_mcp_executor.initialize(
+                self.config.get("marketplace_mcp_skills", []) or []
+            )
 
             # 初始化Home Assistant（如果需要）
             self._initialize_home_assistant()
@@ -229,6 +239,8 @@ class UnifiedToolHandler:
         """清理资源"""
         try:
             await self.server_mcp_executor.cleanup()
+
+            await self.marketplace_mcp_executor.cleanup()
 
             # 清理MCP接入点连接
             if (

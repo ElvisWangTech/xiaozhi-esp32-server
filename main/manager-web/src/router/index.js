@@ -156,6 +156,13 @@ const routes = [
       return import('../views/FeatureManagement.vue')
     }
   },
+  {
+    path: '/skills-marketplace',
+    name: 'SkillsMarketplace',
+    component: function () {
+      return import('../views/SkillsMarketplace.vue')
+    }
+  },
   // 替换词管理
   {
     path: '/replacement-word-management',

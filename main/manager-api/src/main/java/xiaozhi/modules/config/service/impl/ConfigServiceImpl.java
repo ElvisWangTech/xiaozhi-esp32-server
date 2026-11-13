@@ -44,6 +44,7 @@ import xiaozhi.modules.model.entity.ModelConfigEntity;
 import xiaozhi.modules.model.service.ModelConfigService;
 import xiaozhi.modules.sys.dto.SysParamsDTO;
 import xiaozhi.modules.sys.service.SysParamsService;
+import xiaozhi.modules.skill.service.SkillMarketplaceService;
 import xiaozhi.modules.timbre.service.TimbreService;
 import xiaozhi.modules.timbre.vo.TimbreDetailsVO;
 import xiaozhi.modules.voiceclone.entity.VoiceCloneEntity;
@@ -65,6 +66,7 @@ public class ConfigServiceImpl implements ConfigService {
     private final VoiceCloneService cloneVoiceService;
     private final AgentVoicePrintDao agentVoicePrintDao;
     private final CorrectWordFileService correctWordFileService;
+    private final SkillMarketplaceService skillMarketplaceService;
 
     @Override
     public Map<String, Object> getConfig(Boolean isCache) {
@@ -268,6 +270,16 @@ public class ConfigServiceImpl implements ConfigService {
         if (StringUtils.isNotBlank(mcpEndpoint) && mcpEndpoint.startsWith("ws")) {
             mcpEndpoint = mcpEndpoint.replace("/mcp/", "/call/");
             result.put("mcp_endpoint", mcpEndpoint);
+        }
+
+        // 技能广场共享 MCP 与智能体专属 MCP 接入点并行下发，各自保留独立来源。
+        List<Map<String, Object>> marketplaceMcpSkills = skillMarketplaceService.getRuntimeMcpSkills(agent.getId());
+        if (!marketplaceMcpSkills.isEmpty()) {
+            result.put("marketplace_mcp_skills", marketplaceMcpSkills);
+        }
+        List<Map<String, Object>> marketplaceSkillPackages = skillMarketplaceService.getRuntimeSkillPackages(agent.getId());
+        if (!marketplaceSkillPackages.isEmpty()) {
+            result.put("marketplace_skill_packages", marketplaceSkillPackages);
         }
 
         // 获取上下文源配置

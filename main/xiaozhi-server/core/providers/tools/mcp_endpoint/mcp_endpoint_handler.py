@@ -11,7 +11,9 @@ TAG = __name__
 logger = setup_logging()
 
 
-async def connect_mcp_endpoint(mcp_endpoint_url: str, conn=None) -> MCPEndpointClient:
+async def connect_mcp_endpoint(
+    mcp_endpoint_url: str, conn=None, *, redact_errors: bool = False
+) -> MCPEndpointClient:
     """连接到MCP接入点"""
     if not mcp_endpoint_url or "你的" in mcp_endpoint_url or mcp_endpoint_url == "null":
         return None
@@ -38,7 +40,12 @@ async def connect_mcp_endpoint(mcp_endpoint_url: str, conn=None) -> MCPEndpointC
         return mcp_client
 
     except Exception as e:
-        logger.bind(tag=TAG).error(f"连接MCP接入点失败: {e}")
+        if redact_errors:
+            logger.bind(tag=TAG).error(
+                f"连接MCP接入点失败: {type(e).__name__}"
+            )
+        else:
+            logger.bind(tag=TAG).error(f"连接MCP接入点失败: {e}")
         return None
 
 

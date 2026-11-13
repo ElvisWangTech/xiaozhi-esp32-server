@@ -578,6 +578,8 @@ def filter_sensitive_info(config: dict) -> dict:
         "secret",
         "access_key_secret",
         "secret_key",
+        "endpoint_url",
+        "mcp_endpoint",
     ]
 
     def _filter_dict(d: dict) -> dict:

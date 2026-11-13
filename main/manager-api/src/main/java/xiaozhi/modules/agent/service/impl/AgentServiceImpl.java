@@ -59,6 +59,7 @@ import xiaozhi.modules.model.entity.ModelConfigEntity;
 import xiaozhi.modules.model.service.ModelConfigService;
 import xiaozhi.modules.model.service.ModelProviderService;
 import xiaozhi.modules.security.user.SecurityUser;
+import xiaozhi.modules.skill.dao.AgentSkillBindingDao;
 import xiaozhi.modules.sys.enums.SuperAdminEnum;
 import xiaozhi.modules.timbre.service.TimbreService;
 
@@ -79,6 +80,7 @@ public class AgentServiceImpl extends BaseServiceImpl<AgentDao, AgentEntity> imp
     private final AgentTagService agentTagService;
     private final CorrectWordFileService correctWordFileService;
     private final AgentSnapshotService agentSnapshotService;
+    private final AgentSkillBindingDao agentSkillBindingDao;
 
     @Override
     public PageData<AgentEntity> adminAgentList(Map<String, Object> params) {
@@ -222,6 +224,7 @@ public class AgentServiceImpl extends BaseServiceImpl<AgentDao, AgentEntity> imp
         correctWordFileService.deleteMappingsByAgentId(agentId);
         agentTagService.deleteAgentTags(agentId);
         agentSnapshotService.deleteByAgentId(agentId);
+        agentSkillBindingDao.deleteByAgentId(agentId);
         deleteById(agentId);
     }
 

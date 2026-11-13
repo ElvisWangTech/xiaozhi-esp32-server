@@ -25,6 +25,11 @@
           }" />
           <span class="nav-text">{{ $t("header.smartManagement") }}</span>
         </div>
+        <div class="equipment-management" :class="{ 'active-tab': $route.path === '/skills-marketplace' }"
+          @click="handleRouter('skillsMarketplace')">
+          <i class="el-icon-connection" aria-hidden="true"></i>
+          <span class="nav-text">{{ $t("header.skillMarketplace") }}</span>
+        </div>
         <!-- 普通用户显示音色克隆 -->
         <div v-if="!userInfo.superAdmin && featureStatus.voiceClone" class="equipment-management"
           :class="{ 'active-tab': $route.path === '/voice-clone-management' }"
@@ -220,6 +225,7 @@ export default {
         replacementWordManagement: "/replacement-word-management",
         serverSideManagement: "/server-side-management",
         featureManagement: "/feature-management",
+        skillsMarketplace: "/skills-marketplace",
       }
     };
   },
