@@ -42,7 +42,7 @@ public class SmsGatewaySender {
     static final String TEMPLATE_TYPE = "sms.gateway.template_type";
     /** 短信文案模板，{{code}} 会替换成验证码 */
     static final String MESSAGE_TEMPLATE = "sms.gateway.message_template";
-    /** 特斯拉授权链接短信模板，{{url}} 会替换成授权页地址 */
+    /** 特斯拉授权链接短信模板，{{url}} 会替换成 portal 短跳转链 */
     static final String TESLA_AUTH_TEMPLATE = "sms.gateway.tesla_auth_template";
     /** 本地模拟开关：只生成验证码并写入日志，不调用平台 */
     static final String MOCK = "sms.gateway.mock";
@@ -81,7 +81,7 @@ public class SmsGatewaySender {
     }
 
     /**
-     * 把 Tesla 授权页链接发到用户手机。走通知短信，不占用验证码模板和日限额。
+     * 把 Tesla 授权短链发到用户手机。走通知短信，不占用验证码模板和日限额。
      * mock 模式只写日志，不调平台。
      */
     public void sendTeslaAuthLink(String phone, String authUrl) {
