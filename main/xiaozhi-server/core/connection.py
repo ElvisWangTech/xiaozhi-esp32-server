@@ -1022,6 +1022,9 @@ class ConnectionHandler:
                 f"{time.time() - begin_time} 秒，异步获取差异化配置成功: {json.dumps(filter_sensitive_info(private_config), ensure_ascii=False)}"
             )
             self.voice_onboarding = private_config.get("voice_onboarding")
+            self.config["voice_activation_role_supplement_enabled"] = private_config.get(
+                "voice_activation_role_supplement_enabled", False
+            )
             self.need_bind = False
             self.bind_completed_event.set()
         except DeviceNotFoundException as e:

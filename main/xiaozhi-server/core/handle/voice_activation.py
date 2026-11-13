@@ -717,9 +717,9 @@ def persona_menu(names):
     for index, name in enumerate(names, 1):
         label = f"{spoken_ordinal(index)}，{name}"
         if index == 1:
-            label += "，也就是现在的我，不换也可以"
+            label += "，也就是现在的我"
         parts.append(label)
-    return "接下来选一个性格。" + "。".join(parts) + "。请说序号，或者说名字。"
+    return "接下来可以选择我的性格。" + "。".join(parts) + "。请说想选择的序号或名字。"
 
 
 def spoken_digits(number):
@@ -997,7 +997,7 @@ class VoiceActivationSession:
         if self.state in (self.ASK_PHONE, self.CONFIRM_PHONE):
             hint = "好，准备好了接着说。"
         elif self.state in (self.ASK_PERSONA, self.CONFIRM_PERSONA):
-            hint = "好，你慢慢选。"
+            hint = "好的，你慢慢选。"
         elif self.state == self.ASK_AUTH_OAUTH:
             hint = "好，打开短信里的授权链接后跟我说一声。"
         elif self.state in (self.ASK_CODE, self.ASK_AUTH_CODE):
@@ -1432,7 +1432,7 @@ class VoiceActivationSession:
 
     def _persona_confirm_text(self):
         if self._keeps_current_persona(self.persona_name):
-            return f"性格就保持{self.persona_name}，不换了，对吗？"
+            return f"性格就保持{self.persona_name}，对吗？"
         return f"性格用{self.persona_name}，对吗？"
 
     def _use_persona_voice(self, name):
@@ -1455,9 +1455,12 @@ class VoiceActivationSession:
             await self._repeat_prompt()
         elif matched == ("out_of_range", None):
             count = spoken_count(len(self.persona_templates))
-            await self._say(f"现在有{count}个角色。你想选第几个？")
+            await self._say(f"现在只有{count}个角色呢。你想选第几个？")
         elif candidate and matched == ("accept", None):
-            await self._ask_supplement()
+            if self.conn.config.get("voice_activation_role_supplement_enabled", False):
+                await self._ask_supplement()
+            else:
+                await self._save_role("")
         elif candidate and matched == ("decline", None):
             await self._reask_persona()
         elif isinstance(matched, str):
@@ -1516,6 +1519,9 @@ class VoiceActivationSession:
         await self._say("好的，记下了。还有吗？说完请说没有了。")
 
     async def _finish_supplement(self):
+        if not self.supplement_parts:
+            await self._save_role("")
+            return
         self.state = self.CONFIRM_SUPPLEMENT
         await self._repeat_prompt()
 
@@ -1556,6 +1562,8 @@ class VoiceActivationSession:
             )
         except Exception as exc:
             self.conn.logger.bind(tag=TAG).warning(f"保存角色设定失败: {exc}")
+            if self.state != self.CONFIRM_PERSONA:
+                self.state = self.CONFIRM_SUPPLEMENT
             await self._say("刚才没能保存角色设定，要我再试一次吗？")
             return
         await self.conn.refresh_agent_prompt()
@@ -1563,7 +1571,7 @@ class VoiceActivationSession:
         self.stage = "skills"
         self.include_auth = True
         self.ask_auth_consent = True
-        await self._advance_after_skill_prompt("角色设好了。", self._announce_skills)
+        await self._advance_after_skill_prompt("性格设定成功。", self._announce_skills)
 
     async def _announce_skills(self):
         await self._advance_after_skill_prompt("接下来绑定技能。", self._bind_skills)

@@ -25,6 +25,20 @@
               </div>
             </div>
 
+            <div v-if="roleSupplementParam" class="onboarding-setting">
+              <div>
+                <strong id="role-supplement-label">{{ $t('paramManagement.roleSupplement') }}</strong>
+                <div id="role-supplement-hint">{{ $t('paramManagement.roleSupplementHint') }}</div>
+              </div>
+              <el-switch
+                :value="String(roleSupplementParam.paramValue).toLowerCase() === 'true'"
+                :disabled="loading || savingRoleSupplement"
+                aria-labelledby="role-supplement-label"
+                aria-describedby="role-supplement-hint"
+                @change="saveRoleSupplement"
+              />
+            </div>
+
             <!-- 一级分类 -->
             <div class="group-tabs" v-loading="loading && !allParams.length">
               <button
@@ -229,6 +243,7 @@ export default {
       appliedSearch: "",
       allParams: [],
       loading: false,
+      savingRoleSupplement: false,
       dialogVisible: false,
       dialogTitle: "",
       isAllSelected: false,
@@ -249,6 +264,9 @@ export default {
     };
   },
   computed: {
+    roleSupplementParam() {
+      return this.allParams.find(row => row.paramCode === 'voice_activation.role_supplement_enabled');
+    },
     filteredParams() {
       const keyword = (this.appliedSearch || "").trim().toLowerCase();
       let list = this.allParams;
@@ -530,6 +548,22 @@ export default {
       this.filteredParams.forEach(row => { row.selected = false; });
       this.syncSelectAllState();
     },
+    saveRoleSupplement(enabled) {
+      const row = this.roleSupplementParam;
+      if (!row || this.savingRoleSupplement) return;
+      const { id, paramCode, valueType, remark } = row;
+      const paramValue = String(enabled);
+      this.savingRoleSupplement = true;
+      const onError = (error) => {
+        this.savingRoleSupplement = false;
+        this.$message.error(error?.data?.msg || this.$t('paramManagement.updateFailed'));
+      };
+      Api.admin.updateParam({ id, paramCode, paramValue, valueType, remark }, () => {
+        this.roleSupplementParam && (this.roleSupplementParam.paramValue = paramValue);
+        this.savingRoleSupplement = false;
+        this.$message.success(this.$t('paramManagement.roleSupplementSaved'));
+      }, onError, onError);
+    },
     fetchParamsPage(page) {
       return new Promise((resolve, reject) => {
         Api.admin.getParamsList(
@@ -784,6 +818,23 @@ export default {
   justify-content: space-between;
   padding: 0 0 12px 0;
   gap: 16px;
+}
+
+.onboarding-setting {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 12px 16px;
+  margin-bottom: 12px;
+  border: 1px solid #ebeef5;
+  border-radius: 6px;
+}
+
+#role-supplement-hint {
+  margin-top: 4px;
+  color: #606266;
+  font-size: 13px;
 }
 
 .title-block {
