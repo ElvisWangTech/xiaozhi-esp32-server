@@ -13,7 +13,7 @@
         <mxCell id="lane-api" value="manager-api" style="swimlane;horizontal=0;startSize=28;fillColor=#fff2cc;strokeColor=#d6b656;fontStyle=1;" vertex="1" parent="1">
           <mxGeometry x="480" y="40" width="240" height="1400" as="geometry"/>
         </mxCell>
-        <mxCell id="lane-sms" value="阿里云号码认证" style="swimlane;horizontal=0;startSize=28;fillColor=#f8cecc;strokeColor=#b85450;fontStyle=1;" vertex="1" parent="1">
+        <mxCell id="lane-sms" value="通用短信平台" style="swimlane;horizontal=0;startSize=28;fillColor=#f8cecc;strokeColor=#b85450;fontStyle=1;" vertex="1" parent="1">
           <mxGeometry x="720" y="40" width="200" height="1400" as="geometry"/>
         </mxCell>
         <mxCell id="lane-lite" value="portal_lite" style="swimlane;horizontal=0;startSize=28;fillColor=#e1d5e7;strokeColor=#9673a6;fontStyle=1;" vertex="1" parent="1">
@@ -101,7 +101,7 @@
           <mxGeometry relative="1" as="geometry"/>
         </mxCell>
 
-        <mxCell id="p6" value="自动通用绑定&#xa;再默认开瑞幸→滴滴" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;" vertex="1" parent="lane-py">
+        <mxCell id="p6" value="自动通用绑定&#xa;再默认开瑞幸→滴滴→特斯拉" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;" vertex="1" parent="lane-py">
           <mxGeometry x="30" y="600" width="180" height="50" as="geometry"/>
         </mxCell>
         <mxCell id="a5" value="POST /skills&#xa;bind + invite&#xa;Redis 缓存 token" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;" vertex="1" parent="lane-api">
@@ -123,7 +123,7 @@
         <mxCell id="a6" value="POST /skills/auth&#xa;轮询 status" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;" vertex="1" parent="lane-api">
           <mxGeometry x="30" y="700" width="180" height="50" as="geometry"/>
         </mxCell>
-        <mxCell id="l2" value="POST /api/automation/start&#xa;GET status → waiting_code" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;" vertex="1" parent="lane-lite">
+        <mxCell id="l2" value="automation 或 tesla/oauth/start&#xa;status / auth-status.tesla" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;" vertex="1" parent="lane-lite">
           <mxGeometry x="30" y="700" width="180" height="50" as="geometry"/>
         </mxCell>
         <mxCell id="e20" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;" edge="1" parent="1" source="l1" target="a6">
@@ -133,10 +133,10 @@
           <mxGeometry relative="1" as="geometry"/>
         </mxCell>
 
-        <mxCell id="p9" value="仅 waiting_code 时&#xa;请说短信验证码" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;" vertex="1" parent="lane-py">
+        <mxCell id="p9" value="waiting_code 念验证码&#xa;waiting_oauth 打开短信链接" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;" vertex="1" parent="lane-py">
           <mxGeometry x="30" y="800" width="180" height="50" as="geometry"/>
         </mxCell>
-        <mxCell id="d6" value="说出验证码或跳过" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;" vertex="1" parent="lane-device">
+        <mxCell id="d6" value="说出验证码、打开短信链接或跳过" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;" vertex="1" parent="lane-device">
           <mxGeometry x="30" y="810" width="140" height="40" as="geometry"/>
         </mxCell>
         <mxCell id="a7" value="POST /skills/auth/code&#xa;或 cancel" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;" vertex="1" parent="lane-api">
@@ -158,7 +158,7 @@
           <mxGeometry relative="1" as="geometry"/>
         </mxCell>
 
-        <mxCell id="p7" value="瑞幸→滴滴做完&#xa;汇总失败后直接重启" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;" vertex="1" parent="lane-py">
+        <mxCell id="p7" value="瑞幸→滴滴→特斯拉做完&#xa;汇总失败后直接重启" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;" vertex="1" parent="lane-py">
           <mxGeometry x="30" y="920" width="180" height="50" as="geometry"/>
         </mxCell>
         <mxCell id="d7" value="播放「配置完毕，设备即将重启」" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;" vertex="1" parent="lane-device">
@@ -190,7 +190,7 @@
           <mxGeometry relative="1" as="geometry"/>
         </mxCell>
 
-        <mxCell id="note" value="方案 B：通用绑定后默认开通瑞幸→滴滴（滴滴常需实名/免密）；仅 waiting_code 打断要验证码；失败当场与结束时口头提示；完成后播报「配置完毕，设备即将重启」并直接重启，不询问用户（不重启设备 MCP 工具加载不到）。麦当劳暂不支持。" style="text;html=1;strokeColor=none;fillColor=none;align=left;verticalAlign=top;whiteSpace=wrap;rounded=0;" vertex="1" parent="1">
+        <mxCell id="note" value="方案 B：通用绑定后默认开通瑞幸→滴滴→特斯拉（滴滴常需实名/免密；特斯拉放最后，授权链接发短信，地区由 portal-lite TESLA_REGION 决定）；仅 waiting_code 打断要验证码；waiting_oauth 打开短信链接；失败当场与结束时口头提示；完成后播报「配置完毕，设备即将重启」并直接重启，不询问用户（不重启设备 MCP 工具加载不到）。麦当劳暂不支持。" style="text;html=1;strokeColor=none;fillColor=none;align=left;verticalAlign=top;whiteSpace=wrap;rounded=0;" vertex="1" parent="1">
           <mxGeometry x="40" y="1480" width="1100" height="40" as="geometry"/>
         </mxCell>
       </root>

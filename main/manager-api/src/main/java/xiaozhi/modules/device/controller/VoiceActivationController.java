@@ -83,7 +83,7 @@ public class VoiceActivationController {
     }
 
     @PostMapping("/skills/auth")
-    @Operation(summary = "启动授权技能自动化（滴滴、瑞幸）")
+    @Operation(summary = "启动授权技能（滴滴、瑞幸短信；特斯拉网页 OAuth）")
     public Result<VoiceActivationSkillAuthVO> skillsAuth(@Valid @RequestBody VoiceActivationSkillAuthDTO dto) {
         return new Result<VoiceActivationSkillAuthVO>()
                 .ok(voiceActivationService.startSkillAuth(
@@ -91,10 +91,11 @@ public class VoiceActivationController {
     }
 
     @PostMapping("/skills/auth/status")
-    @Operation(summary = "查询授权技能自动化状态")
+    @Operation(summary = "查询授权技能状态")
     public Result<VoiceActivationSkillAuthVO> skillsAuthStatus(@Valid @RequestBody VoiceActivationSkillTaskDTO dto) {
         return new Result<VoiceActivationSkillAuthVO>()
-                .ok(voiceActivationService.skillAuthStatus(dto.getMacAddress(), dto.getTaskId()));
+                .ok(voiceActivationService.skillAuthStatus(
+                        dto.getMacAddress(), dto.getTaskId(), dto.getService()));
     }
 
     @PostMapping("/skills/auth/code")

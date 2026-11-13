@@ -42,6 +42,8 @@ public class SmsGatewaySender {
     static final String TEMPLATE_TYPE = "sms.gateway.template_type";
     /** 短信文案模板，{{code}} 会替换成验证码 */
     static final String MESSAGE_TEMPLATE = "sms.gateway.message_template";
+    /** 特斯拉授权链接短信模板，{{url}} 会替换成授权页地址 */
+    static final String TESLA_AUTH_TEMPLATE = "sms.gateway.tesla_auth_template";
     /** 本地模拟开关：只生成验证码并写入日志，不调用平台 */
     static final String MOCK = "sms.gateway.mock";
     /** 迁移期兜底：旧号码认证的模拟开关 */
@@ -50,9 +52,13 @@ public class SmsGatewaySender {
     private static final String SEND_PATH = "/api/notification/send/sms";
     private static final String CLIENT_ID_HEADER = "Client-Id";
     private static final String CODE_PLACEHOLDER = "{{code}}";
+    private static final String URL_PLACEHOLDER = "{{url}}";
     private static final String DEFAULT_MESSAGE_TEMPLATE =
             "您的验证码为" + CODE_PLACEHOLDER + "，五分钟内有效，请勿泄露给他人";
+    private static final String DEFAULT_TESLA_AUTH_TEMPLATE =
+            "请打开以下链接完成特斯拉授权：" + URL_PLACEHOLDER;
     private static final int DEFAULT_TEMPLATE_TYPE = 2;
+    private static final int NOTIFY_TEMPLATE_TYPE = 0;
     private static final int MIN_TEMPLATE_TYPE = 0;
     private static final int MAX_TEMPLATE_TYPE = 2;
 
@@ -71,6 +77,29 @@ public class SmsGatewaySender {
      * 发送一条带验证码的短信。失败抛出 {@link RenException}，调用方据此保留重试机会。
      */
     public void sendVerifyCode(String phone, String code) {
+        sendSms(phone, renderMessage(code), templateType());
+    }
+
+    /**
+     * 把 Tesla 授权页链接发到用户手机。走通知短信，不占用验证码模板和日限额。
+     * mock 模式只写日志，不调平台。
+     */
+    public void sendTeslaAuthLink(String phone, String authUrl) {
+        if (StringUtils.isBlank(phone)) {
+            throw new RenException("设备未记录手机号，无法发送特斯拉授权短信");
+        }
+        if (StringUtils.isBlank(authUrl)) {
+            throw new RenException(ErrorCode.SMS_SEND_FAILED);
+        }
+        String message = renderTeslaAuthMessage(authUrl);
+        if (isMock()) {
+            log.info("特斯拉授权短信 mock phone={} url={}", maskPhone(phone), authUrl);
+            return;
+        }
+        sendSms(phone, message, NOTIFY_TEMPLATE_TYPE);
+    }
+
+    private void sendSms(String phone, String message, int templateType) {
         String baseUrl = param(BASE_URL);
         if (StringUtils.isBlank(baseUrl)) {
             log.error("通用短信平台未配置 {}", BASE_URL);
@@ -83,9 +112,9 @@ public class SmsGatewaySender {
         }
         String url = StringUtils.removeEnd(baseUrl, "/") + SEND_PATH;
         Map<String, Object> body = new LinkedHashMap<>();
-        body.put("template_type", templateType());
+        body.put("template_type", templateType);
         body.put("phone_number", phone);
-        body.put("message", renderMessage(code));
+        body.put("message", message);
         try {
             HttpHeaders headers = new HttpHeaders();
             headers.setContentType(MediaType.APPLICATION_JSON);
@@ -155,6 +184,21 @@ public class SmsGatewaySender {
     }
 
     /**
+     * 渲染特斯拉授权短信。模板缺少 {@code {{url}}} 时回落默认文案，避免发出没有链接的短信。
+     */
+    String renderTeslaAuthMessage(String authUrl) {
+        String template = param(TESLA_AUTH_TEMPLATE);
+        if (StringUtils.isBlank(template)) {
+            template = DEFAULT_TESLA_AUTH_TEMPLATE;
+        }
+        if (!template.contains(URL_PLACEHOLDER)) {
+            log.warn("特斯拉授权短信模板缺少 {} 占位符，改用默认模板", URL_PLACEHOLDER);
+            template = DEFAULT_TESLA_AUTH_TEMPLATE;
+        }
+        return template.replace(URL_PLACEHOLDER, authUrl);
+    }
+
+    /**
      * 平台可能用 HTTP 200 携带业务失败。只有明确写着 success/ok 为 false，或带非空 error，
      * 才判失败，不去猜各家的 code 取值。
      */
@@ -188,7 +232,7 @@ public class SmsGatewaySender {
         return value.trim();
     }
 
-    static String maskPhone(String phone) {
+    public static String maskPhone(String phone) {
         if (phone == null || phone.length() < 7) {
             return "***";
         }

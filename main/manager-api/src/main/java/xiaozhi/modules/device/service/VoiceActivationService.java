@@ -44,6 +44,7 @@ import xiaozhi.modules.device.vo.VoiceActivationSkillAuthVO;
 import xiaozhi.modules.device.vo.VoiceActivationTemplateVO;
 import xiaozhi.modules.timbre.service.TimbreService;
 import xiaozhi.modules.timbre.vo.TimbreDetailsVO;
+import xiaozhi.modules.sms.service.SmsGatewaySender;
 import xiaozhi.modules.sms.service.VoiceSmsCodeService;
 import xiaozhi.modules.sys.dao.SysUserDao;
 import xiaozhi.modules.sys.entity.SysUserEntity;
@@ -78,6 +79,7 @@ public class VoiceActivationService {
     private final TimbreService timbreService;
     private final AgentMcpAccessPointService agentMcpAccessPointService;
     private final VoiceSmsCodeService smsCodeService;
+    private final SmsGatewaySender smsGatewaySender;
     private final SysUserDao sysUserDao;
     private final SysParamsService sysParamsService;
     private final RedisUtils redisUtils;
@@ -299,6 +301,13 @@ public class VoiceActivationService {
         }
         PortalInvite invite = requirePortalInvite(mac);
         PortalConfig portal = requirePortalConfig();
+        if ("tesla".equals(normalized)) {
+            Map<String, Object> body = new HashMap<>();
+            body.put("token", invite.token);
+            JsonNode started = callPortalJson(portal.baseUrl, null, null,
+                    HttpMethod.POST, "/api/tesla/oauth/start", body);
+            return toTeslaOAuthVO(started, device.getPhone());
+        }
         Map<String, Object> body = new HashMap<>();
         body.put("token", invite.token);
         body.put("service", normalized);
@@ -309,8 +318,28 @@ public class VoiceActivationService {
     }
 
     public VoiceActivationSkillAuthVO skillAuthStatus(String macAddress, String taskId) {
-        requireMac(macAddress);
-        requireSkillsDevice(macAddress);
+        return skillAuthStatus(macAddress, taskId, null);
+    }
+
+    public VoiceActivationSkillAuthVO skillAuthStatus(String macAddress, String taskId, String service) {
+        String mac = requireMac(macAddress);
+        requireSkillsDevice(mac);
+        if (StringUtils.isBlank(taskId) || "tesla".equalsIgnoreCase(StringUtils.trimToEmpty(service))) {
+            String normalized = normalizeAuthService(StringUtils.defaultIfBlank(service, "tesla"));
+            if (!"tesla".equals(normalized)) {
+                throw new RenException("任务ID不能为空");
+            }
+            VoiceActivationSkillAuthVO vo = new VoiceActivationSkillAuthVO();
+            vo.setService("tesla");
+            if (portalSkillBound(mac, "tesla")) {
+                vo.setStatus("done");
+                vo.setMessage("已经开通");
+            } else {
+                vo.setStatus("waiting_oauth");
+                vo.setMessage("授权链接已发到您手机，请打开短信完成特斯拉登录");
+            }
+            return vo;
+        }
         String tid = requireTaskId(taskId);
         PortalConfig portal = requirePortalConfig();
         String url = UriComponentsBuilder
@@ -318,8 +347,8 @@ public class VoiceActivationService {
                 .queryParam("task_id", tid)
                 .toUriString();
         JsonNode view = callPortalJsonUrl(null, null, HttpMethod.GET, url, null);
-        String service = textOrNull(view, "service");
-        return toAuthVO(StringUtils.defaultString(service), view);
+        String resolved = textOrNull(view, "service");
+        return toAuthVO(StringUtils.defaultString(resolved), view);
     }
 
     public VoiceActivationSkillAuthVO submitSkillAuthCode(String macAddress, String taskId, String code) {
@@ -568,10 +597,50 @@ public class VoiceActivationService {
         if ("luckin".equals(raw) || "瑞幸".equals(service.trim()) || "瑞幸咖啡".equals(service.trim())) {
             return "luckin";
         }
+        if ("tesla".equals(raw) || "特斯拉".equals(service.trim())) {
+            return "tesla";
+        }
         if ("mcd".equals(raw) || "麦当劳".equals(service.trim())) {
             throw new RenException("麦当劳授权绑定暂不支持");
         }
         throw new RenException("暂不支持该技能授权");
+    }
+
+    private VoiceActivationSkillAuthVO toTeslaOAuthVO(JsonNode view, String phone) {
+        VoiceActivationSkillAuthVO vo = new VoiceActivationSkillAuthVO();
+        vo.setService("tesla");
+        if (view == null || !view.path("ok").asBoolean(false)) {
+            vo.setStatus("failed");
+            vo.setMessage("无法创建特斯拉授权");
+            vo.setErrorCode("OAUTH_START_FAILED");
+            return vo;
+        }
+        String authUrl = textOrNull(view, "auth_url");
+        if (StringUtils.isBlank(authUrl)) {
+            vo.setStatus("failed");
+            vo.setMessage("无法创建特斯拉授权");
+            vo.setErrorCode("OAUTH_START_FAILED");
+            return vo;
+        }
+        if (StringUtils.isBlank(phone)) {
+            vo.setStatus("failed");
+            vo.setMessage("设备未记录手机号，无法发送特斯拉授权短信");
+            vo.setErrorCode("SMS_SEND_FAILED");
+            return vo;
+        }
+        try {
+            smsGatewaySender.sendTeslaAuthLink(phone, authUrl);
+        } catch (RenException e) {
+            log.warn("特斯拉授权短信发送失败 phone={}: {}", SmsGatewaySender.maskPhone(phone), e.getMsg());
+            vo.setStatus("failed");
+            vo.setMessage("特斯拉授权链接短信没发出去");
+            vo.setErrorCode("SMS_SEND_FAILED");
+            return vo;
+        }
+        vo.setStatus("waiting_oauth");
+        vo.setAuthUrl(authUrl);
+        vo.setMessage("授权链接已发到您手机，请打开短信完成特斯拉登录");
+        return vo;
     }
 
     private VoiceActivationSkillAuthVO toAuthVO(String service, JsonNode view) {

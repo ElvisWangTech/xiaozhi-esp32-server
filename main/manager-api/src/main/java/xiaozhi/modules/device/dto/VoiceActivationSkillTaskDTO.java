@@ -10,6 +10,9 @@ public class VoiceActivationSkillTaskDTO {
     @NotBlank(message = "设备MAC不能为空")
     private String macAddress;
 
-    @NotBlank(message = "任务ID不能为空")
+    @Schema(description = "自动化任务 ID。短信授权必填；Tesla OAuth 轮询可空，改查 auth-status")
     private String taskId;
+
+    @Schema(description = "授权服务。Tesla 无 taskId 时必填 tesla")
+    private String service;
 }

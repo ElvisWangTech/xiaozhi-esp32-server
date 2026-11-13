@@ -153,4 +153,47 @@ class SmsGatewaySenderTest {
         params.put(SmsGatewaySender.MOCK, "false");
         assertThat(sender().isMock()).isFalse();
     }
+
+    @Test
+    void teslaAuthLinkUsesNotifyTemplateAndUrl() {
+        params.put(SmsGatewaySender.BASE_URL, BASE_URL);
+        params.put(SmsGatewaySender.CLIENT_ID, CLIENT_ID);
+        params.put(SmsGatewaySender.TESLA_AUTH_TEMPLATE, "特斯拉授权：{{url}}");
+        ResponseEntity<String> ok = ResponseEntity.ok("{\"success\":true}");
+        when(restTemplate.exchange(eq(BASE_URL + "/api/notification/send/sms"), eq(HttpMethod.POST),
+                any(HttpEntity.class), eq(String.class))).thenReturn(ok);
+
+        sender().sendTeslaAuthLink("13800138000", "https://auth.tesla.cn/oauth2/v3/authorize");
+
+        ArgumentCaptor<HttpEntity> entity = ArgumentCaptor.forClass(HttpEntity.class);
+        org.mockito.Mockito.verify(restTemplate).exchange(eq(BASE_URL + "/api/notification/send/sms"),
+                eq(HttpMethod.POST), entity.capture(), eq(String.class));
+        @SuppressWarnings("unchecked")
+        Map<String, Object> body = (Map<String, Object>) entity.getValue().getBody();
+        assertThat(body).containsEntry("template_type", 0)
+                .containsEntry("phone_number", "13800138000")
+                .containsEntry("message", "特斯拉授权：https://auth.tesla.cn/oauth2/v3/authorize");
+    }
+
+    @Test
+    void teslaAuthTemplateWithoutPlaceholderFallsBack() {
+        params.put(SmsGatewaySender.TESLA_AUTH_TEMPLATE, "请完成特斯拉授权");
+        assertThat(sender().renderTeslaAuthMessage("https://auth.example/x"))
+                .isEqualTo("请打开以下链接完成特斯拉授权：https://auth.example/x");
+    }
+
+    @Test
+    void teslaAuthLinkMockDoesNotCallPlatform() {
+        params.put(SmsGatewaySender.MOCK, "true");
+        sender().sendTeslaAuthLink("13800138000", "https://auth.tesla.cn/oauth2/v3/authorize");
+        org.mockito.Mockito.verifyNoInteractions(restTemplate);
+    }
+
+    @Test
+    void teslaAuthLinkRequiresPhone() {
+        RenException error = assertThrows(RenException.class,
+                () -> sender().sendTeslaAuthLink(" ", "https://auth.tesla.cn/oauth2/v3/authorize"));
+        assertThat(error.getMsg()).contains("手机号");
+        org.mockito.Mockito.verifyNoInteractions(restTemplate);
+    }
 }

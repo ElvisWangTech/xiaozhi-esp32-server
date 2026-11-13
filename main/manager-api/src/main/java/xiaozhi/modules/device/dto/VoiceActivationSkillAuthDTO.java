@@ -12,7 +12,7 @@ public class VoiceActivationSkillAuthDTO {
     private String macAddress;
 
     @NotBlank(message = "授权服务不能为空")
-    @Schema(description = "授权服务：didi / luckin")
+    @Schema(description = "授权服务：didi / luckin / tesla")
     private String service;
 
     @Schema(description = "用户明确要求重新绑定时为 true，否则已开通的技能直接跳过")

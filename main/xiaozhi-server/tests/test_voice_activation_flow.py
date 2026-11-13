@@ -58,7 +58,7 @@ class VoiceActivationFlowTest(unittest.IsolatedAsyncioTestCase):
                 await session.handle_text(utterance)
                 self.assertEqual(session.state, expected_state, utterance)
         self.assertEqual(session.auth_done, ["瑞幸咖啡"])
-        self.assertEqual(session.auth_skipped, ["滴滴出行"])
+        self.assertEqual(session.auth_skipped, ["特斯拉", "滴滴出行"])
         role_call = session._post.await_args_list[4]
         self.assertEqual(role_call.args[1]["ownerTitle"], "老周")
         self.assertEqual(role_call.args[1]["templateName"], "星际游子")
@@ -102,7 +102,7 @@ class VoiceActivationFlowTest(unittest.IsolatedAsyncioTestCase):
             return_value={"intent": "accept", "services": ["didi"]}
         )):
             await session._dispatch("瑞幸先不用，只开滴滴")
-        self.assertEqual(session.auth_skipped, ["瑞幸咖啡"])
+        self.assertEqual(session.auth_skipped, ["瑞幸咖啡", "特斯拉"])
         self.assertEqual(session.state, session.ASK_AUTH_CODE)
         self.assertEqual(session._post.await_count, 2)
         self.assertEqual(session._post.await_args.args[1]["service"], "didi")
@@ -175,7 +175,8 @@ class VoiceActivationFlowTest(unittest.IsolatedAsyncioTestCase):
             session.RETRY_SMS, session.ASK_CODE, session.ASK_NICKNAME, session.CONFIRM_NICKNAME,
             session.ASK_PERSONA, session.CONFIRM_PERSONA, session.ASK_SUPPLEMENT,
             session.CONFIRM_SUPPLEMENT, session.RETRY_SKILLS, session.ASK_AUTH_CONSENT,
-            session.ASK_AUTH_CODE, session.RETRY_AUTH_SUMMARY, session.RETRY_SKILLS_COMPLETE,
+            session.ASK_AUTH_CODE, session.ASK_AUTH_OAUTH, session.RETRY_AUTH_SUMMARY,
+            session.RETRY_SKILLS_COMPLETE,
         )
         session.persona_templates = ["可爱女生"]
         model = AsyncMock(return_value={"intent": "help"})
@@ -433,6 +434,30 @@ class VoiceActivationFlowTest(unittest.IsolatedAsyncioTestCase):
                 "status": "failed", "errorCode": error_code, "message": "HTTP 502 from upstream",
             })
             session._say.assert_awaited_once_with(expected)
+
+    async def test_tesla_oauth_prompts_for_sms_link(self):
+        session = self.make_session("skills")
+        session.auth_service = "tesla"
+        session.auth_label = "特斯拉"
+        session._start_oauth_poll = Mock()
+        await session._handle_auth_result({
+            "status": "waiting_oauth",
+            "authUrl": "https://auth.tesla.cn/oauth2/v3/authorize",
+        })
+        self.assertEqual(session.state, session.ASK_AUTH_OAUTH)
+        session._say.assert_awaited_once_with(
+            "授权链接已发到您手机，请打开短信完成特斯拉登录，完成后跟我说一声。"
+        )
+        session._start_oauth_poll.assert_called_once()
+
+    async def test_tesla_sms_send_failure_is_announced(self):
+        session = self.make_session("skills")
+        session.auth_service = "tesla"
+        session.auth_label = "特斯拉"
+        session._run_next_auth = AsyncMock()
+        await session._handle_auth_result({"status": "failed", "errorCode": "SMS_SEND_FAILED"})
+        session._say.assert_awaited_once_with("特斯拉暂时没能开通，授权链接短信没发出去。")
+        session._run_next_auth.assert_awaited_once()
 
     async def test_authorization_success_is_announced_for_both_skills(self):
         for service, label in voice.VoiceActivationSession.AUTH_QUEUE:

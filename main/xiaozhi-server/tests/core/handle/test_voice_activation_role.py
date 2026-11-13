@@ -968,7 +968,7 @@ def test_later_skill_bind_skips_authorization():
         "/device/voice-activation/skills",
         "/device/voice-activation/skills/complete",
     ]
-    assert said == ["通用技能已绑定。开通瑞幸或滴滴可以说绑定技能。"]
+    assert said == ["通用技能已绑定。开通瑞幸、滴滴或特斯拉可以说绑定技能。"]
     assert conn.voice_activation_handler is None
     assert conn.voice_onboarding is None
 

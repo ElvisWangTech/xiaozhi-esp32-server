@@ -28,6 +28,8 @@ PHONE_PAUSE_SECONDS = 3
 AUTH_CODE_WAIT_SECONDS = 15
 # 没有验证码环节时（纯服务端自动化登录）可以等更久。
 AUTH_POLL_WAIT_SECONDS = 90
+# Tesla 网页 OAuth 需要用户在手机完成登录，等更久。
+AUTH_OAUTH_WAIT_SECONDS = 300
 # 轮询间隔（秒）。等结果期间一直按这个间隔查状态接口。
 AUTH_POLL_INTERVAL_SECONDS = 1.5
 _CN_COUNT = ["零", "一", "两", "三", "四", "五", "六", "七", "八", "九", "十"]
@@ -279,6 +281,18 @@ _AUTH_PROMPT = (
     "repeat：没听清，让你把问题再说一遍。不是 skip。\n"
     "出现「跳过」「重发」「绑定」不等于要执行对应动作。"
 )
+_OAUTH_PROMPT = (
+    "用户正在开通特斯拉，授权链接已经发到手机短信。设备上不能念验证码，也不能念链接。"
+    "只输出一个 JSON 对象，不要解释，不要使用 markdown。"
+    '{"intent":"skip"}、{"intent":"skip_all"}、{"intent":"rebind"}、{"intent":"repeat"} 或 {"intent":"unclear"}。\n'
+    "skip：明确放弃这次开通。例如「跳过」「不用了」「算了」。\n"
+    "skip_all：明确结束当前及所有剩余技能。\n"
+    "「不要跳过」「能不跳过吗」「先别跳过」不是 skip。\n"
+    "rebind：要重新绑定或重新开通。\n"
+    "repeat：没听清，让你把问题再说一遍。不是 skip。\n"
+    "出现「跳过」「绑定」不等于要执行对应动作。"
+    "用户说已经授权、授权好了、完成了、好了，返回 unclear，由系统继续查开通结果。"
+)
 _SHORT_NAME_LIMIT = 12
 _SUPPLEMENT_LIMIT = 80
 # 首次提问就给例子，减少用户不知道该说多短而反复失败。
@@ -393,6 +407,16 @@ async def resolve_sms_reply(conn, text, retry=None):
 
 async def resolve_auth_reply(conn, text):
     return await resolve_code_turn(conn, text, _AUTH_PROMPT, {"skip", "skip_all", "rebind"})
+
+
+async def resolve_oauth_reply(conn, text):
+    raw = unwrap_user_text(text).strip()
+    if not compact_text(raw):
+        return "unclear"
+    data = await _ask_turn_json(conn, _OAUTH_PROMPT, raw, "网页授权意图")
+    intent = _intent_of(data, {"skip", "skip_all", "rebind", "repeat", "unclear"})
+    _log_guide(conn, "info", f"网页授权意图: {raw} -> {intent or 'unclear'}")
+    return intent or "unclear"
 
 
 async def resolve_code_turn(conn, text, prompt, extra_intents):
@@ -782,17 +806,19 @@ class VoiceActivationSession:
     CONFIRM_SUPPLEMENT = "confirm_supplement"
     RETRY_SKILLS = "retry_skills"
     ASK_AUTH_CODE = "ask_auth_code"
+    ASK_AUTH_OAUTH = "ask_auth_oauth"
     # 配置完毕到重启下发之间的终态：不再接收用户输入，避免误触发上一步的提问。
     RETRY_SMS = "retry_sms"
     RETRY_AUTH_SUMMARY = "retry_auth_summary"
     RETRY_SKILLS_COMPLETE = "retry_skills_complete"
     REBOOTING = "rebooting"
 
-    # 方案 B：默认依次开通；瑞幸先于滴滴（滴滴常需实名/免密支付）
+    # 方案 B：默认依次开通；瑞幸先于滴滴（滴滴常需实名/免密支付），再特斯拉网页授权。
     # 首次引导先征求授权同意。用户主动要求绑定时直接进入授权。
     AUTH_QUEUE = (
         ("luckin", "瑞幸咖啡"),
         ("didi", "滴滴出行"),
+        ("tesla", "特斯拉"),
     )
 
     def __init__(self, conn, stage="bind", announce_bind_success=False, include_auth=False, rebind_auth=False, ask_auth_consent=False):
@@ -841,7 +867,8 @@ class VoiceActivationSession:
         self._skill_bind_inflight = False
         self._announce_skill_failure = False
         self._auth_polling = False
-        # 只有第一次技能引导，或用户主动说「绑定技能」，才自动跑瑞幸/滴滴。
+        self._oauth_poll_task = None
+        # 只有第一次技能引导，或用户主动说「绑定技能」，才自动跑瑞幸/滴滴/特斯拉。
         self.include_auth = include_auth
         self.ask_auth_consent = ask_auth_consent
         # 用户说「重新绑定」时，已开通的授权技能也再走一遍。
@@ -858,7 +885,7 @@ class VoiceActivationSession:
                 self.state = self.ASK_PERSONA
             if self.persona_name:
                 self._use_persona_voice(self.persona_name)
-            if self.state == self.ASK_AUTH_CODE:
+            if self.state in (self.ASK_AUTH_CODE, self.ASK_AUTH_OAUTH):
                 await self._resume_auth(after_code=bool(self._auth_status_after_code))
             else:
                 await self._repeat_prompt()
@@ -879,11 +906,16 @@ class VoiceActivationSession:
         await self._prompt_and_listen("请说出您的手机号码，一共十一位。")
 
     async def _resume_auth(self, after_code=False):
-        if self.auth_task_id:
+        if self.auth_task_id or self.auth_service == "tesla":
             try:
+                payload = {"macAddress": self._mac()}
+                if self.auth_task_id:
+                    payload["taskId"] = self.auth_task_id
+                if self.auth_service:
+                    payload["service"] = self.auth_service
                 result = await self._post(
                     "/device/voice-activation/skills/auth/status",
-                    {"macAddress": self._mac(), "taskId": self.auth_task_id},
+                    payload,
                 )
             except Exception as exc:
                 self.conn.logger.bind(tag=TAG).warning(f"恢复授权状态查询失败: {exc}")
@@ -893,7 +925,7 @@ class VoiceActivationSession:
             error_code = (result or {}).get("errorCode")
             self._auth_status_after_code = None
             if status != "skipped" and error_code not in {"TASK_NOT_FOUND", "TASK_EXPIRED", "TASK_CANCELED"}:
-                if status in {"waiting_code", "pending", "done", "already_bound", "failed"}:
+                if status in {"waiting_code", "waiting_oauth", "pending", "done", "already_bound", "failed"}:
                     await self._handle_auth_result(result, after_code=after_code)
                 else:
                     await self._wait_for_auth_status_retry(after_code)
@@ -904,7 +936,7 @@ class VoiceActivationSession:
         await self._run_next_auth()
 
     async def _wait_for_auth_status_retry(self, after_code):
-        self.state = self.ASK_AUTH_CODE
+        self.state = self.ASK_AUTH_OAUTH if self.auth_service == "tesla" else self.ASK_AUTH_CODE
         self._auth_status_after_code = after_code
         await self._repeat_prompt()
 
@@ -954,6 +986,9 @@ class VoiceActivationSession:
         elif self.state == self.ASK_AUTH_CODE:
             label = self.auth_label or "技能"
             await self._say(f"我在。收到{label}的短信后，把验证码念给我就好。")
+        elif self.state == self.ASK_AUTH_OAUTH:
+            label = self.auth_label or "特斯拉"
+            await self._say(f"我在。授权链接已发到您手机，请打开短信完成{label}登录，完成后跟我说一声。")
         else:
             await self._repeat_prompt()
 
@@ -963,6 +998,8 @@ class VoiceActivationSession:
             hint = "好，准备好了接着说。"
         elif self.state in (self.ASK_PERSONA, self.CONFIRM_PERSONA):
             hint = "好，你慢慢选。"
+        elif self.state == self.ASK_AUTH_OAUTH:
+            hint = "好，打开短信里的授权链接后跟我说一声。"
         elif self.state in (self.ASK_CODE, self.ASK_AUTH_CODE):
             hint = "好，看到验证码后直接念给我。"
         elif self.state in (self.ASK_SUPPLEMENT, self.CONFIRM_SUPPLEMENT):
@@ -1011,6 +1048,8 @@ class VoiceActivationSession:
             await self._on_retry_skills(text)
         elif self.state == self.ASK_AUTH_CODE:
             await self._on_auth_code(text)
+        elif self.state == self.ASK_AUTH_OAUTH:
+            await self._on_auth_oauth(text)
 
     def _invalidate_phone_wait(self):
         self._phone_epoch += 1
@@ -1607,9 +1646,9 @@ class VoiceActivationSession:
             self.conn,
             "用户在选择现在要开通哪些授权技能。只返回 JSON。"
             '只开瑞幸用 {"intent":"accept","services":["luckin"]}，只开滴滴选 didi，'
-            "明确同意两项都开时列出 luckin 和 didi。"
+            '只开特斯拉选 tesla。明确同意全部开通时列出 luckin、didi 和 tesla。'
             "结合整句理解否定和改口，只列用户同意开通的服务。"
-            '两项都暂缓或拒绝用 {"intent":"decline"}。要求重听用 repeat，'
+            '全部暂缓或拒绝用 {"intent":"decline"}。要求重听用 repeat，'
             "只询问用途、未明确选择时用 unclear。",
             text,
             "首次授权确认",
@@ -1631,7 +1670,7 @@ class VoiceActivationSession:
             self.ask_auth_consent = False
             self.auth_skipped.extend(label for _, label in self.auth_queue)
             self.auth_queue.clear()
-            await self._finish_skills_and_reboot("瑞幸和滴滴可以之后再开通。")
+            await self._finish_skills_and_reboot("瑞幸、滴滴和特斯拉可以之后再开通。")
         else:
             await self._repeat_prompt()
 
@@ -1645,7 +1684,7 @@ class VoiceActivationSession:
         task = self._idle_task
         if task is not None and not task.done():
             task.cancel()
-        await self._say("通用技能已绑定。开通瑞幸或滴滴可以说绑定技能。")
+        await self._say("通用技能已绑定。开通瑞幸、滴滴或特斯拉可以说绑定技能。")
 
     def _mark_auth_failed(self, label):
         name = label or "技能"
@@ -1688,6 +1727,8 @@ class VoiceActivationSession:
         self.auth_task_id = None
         if service == "luckin":
             prompt = "接下来开通瑞幸咖啡。请准备接收短信验证码，在瑞幸App下过单的账号可以尝试开通。"
+        elif service == "tesla":
+            prompt = "接下来开通特斯拉。授权链接会发到您手机，请打开短信完成登录，完成后跟我说一声。"
         else:
             prompt = "接下来开通滴滴出行。请准备接收短信验证码，并确认账号已实名、已开通免密支付。"
         await self._say(prompt)
@@ -1718,25 +1759,36 @@ class VoiceActivationSession:
     async def _poll_auth(self, after_code=False):
         """登录往往还停在 waiting_code。提交验证码后要继续查，直到成功、失败或验证码被拒。"""
         label = self.auth_label or "技能"
+        oauth = self.auth_service == "tesla"
         self._auth_polling = True
-        wait_seconds = AUTH_CODE_WAIT_SECONDS if after_code else AUTH_POLL_WAIT_SECONDS
+        if after_code:
+            wait_seconds = AUTH_CODE_WAIT_SECONDS
+        elif oauth:
+            wait_seconds = AUTH_OAUTH_WAIT_SECONDS
+        else:
+            wait_seconds = AUTH_POLL_WAIT_SECONDS
         rounds = max(1, int(wait_seconds / AUTH_POLL_INTERVAL_SECONDS))
         try:
             for _ in range(rounds):
                 await asyncio.sleep(AUTH_POLL_INTERVAL_SECONDS)
-                if not self.auth_task_id:
+                if not self.auth_task_id and not oauth:
                     break
                 try:
+                    payload = {"macAddress": self._mac()}
+                    if self.auth_task_id:
+                        payload["taskId"] = self.auth_task_id
+                    if self.auth_service:
+                        payload["service"] = self.auth_service
                     polled = await self._post(
                         "/device/voice-activation/skills/auth/status",
-                        {"macAddress": self._mac(), "taskId": self.auth_task_id},
+                        payload,
                     )
                 except Exception as exc:
                     self.conn.logger.bind(tag=TAG).warning(f"{label}授权状态查询失败: {exc}")
                     await self._wait_for_auth_status_retry(after_code)
                     return
                 polled_status = str((polled or {}).get("status") or "")
-                if polled_status == "pending":
+                if polled_status in {"pending", "waiting_oauth"}:
                     continue
                 if (
                     polled_status == "waiting_code"
@@ -1748,6 +1800,8 @@ class VoiceActivationSession:
                 return
         finally:
             self._auth_polling = False
+            if self._oauth_poll_task is asyncio.current_task():
+                self._oauth_poll_task = None
 
         # 超时：先把失败播报完，再切下一项，否则「正在开通滴滴出行」会盖掉这句。
         await self._cancel_auth_task()
@@ -1803,6 +1857,13 @@ class VoiceActivationSession:
                 await self._say(f"请说出{label}短信里的验证码。")
             return
 
+        if status == "waiting_oauth":
+            self.state = self.ASK_AUTH_OAUTH
+            self.conn.last_activity_time = time.time() * 1000
+            await self._say("授权链接已发到您手机，请打开短信完成特斯拉登录，完成后跟我说一声。")
+            self._start_oauth_poll()
+            return
+
         if status in {"done", "already_bound"}:
             if label not in self.auth_done:
                 self.auth_done.append(label)
@@ -1822,6 +1883,8 @@ class VoiceActivationSession:
                     "INVALID_CODE": "验证码没能通过验证",
                     "TASK_EXPIRED": "这次验证已经超时",
                     "TASK_NOT_FOUND": "这次验证已失效",
+                    "OAUTH_START_FAILED": "没法打开特斯拉授权页",
+                    "SMS_SEND_FAILED": "授权链接短信没发出去",
                     "REAL_NAME_REQUIRED": "账号还需要实名认证",
                     "PASSWORD_FREE_PAYMENT_REQUIRED": "账号还需要开通免密支付",
                     "ORDER_HISTORY_REQUIRED": "这个账号需要先在瑞幸小程序下过单",
@@ -1833,7 +1896,20 @@ class VoiceActivationSession:
 
         await self._poll_auth(after_code=after_code)
 
+    def _stop_oauth_poll(self):
+        task = self._oauth_poll_task
+        self._oauth_poll_task = None
+        if task is not None and not task.done() and task is not asyncio.current_task():
+            task.cancel()
+
+    def _start_oauth_poll(self):
+        task = self._oauth_poll_task
+        if task is not None and not task.done():
+            return
+        self._oauth_poll_task = asyncio.create_task(self._poll_auth())
+
     async def _cancel_auth_task(self):
+        self._stop_oauth_poll()
         if not self.auth_task_id:
             return
         try:
@@ -1910,6 +1986,47 @@ class VoiceActivationSession:
             "验证码已经收到了，我正在确认开通结果，稍等一下。",
             partial(self._handle_auth_result, result or {}, after_code=True),
         )
+
+    async def _on_auth_oauth(self, text):
+        label = self.auth_label or "特斯拉"
+        action = await resolve_oauth_reply(self.conn, text)
+        if action == "repeat":
+            await self._repeat_prompt()
+            return
+        if action == "rebind":
+            self.rebind_auth = True
+            await self._cancel_auth_task()
+            self.auth_queue = list(self.AUTH_QUEUE)
+            await self._advance_after_skill_prompt("好的，重新绑定授权技能。", self._run_next_auth)
+            return
+        if action == "skip_all":
+            await self._cancel_auth_task()
+            self.auth_skipped.extend([label, *(name for _, name in self.auth_queue)])
+            self.auth_queue.clear()
+            await self._run_next_auth()
+            return
+        if action == "skip":
+            await self._cancel_auth_task()
+            if label not in self.auth_skipped:
+                self.auth_skipped.append(label)
+            await self._advance_after_skill_prompt(f"好的，已跳过{label}。", self._run_next_auth)
+            return
+        try:
+            payload = {"macAddress": self._mac(), "service": self.auth_service or "tesla"}
+            result = await self._post(
+                "/device/voice-activation/skills/auth/status",
+                payload,
+            )
+        except Exception as exc:
+            self.conn.logger.bind(tag=TAG).warning(f"{label}授权状态查询失败: {exc}")
+            await self._say("刚才没能查询授权结果，请稍后再试。")
+            return
+        status = str((result or {}).get("status") or "")
+        if status == "waiting_oauth":
+            await self._say("还没看到授权结果，请打开短信里的授权链接完成登录后再跟我说一声。")
+            return
+        self._stop_oauth_poll()
+        await self._handle_auth_result(result or {})
 
     async def _on_auth_summary(self, text):
         failed = [pair for pair in self.AUTH_QUEUE if pair[1] in self.auth_failed]
@@ -2130,7 +2247,7 @@ class VoiceActivationSession:
         elif self.state == self.CONFIRM_NICKNAME:
             await self._say(f"我的名字是{self.nickname}，对吗？")
         elif self.state == self.ASK_AUTH_CONSENT:
-            await self._say("通用技能已经绑定好了。瑞幸咖啡和滴滴出行需要短信验证，你想先开通哪项？两项都开或者晚点再开也可以。")
+            await self._say("通用技能已经绑定好了。瑞幸咖啡和滴滴出行需要短信验证，特斯拉授权链接会发到您手机。你想先开通哪项？都可以开，也可以晚点再开。")
         elif self.state == self.ASK_PERSONA:
             if self.persona_templates:
                 await self._say(self._persona_menu())
@@ -2165,6 +2282,8 @@ class VoiceActivationSession:
         elif self.state == self.ASK_AUTH_CODE:
             label = self.auth_label or "技能"
             await self._say(f"请说出{label}短信验证码。")
+        elif self.state == self.ASK_AUTH_OAUTH:
+            await self._say("授权链接已发到您手机，请打开短信完成特斯拉登录，完成后跟我说一声。")
 
     async def _send_recognized_text(self, text):
         """把识别文本回给设备。不发 tts start，避免还在收号时设备退出录音。"""
@@ -2191,7 +2310,7 @@ class VoiceActivationSession:
             base = 120
         if base <= 0:
             base = 120
-        if self.state in (self.ASK_CODE, self.RETRY_SMS):
+        if self.state in (self.ASK_CODE, self.RETRY_SMS, self.ASK_AUTH_OAUTH):
             return max(base, 300)
         return base
 
