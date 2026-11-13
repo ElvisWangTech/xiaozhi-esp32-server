@@ -107,20 +107,14 @@ class VoiceActivationFlowTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(session._post.await_count, 2)
         self.assertEqual(session._post.await_args.args[1]["service"], "didi")
 
-    async def test_active_authorization_starts_without_consent_and_prompts_before_request(self):
+    async def test_active_authorization_asks_consent_like_first_onboarding(self):
         session = self.make_session("skills")
         session.include_auth = True
-
-        async def post(path, payload):
-            if path.endswith("/auth"):
-                self.assertIn("请准备接收短信验证码", session._say.await_args.args[0])
-                self.assertEqual(payload["service"], "luckin")
-                return {"status": "waiting_code", "taskId": "luckin"}
-            return None
-
-        session._post.side_effect = post
+        session.ask_auth_consent = True
         await session._bind_skills()
-        self.assertEqual(session.state, session.ASK_AUTH_CODE)
+        self.assertEqual(session.state, session.ASK_AUTH_CONSENT)
+        self.assertEqual(session._post.await_count, 1)
+        self.assertIn("你想先开通哪项", session._say.await_args.args[0])
 
     async def test_role_resume_uses_saved_owner_without_asking_again(self):
         session = self.make_session("role")
@@ -440,11 +434,15 @@ class VoiceActivationFlowTest(unittest.IsolatedAsyncioTestCase):
         session.auth_service = "tesla"
         session.auth_label = "特斯拉"
         session._start_oauth_poll = Mock()
+        session._log_tesla_auth_url = Mock()
         await session._handle_auth_result({
             "status": "waiting_oauth",
             "authUrl": "https://auth.tesla.cn/oauth2/v3/authorize",
         })
         self.assertEqual(session.state, session.ASK_AUTH_OAUTH)
+        session._log_tesla_auth_url.assert_called_once_with(
+            "https://auth.tesla.cn/oauth2/v3/authorize"
+        )
         session._say.assert_awaited_once_with(
             "授权链接已发到您手机，请打开短信完成特斯拉登录，完成后跟我说一声。"
         )

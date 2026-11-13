@@ -732,7 +732,7 @@ async def start_skills_onboarding(conn, announce=None, rebind=False):
         handler = conn.voice_activation_handler
         if getattr(handler, "stage", None) == "skills":
             handler.include_auth = True
-            handler.ask_auth_consent = False
+            handler.ask_auth_consent = True
             if rebind:
                 handler.rebind_auth = True
             handler._announce_skill_failure = True
@@ -748,7 +748,7 @@ async def start_skills_onboarding(conn, announce=None, rebind=False):
     conn.voice_onboarding = "skills"
     conn.skills_pending = True
     conn.voice_activation_handler = VoiceActivationSession(
-        conn, stage="skills", include_auth=True, rebind_auth=rebind
+        conn, stage="skills", include_auth=True, rebind_auth=rebind, ask_auth_consent=True
     )
     if announce:
         await conn.voice_activation_handler._say(announce)
@@ -814,7 +814,7 @@ class VoiceActivationSession:
     REBOOTING = "rebooting"
 
     # 方案 B：默认依次开通；瑞幸先于滴滴（滴滴常需实名/免密支付），再特斯拉网页授权。
-    # 首次引导先征求授权同意。用户主动要求绑定时直接进入授权。
+    # 首次引导和用户主动说「绑定技能」都先征求授权同意，可选择、可跳过。
     AUTH_QUEUE = (
         ("luckin", "瑞幸咖啡"),
         ("didi", "滴滴出行"),
@@ -1583,7 +1583,7 @@ class VoiceActivationSession:
         if not request:
             return False
         self.include_auth = True
-        self.ask_auth_consent = False
+        self.ask_auth_consent = True
         if request == "rebind":
             self.rebind_auth = True
         self._announce_skill_failure = True
@@ -1728,7 +1728,7 @@ class VoiceActivationSession:
         if service == "luckin":
             prompt = "接下来开通瑞幸咖啡。请准备接收短信验证码，在瑞幸App下过单的账号可以尝试开通。"
         elif service == "tesla":
-            prompt = "接下来开通特斯拉。授权链接会发到您手机，请打开短信完成登录，完成后跟我说一声。"
+            prompt = "接下来开通特斯拉。授权链接会发到您手机，完成后跟我说一声。"
         else:
             prompt = "接下来开通滴滴出行。请准备接收短信验证码，并确认账号已实名、已开通免密支付。"
         await self._say(prompt)
@@ -1860,6 +1860,7 @@ class VoiceActivationSession:
         if status == "waiting_oauth":
             self.state = self.ASK_AUTH_OAUTH
             self.conn.last_activity_time = time.time() * 1000
+            self._log_tesla_auth_url((result or {}).get("authUrl"))
             await self._say("授权链接已发到您手机，请打开短信完成特斯拉登录，完成后跟我说一声。")
             self._start_oauth_poll()
             return
@@ -2295,6 +2296,13 @@ class VoiceActivationSession:
             await send_display_message(self.conn, display)
         except Exception as exc:
             self.conn.logger.bind(tag=TAG).warning(f"回传识别文本失败: {exc}")
+
+    def _log_tesla_auth_url(self, auth_url):
+        """把 Tesla 授权页打到服务端日志，方便对照运营商改写后的短信。"""
+        url = str(auth_url or "").strip()
+        if not url:
+            return
+        self.conn.logger.bind(tag=TAG).info(f"特斯拉授权链接: {url}")
 
     def _start_idle_watch(self):
         task = self._idle_task

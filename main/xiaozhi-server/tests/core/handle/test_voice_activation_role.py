@@ -978,7 +978,7 @@ def test_first_skill_bind_starts_authorization():
     posts = []
     auth_started = []
     conn = _skill_conn("skills")
-    session = VoiceActivationSession(conn, stage="skills", include_auth=True)
+    session = VoiceActivationSession(conn, stage="skills", include_auth=True, ask_auth_consent=True)
     conn.voice_activation_handler = session
 
     async def _post(path, payload):
@@ -996,8 +996,9 @@ def test_first_skill_bind_starts_authorization():
 
     asyncio.run(session._bind_skills())
     assert posts == ["/device/voice-activation/skills"]
-    assert auth_started == [True]
-    assert any(text == "通用技能已绑定。" for text in said)
+    assert auth_started == []
+    assert session.state == session.ASK_AUTH_CONSENT
+    assert any("你想先开通哪项" in text for text in said)
     assert conn.voice_activation_handler is session
 
 
@@ -1037,8 +1038,10 @@ def test_user_request_during_quiet_bind_starts_authorization():
         await task
 
     asyncio.run(_run())
-    assert auth_started == [True]
-    assert any(text == "通用技能已绑定。" for text in said)
+    assert auth_started == []
+    assert session.ask_auth_consent is True
+    assert session.state == session.ASK_AUTH_CONSENT
+    assert any("你想先开通哪项" in text for text in said)
 
 
 def test_bound_auth_skill_is_skipped_unless_rebind():

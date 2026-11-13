@@ -615,8 +615,8 @@ public class VoiceActivationService {
             vo.setErrorCode("OAUTH_START_FAILED");
             return vo;
         }
-        String smsUrl = textOrNull(view, "sms_url");
-        if (StringUtils.isBlank(smsUrl) || !isPortalSmsUrl(smsUrl)) {
+        String authUrl = textOrNull(view, "auth_url");
+        if (StringUtils.isBlank(authUrl) || !isHttpUrl(authUrl)) {
             vo.setStatus("failed");
             vo.setMessage("无法创建特斯拉授权");
             vo.setErrorCode("OAUTH_START_FAILED");
@@ -629,7 +629,8 @@ public class VoiceActivationService {
             return vo;
         }
         try {
-            smsGatewaySender.sendTeslaAuthLink(phone, smsUrl);
+            smsGatewaySender.sendTeslaAuthLink(phone, authUrl);
+            log.info("特斯拉授权链接已发送 phone={} url={}", SmsGatewaySender.maskPhone(phone), authUrl);
         } catch (RenException e) {
             log.warn("特斯拉授权短信发送失败 phone={}: {}", SmsGatewaySender.maskPhone(phone), e.getMsg());
             vo.setStatus("failed");
@@ -638,7 +639,7 @@ public class VoiceActivationService {
             return vo;
         }
         vo.setStatus("waiting_oauth");
-        vo.setAuthUrl(smsUrl);
+        vo.setAuthUrl(authUrl);
         vo.setMessage("授权链接已发到您手机，请打开短信完成特斯拉登录");
         return vo;
     }
@@ -832,10 +833,9 @@ public class VoiceActivationService {
         return macAddress.trim();
     }
 
-    private static boolean isPortalSmsUrl(String url) {
+    private static boolean isHttpUrl(String url) {
         String raw = StringUtils.trimToEmpty(url).toLowerCase();
-        return (raw.startsWith("https://") || raw.startsWith("http://"))
-                && !raw.contains("auth.tesla");
+        return raw.startsWith("https://") || raw.startsWith("http://");
     }
 
     private static String normalizeNickname(String nickname) {

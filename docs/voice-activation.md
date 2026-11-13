@@ -12,7 +12,7 @@
 | --- | --- | --- |
 | 第一阶段 激活 | 确认手机号、发短信、校验验证码、超级管理员建智能体并绑定设备 | 实现 |
 | 第二阶段 角色绑定 | 助手昵称、主人称呼、性格模板和补充设定 | 实现 |
-| 第三阶段 技能绑定 | 昵称确认后自动通用绑定，默认开通瑞幸→滴滴→特斯拉（瑞幸/滴滴仅验证码时打断；特斯拉授权短链发短信；失败口头提示），最后直接重启 | 实现 |
+| 第三阶段 技能绑定 | 昵称确认后自动通用绑定，先征求授权同意（可选择、可跳过），再开通瑞幸→滴滴→特斯拉（瑞幸/滴滴仅验证码时打断；特斯拉授权链接发短信；失败口头提示），最后直接重启 | 实现 |
 
 控制台原有 `POST /device/bind/{agentId}/{deviceCode}` 保留，给非 voice 路径使用。一个智能体只能绑定一台设备，见下文「一机一体」。
 
@@ -28,7 +28,7 @@
 8. 播报绑定成功，重新拉取该设备的私有配置。若 `voice_onboarding=nickname`，请用户说助手昵称。可以说「小智」，也可以说「你的昵称是小智」。播报确认后写入 `agentName`，状态改为 `role`。
 9. 认主：开场已经确认过称呼时不再重复提问，直接播报「好的，我是{昵称}」进入性格选择；否则问「我该怎么称呼您呢？」，用户可以直接说「老板」，也可以说「叫我老板」，确认后进入性格选择。
 10. 性格：按排序播报 `ai_agent_template` 的名称，第一项就是当前默认性格（可爱女生），说「不用换」「保持现在的」也等于选它。确认后问还有没有补充。说「没有」就结束；说了补充则追加到角色设定。然后把所选模板的 `systemPrompt`、主人称呼和补充写入智能体，状态改为 `skills`。
-11. 角色设定结束后**不询问用户**，自动做通用技能绑定（`POST /skills` → portal_lite `/api/device/bind` + `/api/portal/invite`）。**只有这一次**会接着自动开通瑞幸咖啡、滴滴出行、特斯拉（先瑞幸：滴滴常需实名/免密支付；特斯拉放最后，授权短链发到绑定手机号）。第一次调用 `/skills/auth` 后，状态从 `skills` 改为 `skills_manual`，重连和唤醒都不再自动开通。之后用户要自己说「绑定技能」。瑞幸/滴滴走 portal automation，仅 `waiting_code` 时要短信验证码；特斯拉走 `/api/tesla/oauth/start`，返回 `waiting_oauth`，短信发 portal 短链（`/t/{code}`，打开后 302 到 Tesla 授权页），不要把 `auth.tesla` 长链塞进短信，设备上不念链接。说「不要/跳过」则 cancel 该项。单项失败会当场播报原因（短信没发出去也算失败，不改口头引导），全部结束后再汇总失败项并提示可说「绑定技能」重试，然后播报「配置完毕，设备即将重启」并直接下发重启（不询问用户；不重启设备 MCP 工具加载不到）。麦当劳暂不支持。通用绑定失败保持 `skills`。
+11. 角色设定结束后**不询问用户**，自动做通用技能绑定（`POST /skills` → portal_lite `/api/device/bind` + `/api/portal/invite`）。通用绑定成功后先问「你想先开通哪项」，用户可选择瑞幸、滴滴、特斯拉，也可以晚点再开。**只有这一次**会在同意后按瑞幸→滴滴→特斯拉开通（先瑞幸：滴滴常需实名/免密支付；特斯拉放最后）。第一次调用 `/skills/auth` 后，状态从 `skills` 改为 `skills_manual`，重连和唤醒都不再自动开通。之后用户要自己说「绑定技能」，同样先征求同意、可选择、可跳过。瑞幸/滴滴走 portal automation，仅 `waiting_code` 时要短信验证码；特斯拉走 `/api/tesla/oauth/start`，返回 `waiting_oauth`，短信发 Tesla 授权页 `auth_url`（运营商需报备该域名），服务端日志打印同一条链接便于对照，设备上不念链接。说「不要/跳过」则 cancel 该项。单项失败会当场播报原因（短信没发出去也算失败，不改口头引导），全部结束后再汇总失败项并提示可说「绑定技能」重试，然后播报「配置完毕，设备即将重启」并直接下发重启（不询问用户；不重启设备 MCP 工具加载不到）。麦当劳暂不支持。通用绑定失败保持 `skills`。
 12. 断线重连：状态为 `nickname` 时只继续问昵称；为 `role` 时从「我该怎么称呼您呢？」重新开始；为 `skills` 时继续通用绑定，并仍会自动授权（这一次还没发起过）。为 `skills_quiet` 时只静默重试通用绑定，成功后结束引导，并告诉用户可以说「绑定技能」再开通瑞幸、滴滴或特斯拉。`skills_manual` 和 `done` 不再自动拉起；用户说「绑定技能」才会再开通。
 
 验证码阶段说「重说」会回到手机号。说「重发」会再发一条短信（仍受频控）。
@@ -95,7 +95,7 @@
 
 请求：`{ "macAddress": "...", "service": "didi" }`
 
-`service` 为 `didi` / `luckin` / `tesla`。瑞幸、滴滴启动 portal `/api/automation/start`，立即返回 `{ status, service, taskId, message }`。特斯拉启动 `/api/tesla/oauth/start`，成功后把返回的 `sms_url`（portal 短链）用通知短信发到设备绑定手机号，返回 `{ status: "waiting_oauth", service: "tesla", authUrl, message }`，无 `taskId`。`authUrl` 也是这条短链。没有 `sms_url` 时返回 `failed` / `OAUTH_START_FAILED`，不要改发 Tesla 长链。无手机号或短信发送失败返回 `failed` / `SMS_SEND_FAILED`。`status`：`pending` / `waiting_code` / `waiting_oauth` / `done` / `failed` / `skipped` / `already_bound`。
+`service` 为 `didi` / `luckin` / `tesla`。瑞幸、滴滴启动 portal `/api/automation/start`，立即返回 `{ status, service, taskId, message }`。特斯拉启动 `/api/tesla/oauth/start`，成功后把返回的 `auth_url`（Tesla 授权页）用通知短信发到设备绑定手机号，返回 `{ status: "waiting_oauth", service: "tesla", authUrl, message }`，无 `taskId`。manager-api 和语音服务会把同一条 `authUrl` 打到服务端日志，方便对照运营商改写后的短信。没有 `auth_url` 时返回 `failed` / `OAUTH_START_FAILED`。无手机号或短信发送失败返回 `failed` / `SMS_SEND_FAILED`。`status`：`pending` / `waiting_code` / `waiting_oauth` / `done` / `failed` / `skipped` / `already_bound`。
 
 `POST /device/voice-activation/skills/auth/status`
 
@@ -139,7 +139,7 @@
 | `sms.gateway.client_id` | 客户端标识，必填。请求时以 `Client-Id` 请求头携带；为空时接口报「短信服务暂不可用」 |
 | `sms.gateway.template_type` | 短信类型：0 通知，1 营销，2 验证码。默认 2，非法值按 2 处理 |
 | `sms.gateway.message_template` | 短信文案模板，`{{code}}` 替换为验证码。默认 `您的验证码为{{code}}，五分钟内有效，请勿泄露给他人`；模板里没有占位符时回落默认文案 |
-| `sms.gateway.tesla_auth_template` | 特斯拉授权链接短信模板，`{{url}}` 替换为 portal 短链（`https://{portal}/t/{code}`）。默认 `请打开以下链接完成特斯拉授权：{{url}}`；`template_type` 固定为 0 通知，不占用验证码模板和日限额。短链打开后 302 到 Tesla 授权页，避免运营商改写 `auth.tesla` 长链 |
+| `sms.gateway.tesla_auth_template` | 特斯拉授权链接短信模板，`{{url}}` 替换为 Tesla 授权页地址。默认 `请打开以下链接完成特斯拉授权：{{url}}`；`template_type` 固定为 0 通知，不占用验证码模板和日限额。运营商需报备授权域名，短信里不做 302 短跳转 |
 | `sms.gateway.mock` | `true` 时不调用平台，验证码和特斯拉授权链接都只写在服务端日志里，供开发联调 |
 | `portal_lite.base_url` | portal_lite 服务地址，例如 `http://127.0.0.1:5005` |
 | `portal_lite.bind_token` | 对应 `X-Bind-Token` / `LITE_BIND_TOKEN` |
@@ -229,10 +229,10 @@
 
 ### 2026-11-12
 
-- 语音授权队列在瑞幸、滴滴之后增加特斯拉。特斯拉走网页 PKCE OAuth，不进 Playwright 短信自动化；授权短链用通知短信发到设备绑定手机号，设备上不念链接。
-- 新增参数 `sms.gateway.tesla_auth_template`（`db/changelog/202611121600.sql`），`{{url}}` 替换为 portal 短链，`template_type` 固定为 0 通知，不占用验证码模板和日限额。无手机号或发送失败返回 `SMS_SEND_FAILED`，该项失败，不改口头引导。
+- 语音授权队列在瑞幸、滴滴之后增加特斯拉。特斯拉走网页 PKCE OAuth，不进 Playwright 短信自动化；授权链接用通知短信发到设备绑定手机号，服务端日志打印同一条链接，设备上不念链接。
+- 新增参数 `sms.gateway.tesla_auth_template`（`db/changelog/202611121600.sql`），`{{url}}` 替换为 Tesla 授权页地址，`template_type` 固定为 0 通知，不占用验证码模板和日限额。无手机号或发送失败返回 `SMS_SEND_FAILED`，该项失败，不改口头引导。
 - Tesla 地区由 portal-lite 环境变量 `TESLA_REGION`（CN / NA / EU）决定，语音侧不强制中国区。
-- 运营商会改写 `auth.tesla.cn` / `auth.tesla.com` 长链（`https` 变成 `*`、域名点号变空格）。短信改发 portal `GET /t/{code}`，打开后 302 到真实 Tesla authorize URL。`TESLA_REDIRECT_URI` 不要改。
+- 运营商会改写未报备的 `auth.tesla.cn` / `auth.tesla.com` 长链（`https` 变成 `*`、域名点号变空格）。短信仍发 Tesla 授权页，不做 302 短跳转；运营商需报备该域名。服务端日志打印完整授权链接，便于对照短信内容。
 
 ## 后续操作（本次不实现）
 
@@ -240,7 +240,7 @@
 
 ## 第三阶段（方案 B）
 
-激活、昵称、认主和性格完成之前，不询问技能。角色设定写入后：先自动做**通用技能绑定**，再**仅这一次**默认跑瑞幸→滴滴→特斯拉（不问「要开通吗」）。瑞幸/滴滴仅短信验证码阶段打断用户；特斯拉把 portal 授权短链发到绑定手机号，用户打开短信完成网页 OAuth。失败会提示原因，最后直接重启。授权一旦发起，状态变为 `skills_manual`，之后只能用户说「绑定技能」再开通。每个授权技能开通前都会查是否已有凭证：瑞幸看 `luckin_token`，滴滴看 `didi_key`，特斯拉看 `extra.tesla.refresh_token`。已经开通的跳过。用户说「重新绑定」才会再开通。Tesla 地区由 portal-lite 环境变量 `TESLA_REGION`（CN / NA / EU）决定，不在语音侧强制中国区。
+激活、昵称、认主和性格完成之前，不询问技能。角色设定写入后：先自动做**通用技能绑定**，再问用户想开通哪项（可选择、可跳过），同意后按瑞幸→滴滴→特斯拉开通。用户主动说「绑定技能」时同样先征求同意。瑞幸/滴滴仅短信验证码阶段打断用户；特斯拉把授权页发到绑定手机号，用户打开短信链接完成网页 OAuth。失败会提示原因，最后直接重启。授权一旦发起，状态变为 `skills_manual`，之后只能用户说「绑定技能」再开通。每个授权技能开通前都会查是否已有凭证：瑞幸看 `luckin_token`，滴滴看 `didi_key`，特斯拉看 `extra.tesla.refresh_token`。已经开通的跳过。用户说「重新绑定」才会再开通。Tesla 地区由 portal-lite 环境变量 `TESLA_REGION`（CN / NA / EU）决定，不在语音侧强制中国区。
 
 真实凭证由 portal_lite Playwright 自动化写入 skills；本阶段不再只写 `auth_bind` 元数据。
 
@@ -252,17 +252,17 @@
 | 昵称确认写入 | `role` | 问「我该怎么称呼您呢？」，确认主人称呼 |
 | 称呼确认 | `role` | 播报性格模板，用户说序号或名字，再问补充 |
 | 性格和补充写入 | `skills` | 自动通用技能绑定，不询问用户 |
-| 通用绑定成功，且还没自动授权过 | `skills` → `skills_manual` | 「正在开通瑞幸咖啡」——只这一次默认启动 automation |
+| 通用绑定成功，且还没自动授权过 | `skills` → `skills_manual` | 「你想先开通哪项？都可以开，也可以晚点再开。」同意后再启动 automation |
 | 瑞幸 `waiting_code` | `skills_manual` | 「请说出瑞幸短信验证码」；「不要/跳过」则 cancel。同一次对话里继续，不再重新自动开始 |
 | 瑞幸结束 | `skills_manual` | 同一次对话里继续开通滴滴出行 |
-| 滴滴结束 | `skills_manual` | 同一次对话里继续开通特斯拉；portal 短链发短信，「打开短信完成登录」 |
+| 滴滴结束 | `skills_manual` | 同一次对话里继续开通特斯拉；授权页发短信 |
 | 特斯拉 `waiting_oauth` | `skills_manual` | 用户打开短信里的授权链接完成登录；说「已经授权」后继续查结果；「不要/跳过」则跳过 |
 | 授权做完 | `done` | 汇总成功/失败（失败含原因；滴滴失败可提示实名/免密；特斯拉短信失败提示链接没发出去），`complete` 后直接重启 |
 | 重启下发 | `done` | 播报「配置完毕，设备即将重启」，等播完再调设备 MCP `self.qiniu.custom.restart` |
 
 断线重连：`voice_onboarding=role` 时从认主重新开始；`voice_onboarding=skills` 时继续通用绑定，并在还没发起过授权时自动开通。`skills_quiet` 只重试通用绑定。`skills_manual` 和 `done` 不自动开通，用户说「绑定技能」才进入授权。通用绑定失败可说「确认」重试，或「稍后再说」先聊天。已是 `done` 的老设备不回填，仍可以说「绑定技能」。
 
-部署注意：`portal_lite` 须提供 `/api/device/bind`、`/api/portal/invite`、`/api/automation/{start,status,code,cancel}`、`/api/tesla/oauth/start`（额外返回 `sms_url`）、`GET /t/{code}` 短跳转与 `auth-status.tesla`；并配置 `admin_token`（或与 bind_token 相同）。Tesla Fleet App 地区看 portal-lite `TESLA_REGION`。短链公网根地址从 `TESLA_REDIRECT_URI` 推导，不要改 Tesla `redirect_uri`。
+部署注意：`portal_lite` 须提供 `/api/device/bind`、`/api/portal/invite`、`/api/automation/{start,status,code,cancel}`、`/api/tesla/oauth/start`（返回 Tesla `auth_url`）与 `auth-status.tesla`；并配置 `admin_token`（或与 bind_token 相同）。Tesla Fleet App 地区看 portal-lite `TESLA_REGION`。短信发 Tesla 授权页，运营商需报备该域名；不要改 Tesla `redirect_uri`。
 
 ### 外部接口（portal_lite）
 
@@ -273,8 +273,7 @@
 | 通用绑定 | `POST /api/device/bind` | `X-Bind-Token` |
 | 签发邀请 | `POST /api/portal/invite` `{device_id}` | `X-Admin-Token` |
 | 启动授权 | `POST /api/automation/start` `{token, service, phone}` | invite `token` |
-| 启动特斯拉 OAuth | `POST /api/tesla/oauth/start` `{token}`，返回 `auth_url` + `sms_url` | invite `token` |
-| 特斯拉短信短链 | `GET /t/{code}` 302 到 Tesla authorize | 短码未过期可重复打开 |
+| 启动特斯拉 OAuth | `POST /api/tesla/oauth/start` `{token}`，返回 `auth_url` | invite `token` |
 | 查状态 | `GET /api/automation/status?task_id=` | — |
 | 查特斯拉凭证 | portal `auth-status.tesla` | invite `token` |
 | 交验证码 | `POST /api/automation/code` `{task_id, code}` | — |

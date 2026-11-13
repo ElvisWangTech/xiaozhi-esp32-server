@@ -190,7 +190,7 @@
           <mxGeometry relative="1" as="geometry"/>
         </mxCell>
 
-        <mxCell id="note" value="方案 B：通用绑定后默认开通瑞幸→滴滴→特斯拉（滴滴常需实名/免密；特斯拉放最后，短信发 portal /t/{code} 短链再 302 到 Tesla，地区由 portal-lite TESLA_REGION 决定）；仅 waiting_code 打断要验证码；waiting_oauth 打开短信链接；失败当场与结束时口头提示；完成后播报「配置完毕，设备即将重启」并直接重启，不询问用户（不重启设备 MCP 工具加载不到）。麦当劳暂不支持。" style="text;html=1;strokeColor=none;fillColor=none;align=left;verticalAlign=top;whiteSpace=wrap;rounded=0;" vertex="1" parent="1">
+        <mxCell id="note" value="方案 B：通用绑定后先征求授权同意（可选择、可跳过），再开通瑞幸→滴滴→特斯拉（滴滴常需实名/免密；特斯拉放最后，短信发 Tesla 授权页，运营商需报备域名，地区由 portal-lite TESLA_REGION 决定）；仅 waiting_code 打断要验证码；waiting_oauth 打开短信链接；失败当场与结束时口头提示；完成后播报「配置完毕，设备即将重启」并直接重启，不询问用户（不重启设备 MCP 工具加载不到）。麦当劳暂不支持。" style="text;html=1;strokeColor=none;fillColor=none;align=left;verticalAlign=top;whiteSpace=wrap;rounded=0;" vertex="1" parent="1">
           <mxGeometry x="40" y="1480" width="1100" height="40" as="geometry"/>
         </mxCell>
       </root>

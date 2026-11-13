@@ -28,12 +28,13 @@ class VoiceActivationRolePromptTest {
     }
 
     @Test
-    void portalSmsUrlRejectsTeslaAuthorizeHost() throws Exception {
-        Method method = VoiceActivationService.class.getDeclaredMethod("isPortalSmsUrl", String.class);
+    void httpUrlAcceptsTeslaAuthorizeHost() throws Exception {
+        Method method = VoiceActivationService.class.getDeclaredMethod("isHttpUrl", String.class);
         method.setAccessible(true);
-        assertTrue((boolean) method.invoke(null, "https://portal.example.com/t/AbC_12-xy"));
-        assertFalse((boolean) method.invoke(null, "https://auth.tesla.cn/oauth2/v3/authorize"));
-        assertFalse((boolean) method.invoke(null, "https://auth.tesla.com/oauth2/v3/authorize"));
+        assertTrue((boolean) method.invoke(null, "https://auth.tesla.cn/oauth2/v3/authorize"));
+        assertTrue((boolean) method.invoke(null, "https://auth.tesla.com/oauth2/v3/authorize"));
+        assertTrue((boolean) method.invoke(null, "http://example.com/path"));
         assertFalse((boolean) method.invoke(null, ""));
+        assertFalse((boolean) method.invoke(null, "ftp://example.com"));
     }
 }
