@@ -33,8 +33,14 @@
         </el-form-item>
 
         <el-form-item :label="$t('paramDialog.paramValue')" prop="paramValue" class="form-item">
+          <el-switch
+            v-if="form.paramCode === 'voice_activation.role_supplement_enabled' && form.valueType === 'boolean'"
+            v-model="form.paramValue"
+            active-value="true"
+            inactive-value="false"
+          />
           <el-input
-            v-if="form.valueType !== 'json' && form.valueType !== 'array'"
+            v-else-if="form.valueType !== 'json' && form.valueType !== 'array'"
             v-model="form.paramValue"
             :placeholder="$t('paramDialog.paramValuePlaceholder')"
             class="custom-input"

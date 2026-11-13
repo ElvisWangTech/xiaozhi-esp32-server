@@ -192,7 +192,24 @@ def test_keeping_the_current_persona_is_offered_and_worded_as_no_change():
     asyncio.run(session.handle_text("不用换了，就这样"))
     assert session.state == session.CONFIRM_PERSONA
     assert session.persona_name == "可爱女生"
-    assert said == ["性格就保持可爱女生，不换了，对吗？"]
+    assert said == ["性格就保持可爱女生，对吗？"]
+
+
+def test_confirming_persona_skips_supplement_by_default():
+    conn = _FakeConn('{"intent":"accept"}')
+    session, said = _guided_session(conn, "role", VoiceActivationSession.CONFIRM_PERSONA)
+    session.persona_templates = TEMPLATES
+    session.persona_name = TEMPLATES[0]
+    saved = []
+
+    async def save_role(supplement):
+        saved.append(supplement)
+
+    session._save_role = save_role
+    asyncio.run(session.handle_text("对，就这个"))
+
+    assert saved == [""]
+    assert said == []
 
 
 def test_nickname_retries_give_progressively_clearer_hints():
@@ -714,7 +731,7 @@ def test_confirm_intent_asks_the_model():
 def test_supplement_and_menu():
     assert clean_supplement("  说话温柔一点。 ") == "说话温柔一点"
     menu = persona_menu(TEMPLATES)
-    assert menu.startswith("接下来选一个性格。一，可爱女生，也就是现在的我，不换也可以。二，甜美小源。")
+    assert menu.startswith("接下来可以选择我的性格。一，可爱女生，也就是现在的我。二，甜美小源。")
     assert "五，英语老师" in menu
 
 
@@ -1335,7 +1352,7 @@ def test_role_bind_announces_success_before_skills():
     assert order == [
         "save",
         "refresh",
-        "角色设好了。",
+        "性格设定成功。",
         "wait",
         "接下来绑定技能。",
         "wait",

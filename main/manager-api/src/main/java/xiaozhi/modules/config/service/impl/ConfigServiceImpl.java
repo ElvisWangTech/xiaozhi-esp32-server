@@ -220,6 +220,8 @@ public class ConfigServiceImpl implements ConfigService {
         // 获取单台设备每天最多输出字数
         String deviceMaxOutputSize = sysParamsService.getValue("device_max_output_size", true);
         result.put("device_max_output_size", deviceMaxOutputSize);
+        String roleSupplement = sysParamsService.getValue("voice_activation.role_supplement_enabled", true);
+        result.put("voice_activation_role_supplement_enabled", Boolean.parseBoolean(roleSupplement));
         if ("nickname".equals(device.getOnboardingStatus())) {
             result.put("voice_onboarding", "nickname");
         } else if ("role".equals(device.getOnboardingStatus())) {

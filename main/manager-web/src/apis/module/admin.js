@@ -101,7 +101,7 @@ export default {
             }).send()
     },
     // 修改
-    updateParam(data, callback, failCallback) {
+    updateParam(data, callback, failCallback, networkFailCallback) {
         RequestService.sendRequest()
             .url(`${getServiceUrl()}/admin/params`)
             .method('PUT')
@@ -116,8 +116,12 @@ export default {
             })
             .networkFail((err) => {
                 console.error('更新参数失败:', err)
+                if (networkFailCallback) {
+                    networkFailCallback(err)
+                    return
+                }
                 RequestService.reAjaxFun(() => {
-                    this.updateParam(data, callback)
+                    this.updateParam(data, callback, failCallback)
                 })
             }).send()
     },

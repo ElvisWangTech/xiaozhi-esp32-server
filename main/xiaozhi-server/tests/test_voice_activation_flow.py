@@ -22,6 +22,7 @@ class VoiceActivationFlowTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_onboarding_progresses_from_greeting_to_reboot(self):
         session = self.make_session()
+        session.conn.config["voice_activation_role_supplement_enabled"] = True
         session._start_idle_watch = Mock()
         session._schedule_asr_ready = Mock()
         session._send_recognized_text = AsyncMock()

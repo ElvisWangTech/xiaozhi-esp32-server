@@ -750,6 +750,9 @@ export default {
 
   // 参数管理页面文本
   'paramManagement.pageTitle': '参数管理',
+  'paramManagement.roleSupplement': '首次语音配置 · 补充性格',
+  'paramManagement.roleSupplementHint': '开启后，设备会在角色确认后询问性格偏好。关闭后直接进入技能绑定。',
+  'paramManagement.roleSupplementSaved': '设置已保存，下次加载设备配置时生效',
   'paramManagement.searchPlaceholder': '请输入参数编码或备注查询',
   'paramManagement.search': '搜索',
   'paramManagement.paramCode': '参数编码',
