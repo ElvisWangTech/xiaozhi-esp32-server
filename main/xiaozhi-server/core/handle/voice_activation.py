@@ -245,9 +245,7 @@ _SKILL_REQUEST_PROMPT = (
     '{"intent":"bind","services":[]}、{"intent":"rebind","services":["luckin"]} 或 {"intent":"none","services":[]}。\n'
     "bind：明确要现在绑定、配置或设置技能。\n"
     "rebind：明确要重新绑定、重新开通、再绑一次。\n"
-    "services：用户点名的技能，只允许 luckin、didi、tesla。"
-    "瑞幸或瑞幸咖啡是 luckin，滴滴或滴滴出行是 didi，特斯拉是 tesla。"
-    "没有点名具体技能时 services 为空。点名哪几项就列哪几项。\n"
+    "services：用户点名的技能。没有点名具体技能时 services 为空。点名哪几项就列哪几项。\n"
     "none：提问、否定、闲聊或反问。例如「不要绑定技能」「绑定技能是什么意思」「能不绑定吗」「先别开通」。\n"
     "出现「绑定技能」「重新绑定」不等于要执行。"
 )
@@ -371,13 +369,41 @@ async def resolve_skills_request(conn, text):
     raw = unwrap_user_text(text).strip()
     if not compact_text(raw):
         return None
-    data = await _ask_llm_json(conn, _SKILL_REQUEST_PROMPT, raw, "技能指令")
+    data = await _ask_llm_json(conn, _skill_request_prompt(), raw, "技能指令")
     intent = _intent_of(data, {"bind", "rebind", "none"})
+    requested = _requested_auth_services(data)
     services = _named_auth_services(data)
     _log_guide(conn, "info", f"技能指令: {raw} -> {intent or ''} {services}")
     if intent in ("bind", "rebind"):
+        if requested and not services:
+            return "blocked", []
         return intent, services
     return None
+
+
+def _skill_request_prompt():
+    pairs = VoiceActivationSession.DIRECT_AUTH
+    allowed = "、".join(service for service, _ in pairs)
+    mapping = "，".join(f"{label}是 {service}" for service, label in pairs)
+    blocked = ""
+    if not any(service == "tesla" for service, _ in pairs):
+        blocked = "特斯拉暂时不能开通，不要放进 services。用户只说绑定特斯拉时，intent 用 none。\n"
+    return (
+        _SKILL_REQUEST_PROMPT
+        + f"当前可点名的只有 {allowed}。{mapping}。\n"
+        + blocked
+    )
+
+
+def _requested_auth_services(data):
+    raw_services = (data or {}).get("services")
+    if not isinstance(raw_services, list):
+        return []
+    services = []
+    for service in raw_services:
+        if isinstance(service, str) and service not in services:
+            services.append(service)
+    return services
 
 
 def _named_auth_services(data):
@@ -747,13 +773,26 @@ def spoken_digits(number):
     return "，".join(list(number))
 
 
+async def say_blocked_skill(conn):
+    """点名了当前关闭的技能，例如特斯拉。不进入授权。"""
+    handler = getattr(conn, "voice_activation_handler", None)
+    if handler is not None and hasattr(handler, "_say"):
+        await handler._say("特斯拉暂时不能开通。")
+        return
+    await VoiceActivationSession(conn, stage="skills")._say("特斯拉暂时不能开通。")
+
+
 async def start_skills_onboarding(conn, announce=None, rebind=False, services=None):
     """日常对话中主动说「绑定技能」时进入授权绑定。
 
-    没点名时按队列依次开通，已开通的跳过。点名瑞幸、滴滴或特斯拉时只重绑那几项。
+    没点名时按队列依次开通，已开通的跳过。点名当前开放的技能时只重绑那几项。
     引导还没做完时，配完通用技能仍要重启；已经配过之后只重配授权技能，不因此重启。
     """
-    named = VoiceActivationSession.named_auth_pairs(services)
+    requested = _requested_auth_services({"services": list(services or [])})
+    named = VoiceActivationSession.named_auth_pairs(requested)
+    if requested and not named:
+        await say_blocked_skill(conn)
+        return
     if named:
         rebind = True
         announce = _direct_rebind_announce(named)
@@ -854,7 +893,7 @@ class VoiceActivationSession:
     DIRECT_AUTH = (
         ("luckin", "瑞幸咖啡"),
         ("didi", "滴滴出行"),
-        ("tesla", "特斯拉"),
+        # ("tesla", "特斯拉"),  # 暂时屏蔽点名开通入口，恢复时取消注释。
     )
     AUTH_QUEUE = (
         ("luckin", "瑞幸咖啡"),
@@ -1638,6 +1677,9 @@ class VoiceActivationSession:
         if not request:
             return False
         intent, services = request
+        if intent == "blocked":
+            await self._say("特斯拉暂时不能开通。")
+            return True
         named = self.named_auth_pairs(services)
         self.include_auth = True
         self._named_services = [service for service, _ in named] or None
@@ -1665,6 +1707,11 @@ class VoiceActivationSession:
             task.cancel()
 
     async def _bind_skills(self):
+        requested = _requested_auth_services({"services": self._named_services or []})
+        if requested and not self.named_auth_pairs(requested):
+            self._named_services = None
+            await self._say("特斯拉暂时不能开通。")
+            return
         self._skill_bind_inflight = True
         try:
             await self._post(
@@ -1712,14 +1759,14 @@ class VoiceActivationSession:
 
     async def _on_auth_consent(self, text):
         queue_ids = "、".join(service for service, _ in self.AUTH_QUEUE)
-        tesla_rule = "" if any(service == "tesla" for service, _ in self.AUTH_QUEUE) else "没有点名特斯拉时不要选 tesla。"
+        tesla_open = any(service == "tesla" for service, _ in self.DIRECT_AUTH)
+        tesla_rule = "只开特斯拉选 tesla。" if tesla_open else "特斯拉暂时不能开通，不要选 tesla。"
         data = await _ask_turn_json(
             self.conn,
             "用户在选择现在要开通哪些授权技能。只返回 JSON。"
-            '只开瑞幸用 {"intent":"accept","services":["luckin"]}，只开滴滴选 didi，'
-            "只开特斯拉选 tesla。"
-            f"明确同意全部依次开通时只列出 {queue_ids}。"
+            '只开瑞幸用 {"intent":"accept","services":["luckin"]}，只开滴滴选 didi。'
             f"{tesla_rule}"
+            f"明确同意全部依次开通时只列出 {queue_ids}。"
             "点名某一项时只列那一项。结合整句理解否定和改口，只列用户同意开通的服务。"
             '全部暂缓或拒绝用 {"intent":"decline"}。要求重听用 repeat，'
             "只询问用途、未明确选择时用 unclear。",
@@ -1728,7 +1775,12 @@ class VoiceActivationSession:
         )
         intent = _intent_of(data, {"accept", "decline", "repeat", "unclear"})
         if intent == "accept":
+            requested = _requested_auth_services(data)
             services = _named_auth_services(data)
+            if requested and not services:
+                await self._say("特斯拉暂时不能开通。")
+                await self._repeat_prompt()
+                return
             if not services:
                 await self._repeat_prompt()
                 return

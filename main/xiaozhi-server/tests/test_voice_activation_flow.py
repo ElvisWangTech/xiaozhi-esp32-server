@@ -566,12 +566,22 @@ class VoiceActivationFlowTest(unittest.IsolatedAsyncioTestCase):
         session = self.make_session("skills")
         session.include_auth = True
         session.ask_auth_consent = True
-        session._named_services = ["tesla"]
-        session._post.return_value = {"status": "waiting_code", "taskId": "tesla-1"}
+        session._named_services = ["luckin"]
+        session._post.return_value = {"status": "waiting_code", "taskId": "luckin-1"}
         await session._bind_skills()
-        self.assertEqual(session.auth_service, "tesla")
+        self.assertEqual(session.auth_service, "luckin")
         self.assertIs(session._post.await_args.args[1]["rebind"], True)
         self.assertNotEqual(session.state, session.ASK_AUTH_CONSENT)
+
+    async def test_named_tesla_does_not_start_authorization(self):
+        session = self.make_session("skills")
+        session.include_auth = True
+        session._named_services = ["tesla"]
+        session._post.return_value = {"status": "waiting_oauth"}
+        await session._bind_skills()
+        self.assertIsNone(session.auth_service)
+        session._post.assert_not_awaited()
+        session._say.assert_awaited_once_with("特斯拉暂时不能开通。")
 
     async def test_skip_or_existing_bind_does_not_reboot(self):
         session = self.make_session("skills")

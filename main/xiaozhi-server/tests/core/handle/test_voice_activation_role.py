@@ -605,7 +605,9 @@ def test_skill_command_ignores_negation_and_questions():
     bare = _FakeConn('{"intent":"bind"}')
     assert asyncio.run(resolve_skills_request(bare, "绑定技能。")) == ("bind", [])
     named = _FakeConn('{"intent":"bind","services":["luckin","tesla","unknown"]}')
-    assert asyncio.run(resolve_skills_request(named, "绑定瑞幸和特斯拉")) == ("bind", ["luckin", "tesla"])
+    assert asyncio.run(resolve_skills_request(named, "绑定瑞幸和特斯拉")) == ("bind", ["luckin"])
+    only_tesla = _FakeConn('{"intent":"rebind","services":["tesla"]}')
+    assert asyncio.run(resolve_skills_request(only_tesla, "绑定特斯拉")) == ("blocked", [])
     assert bare.calls
     unrelated = _FakeConn('{"intent":"none"}')
     assert asyncio.run(resolve_skills_request(unrelated, "今天天气不错")) is None
