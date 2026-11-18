@@ -342,6 +342,22 @@ def _flag_true(value):
     return value is True or str(value).lower() == "true"
 
 
+async def _explicit_skill_refusal(conn, text, labels):
+    """再确认一次：是不是明确放弃当前列出的技能。点名别的、闲聊、没选好都不是。"""
+    offered = "、".join(labels) or "当前这些技能"
+    prompt = (
+        "判断用户原话是不是在明确拒绝或推迟开通列出的技能。"
+        "只输出一个 JSON 对象，不要解释。"
+        '{"refuse":true} 或 {"refuse":false}。\n'
+        f"列出的技能：{offered}。\n"
+        "refuse 为 true：明确不用、以后再说、先不开、都不开、取消这些技能。\n"
+        "refuse 为 false：点名列表以外的东西、改口想开某一项、提问、闲聊、没听清、还没选好。"
+        "出现技能名字不等于拒绝。"
+    )
+    data = await _ask_turn_json(conn, prompt, unwrap_user_text(text), "是否放弃授权")
+    return bool(data) and _flag_true(data.get("refuse"))
+
+
 async def confirm_turn(conn, text, subject):
     """同意、拒绝、改口，或让设备把问题再说一遍。模型失败时不当成同意。"""
     raw = unwrap_user_text(text).strip()
@@ -1759,28 +1775,29 @@ class VoiceActivationSession:
 
     async def _on_auth_consent(self, text):
         queue_ids = "、".join(service for service, _ in self.AUTH_QUEUE)
-        tesla_open = any(service == "tesla" for service, _ in self.DIRECT_AUTH)
-        tesla_rule = "只开特斯拉选 tesla。" if tesla_open else "特斯拉暂时不能开通，不要选 tesla。"
+        queue_labels = self._join_skill_names(self._queued_skill_names(), "和")
         data = await _ask_turn_json(
             self.conn,
             "用户在选择现在要开通哪些授权技能。只返回 JSON。"
-            '只开瑞幸用 {"intent":"accept","services":["luckin"]}，只开滴滴选 didi。'
-            f"{tesla_rule}"
-            f"明确同意全部依次开通时只列出 {queue_ids}。"
-            "点名某一项时只列那一项。结合整句理解否定和改口，只列用户同意开通的服务。"
-            '全部暂缓或拒绝用 {"intent":"decline"}。要求重听用 repeat，'
-            "只询问用途、未明确选择时用 unclear。",
+            '{"intent":"accept","services":["luckin"]}、{"intent":"decline"}、'
+            '{"intent":"other"}、{"intent":"repeat"} 或 {"intent":"unclear"}。\n'
+            f"当前可选：{queue_ids}。点名某一项时 services 只列那一项，全部同意时只列出这些。\n"
+            "decline：明确放弃或推迟这些技能，例如不用了、以后再说、都不开。\n"
+            "other：在说这些技能以外的事，包括点名列表里没有的项目。这不是 decline。\n"
+            "repeat：没听清。unclear：还没选好，或只是在问。\n"
+            "点名列表以外的内容、闲聊、提问，都不能用 decline。",
             text,
             "首次授权确认",
         )
-        intent = _intent_of(data, {"accept", "decline", "repeat", "unclear"})
+        intent = _intent_of(data, {"accept", "decline", "other", "repeat", "unclear"})
+        _log_guide(self.conn, "info", f"首次授权确认: {unwrap_user_text(text)} -> {intent or ''}")
+        if intent == "decline" and not await _explicit_skill_refusal(
+            self.conn, text, self._queued_skill_names()
+        ):
+            _log_guide(self.conn, "info", f"首次授权确认: {unwrap_user_text(text)} 不是明确放弃 {queue_labels}")
+            intent = "other"
         if intent == "accept":
-            requested = _requested_auth_services(data)
             services = _named_auth_services(data)
-            if requested and not services:
-                await self._say("特斯拉暂时不能开通。")
-                await self._repeat_prompt()
-                return
             if not services:
                 await self._repeat_prompt()
                 return
