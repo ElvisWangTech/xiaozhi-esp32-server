@@ -58,7 +58,7 @@ class VoiceActivationFlowTest(unittest.IsolatedAsyncioTestCase):
                 await session.handle_text(utterance)
                 self.assertEqual(session.state, expected_state, utterance)
         self.assertEqual(session.auth_done, ["瑞幸咖啡"])
-        self.assertEqual(session.auth_skipped, ["特斯拉", "滴滴出行"])
+        self.assertEqual(session.auth_skipped, ["滴滴出行"])
         role_call = session._post.await_args_list[4]
         self.assertEqual(role_call.args[1]["ownerTitle"], "老周")
         self.assertEqual(role_call.args[1]["templateName"], "星际游子")
@@ -90,7 +90,9 @@ class VoiceActivationFlowTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([call.args[0] for call in session._post.await_args_list], [
             "/device/voice-activation/skills", "/device/voice-activation/skills/complete",
         ])
-        self.assertEqual(session.state, session.REBOOTING)
+        self.assertNotEqual(session.state, session.REBOOTING)
+        session._reboot_device.assert_not_awaited()
+        self.assertIn("现在可以开始聊天了", session._say.await_args.args[0])
 
     async def test_first_authorization_can_choose_only_one_service(self):
         session = self.make_session("skills")
@@ -102,10 +104,11 @@ class VoiceActivationFlowTest(unittest.IsolatedAsyncioTestCase):
             return_value={"intent": "accept", "services": ["didi"]}
         )):
             await session._dispatch("瑞幸先不用，只开滴滴")
-        self.assertEqual(session.auth_skipped, ["瑞幸咖啡", "特斯拉"])
+        self.assertEqual(session.auth_skipped, ["瑞幸咖啡"])
         self.assertEqual(session.state, session.ASK_AUTH_CODE)
         self.assertEqual(session._post.await_count, 2)
         self.assertEqual(session._post.await_args.args[1]["service"], "didi")
+        self.assertIs(session._post.await_args.args[1]["rebind"], True)
 
     async def test_active_authorization_asks_consent_like_first_onboarding(self):
         session = self.make_session("skills")
@@ -529,6 +532,35 @@ class VoiceActivationFlowTest(unittest.IsolatedAsyncioTestCase):
         for call in model.await_args_list:
             self.assertNotIn("123456", call.args[2])
             self.assertNotIn("654321", call.args[2])
+
+    async def test_named_skill_rebinds_only_that_service(self):
+        session = self.make_session("skills")
+        session.include_auth = True
+        session.ask_auth_consent = True
+        session._named_services = ["tesla"]
+        session._post.return_value = {"status": "waiting_code", "taskId": "tesla-1"}
+        await session._bind_skills()
+        self.assertEqual(session.auth_service, "tesla")
+        self.assertIs(session._post.await_args.args[1]["rebind"], True)
+        self.assertNotEqual(session.state, session.ASK_AUTH_CONSENT)
+
+    async def test_skip_or_existing_bind_does_not_reboot(self):
+        session = self.make_session("skills")
+        session._reboot_device = AsyncMock()
+        session.auth_queue = []
+        session.auth_skipped = ["瑞幸咖啡"]
+        await session._finish_auth_outcome()
+        session._reboot_device.assert_not_awaited()
+        self.assertIn("现在可以开始聊天了", session._say.await_args.args[0])
+        self.assertIsNone(session.conn.voice_activation_handler)
+
+        session = self.make_session("skills")
+        session._reboot_device = AsyncMock()
+        session.auth_queue = [("luckin", "瑞幸咖啡")]
+        session._post.return_value = {"status": "already_bound", "service": "luckin"}
+        await session._run_next_auth()
+        session._reboot_device.assert_not_awaited()
+        self.assertEqual(session.auth_succeeded, [])
 
     def test_invalid_or_ambiguous_code_is_not_truncated(self):
         self.assertIsNone(voice.isolated_code("123456789"))

@@ -10,7 +10,8 @@
 三个 provider 都是连接级实例（conn.asr / conn.tts / conn.llm），可在
 运行时热替换，无需重连设备：
 - LLM：conn.chat / _ask_llm_json 调用失败时切换；
-- TTS：语音激活用 TTSAudioProbe 探测静默死亡，正常对话由明确合成失败触发；
+- TTS：语音激活用 TTSAudioProbe 探测静默死亡，正常对话由明确合成失败触发。
+  要等好几秒才出声的 TTS 在切换时并行探测，谁先出声用谁，其余立刻停；
 - ASR：建连失败或接口报错时由 receiveAudioHandle 触发（空识别不算失败）。
 
 唯一保留的状态是「本轮已试过哪些候选」的遍历游标，用于保证一轮故障内
@@ -19,6 +20,7 @@
 
 import asyncio
 import json
+import threading
 import time
 
 TAG = __name__
@@ -31,6 +33,26 @@ _SWAP_TIMEOUTS = {"LLM": 60.0, "TTS": 45.0, "ASR": 30.0}
 
 # 候选自检（provider.probe_ready）超时。只有真正会建连的 provider 才有这一步。
 _PROBE_TIMEOUT = 10.0
+
+# 只能靠合成才能判断是否可用的 TTS（text_to_speak 返回音频字节）。
+# 流式实现靠握手自检，不在这里做一次完整合成。
+_SYNTHESIS_PROBE_MODULES = {
+    "mimo",
+    "doubao",
+    "openai",
+    "edge",
+    "siliconflow",
+    "tencent",
+    "aliyun",
+    "custom",
+    "paddle_speech",
+    "fishspeech",
+    "gpt_sovits_v2",
+    "gpt_sovits_v3",
+    "cozecn",
+    "default",
+}
+_SYNTHESIS_PROBE_TEXT = "嗯"
 
 
 def _log(conn, level, message):
@@ -220,13 +242,20 @@ class TTSAudioProbe:
     """临时包一层 TTS 输出队列，统计是否真的产出了音频数据。
 
     TTS 文本工作线程会吞掉合成异常，只能靠“有没有音频产出”判断服务是否可用。
+    工作线程自己切走时，这里只报告实例已经换了，不把等待时间再加长一轮。
+    慢 TTS 的并行探测在切换流程里做，不堵在这一次等待上。
     仅在一次播报期间生效，结束后恢复原队列对象。
     """
 
     def __init__(self, tts):
         self.audio_puts = 0
-        self._queue = getattr(tts, "tts_audio_queue", None)
+        self._tts = tts
+        self._queue = getattr(tts, "tts_audio_queue", None) if tts is not None else None
         self._installed = False
+        self._followed = None
+        self._baselines = {}
+        if tts is not None:
+            self._baselines[id(tts)] = _produced_frames(tts)
         if self._queue is None:
             return
         original = self._queue
@@ -250,23 +279,79 @@ class TTSAudioProbe:
         except Exception:
             self._installed = False
 
-    async def wait_first_audio(self, window):
-        """等首帧音频；探测不可用时直接放行，不阻塞流程。"""
-        if not self._installed:
+    def _heard(self, tts):
+        if tts is None:
+            return False
+        if tts is self._tts and self.audio_puts > 0:
+            return True
+        followed = self._followed
+        if followed is not None and followed._tts is tts and followed.audio_puts > 0:
+            return True
+        baseline = self._baselines.get(id(tts))
+        return baseline is not None and _produced_frames(tts) > baseline
+
+    def _follow(self, tts):
+        self._unfollow()
+        followed = TTSAudioProbe(tts)
+        self._followed = followed if followed._installed else None
+        if self._followed is not None:
+            # 子探测只负责数新队列，不参与“跟着谁”的递归。
+            self._followed._baselines = {}
+
+    def _unfollow(self):
+        followed = self._followed
+        self._followed = None
+        if followed is not None:
+            followed.restore(followed._tts)
+
+    async def wait_first_audio(self, window, conn=None):
+        """等首帧音频。
+
+        返回 True 表示已经出声，False 表示超时，"aborted" 表示用户打断，
+        "switched" 表示工作线程已经换成另一个实例。换实例不延长这次等待，
+        避免把 failover 轮转堵在旧的超时窗口上。
+        探测装不上时直接放行，不阻塞流程。用户打断不是服务故障。
+        """
+        if self._tts is None or not self._installed:
             return True
         deadline = time.monotonic() + max(0.0, float(window))
-        while time.monotonic() < deadline:
-            if self.audio_puts > 0:
-                return True
-            await asyncio.sleep(0.1)
-        return self.audio_puts > 0
+        try:
+            while True:
+                if conn is not None and getattr(conn, "client_abort", False):
+                    return "aborted"
+                live = getattr(conn, "tts", None) if conn is not None else self._tts
+                if live is None:
+                    return True
+                if id(live) not in self._baselines:
+                    frames = _produced_frames(live)
+                    self._baselines[id(live)] = frames
+                    if frames > 0:
+                        return True
+                    if live is not self._tts:
+                        return "switched"
+                    self._follow(live)
+                elif self._heard(live):
+                    return True
+                if time.monotonic() >= deadline:
+                    return False
+                await asyncio.sleep(0.1)
+        finally:
+            self._unfollow()
 
     def restore(self, tts):
+        self._unfollow()
         if self._installed and tts is not None:
             try:
                 tts.tts_audio_queue = self._queue
             except Exception:
                 pass
+
+
+def _produced_frames(tts):
+    try:
+        return int(getattr(tts, "_produced_audio_frames", 0) or 0)
+    except (TypeError, ValueError):
+        return 0
 
 
 def failover_state(conn):
@@ -545,6 +630,248 @@ async def _probe_candidate(conn, module_type, provider, name):
     return True
 
 
+def _overrides_probe_ready(provider):
+    """自带握手自检。基类的 probe_ready 只是直接返回 True，不算。"""
+    method = getattr(type(provider), "probe_ready", None)
+    if method is None:
+        return False
+    return getattr(method, "__qualname__", "") != "TTSProviderBase.probe_ready"
+
+
+def _probes_by_synthesis(provider):
+    """要等合成出音频才能判断可用。显式属性优先于模块名。"""
+    flag = getattr(provider, "failover_audio_probe", None)
+    if flag is not None:
+        return bool(flag)
+    module = type(provider).__module__.rsplit(".", 1)[-1]
+    return module in _SYNTHESIS_PROBE_MODULES
+
+
+def _synthesis_audio_ok(audio):
+    if isinstance(audio, (bytes, bytearray)):
+        return len(audio) > 0
+    return bool(audio)
+
+
+def _settle_future(fut, value):
+    if fut.done():
+        return
+    if isinstance(value, BaseException):
+        fut.set_exception(value)
+    else:
+        fut.set_result(value)
+
+
+def _synthesize_probe(provider, stop):
+    """在独立线程里跑合成。HTTP TTS 的 text_to_speak 会阻塞，不能占事件循环。
+
+    stop 被置位后尽快结束。阻塞在 requests 里的实现要等这次请求自己返回，
+    但不会再占着连接的事件循环。
+    """
+
+    async def _call():
+        task = asyncio.create_task(provider.text_to_speak(_SYNTHESIS_PROBE_TEXT, None))
+        while not task.done():
+            if stop.is_set():
+                task.cancel()
+                try:
+                    await task
+                except (asyncio.CancelledError, Exception):
+                    pass
+                return None
+            await asyncio.wait({task}, timeout=0.05)
+        return task.result()
+
+    return asyncio.run(_call())
+
+
+async def _probe_tts_candidate(conn, name, provider):
+    """单个候选的探测。返回 (是否可用, 音频通道是否已经打开)。"""
+    if _probes_by_synthesis(provider):
+        stop = threading.Event()
+        loop = asyncio.get_running_loop()
+        fut = loop.create_future()
+
+        def work():
+            try:
+                audio = _synthesize_probe(provider, stop)
+            except Exception as exc:
+                audio = exc
+            try:
+                loop.call_soon_threadsafe(_settle_future, fut, audio)
+            except RuntimeError:
+                # 连接事件循环已经关掉（探测被提前停掉时常见），结果没人再等。
+                return
+
+        threading.Thread(target=work, name=f"tts-probe-{name}", daemon=True).start()
+        try:
+            audio = await fut
+        except asyncio.CancelledError:
+            stop.set()
+            raise
+        except Exception as exc:
+            if not stop.is_set():
+                _log(conn, "warning", f"TTS 候选({name})出声探测失败: {exc}")
+            return False, False
+        if stop.is_set() or not _synthesis_audio_ok(audio):
+            if not stop.is_set():
+                _log(conn, "warning", f"TTS 候选({name})未产出音频")
+            return False, False
+        return True, False
+    try:
+        await provider.open_audio_channels(conn)
+    except Exception as exc:
+        _log(conn, "warning", f"TTS 候选({name})打开音频通道失败: {exc}")
+        return False, False
+    if not await _probe_candidate(conn, "TTS", provider, name):
+        return False, True
+    return True, True
+
+
+async def _race_tts_candidates(conn, entries, timeout):
+    """同时探测。谁先成功就用谁，其余探测立即停止，不再继续等。"""
+    tasks = {}
+    for name, provider in entries:
+        task = asyncio.create_task(_probe_tts_candidate(conn, name, provider))
+        tasks[task] = (name, provider)
+    pending = set(tasks)
+    deadline = time.monotonic() + max(0.0, float(timeout))
+    winner = None
+    try:
+        while pending and time.monotonic() < deadline:
+            done, pending = await asyncio.wait(
+                pending,
+                timeout=max(0.0, deadline - time.monotonic()),
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if not done:
+                break
+            for task in done:
+                if task.cancelled():
+                    continue
+                try:
+                    ok, opened = task.result()
+                except Exception as exc:
+                    name, _provider = tasks[task]
+                    _log(conn, "warning", f"TTS 候选({name})探测异常: {exc}")
+                    continue
+                if ok and winner is None:
+                    winner = (*tasks[task], opened)
+                    break
+            if winner is not None:
+                break
+    finally:
+        for task in pending:
+            task.cancel()
+    if winner is None:
+        return None
+    win_name, win_provider, _opened = winner
+    for _task, (name, provider) in tasks.items():
+        if provider is not win_provider:
+            _stop_provider_soon(provider)
+            _log(conn, "info", f"TTS 候选({name})探测已停止，采用 {win_name}")
+    return winner
+
+
+def _stop_provider_soon(provider):
+    """输掉的探测不再等待。合成线程里的请求让它自己结束，不挡住胜者。"""
+    try:
+        task = asyncio.get_running_loop().create_task(_dispose_provider(provider))
+    except RuntimeError:
+        return
+    _background_stops.add(task)
+    task.add_done_callback(_background_stops.discard)
+
+
+_background_stops = set()
+
+
+async def _install_tts(conn, state, name, provider, opened):
+    try:
+        provider._failover_name = name
+        provider._from_failover = True
+    except Exception:
+        pass
+    if not opened:
+        try:
+            await provider.open_audio_channels(conn)
+        except Exception as exc:
+            _log(conn, "warning", f"TTS 候选({name})打开音频通道失败: {exc}")
+            await _dispose_provider(provider)
+            return None
+    old = getattr(conn, "tts", None)
+    conn.tts = provider
+    await _dispose_provider(old)
+    state["active"] = name
+    _log(conn, "warning", f"TTS 服务不可用，已自动切换到备用provider: {name}")
+    return name
+
+
+async def _swap_tts_candidates(conn, state, candidates, tried):
+    """TTS 切换。
+
+    要靠合成才能判断的候选，以及自带握手自检的候选，放在同一次超时里一起探测。
+    谁先成功就装谁，其余探测立即停，不再串行把每个候选的等待时间加在一起。
+    没有这类探测的候选（测试桩、以及只能靠打开通道判断的实现）仍按原顺序逐个试。
+    """
+    built = []
+    for name in candidates:
+        tried.add(name)
+        provider = await rebuild_provider(conn, "TTS", name)
+        if provider is None:
+            _log(conn, "warning", f"TTS 候选({name})实例化失败，试下一个")
+            continue
+        built.append((name, provider))
+    if not built:
+        state["tried"] = set()
+        _log(conn, "warning", f"TTS 已配置候选全部连不上: {candidates}")
+        return None
+
+    raced = []
+    plain = []
+    for item in built:
+        _name, provider = item
+        if _probes_by_synthesis(provider) or _overrides_probe_ready(provider):
+            raced.append(item)
+        else:
+            plain.append(item)
+
+    if raced:
+        winner = await _race_tts_candidates(
+            conn, raced, failover_timeout(conn, "TTS")
+        )
+        if winner is not None:
+            name, provider, opened = winner
+            installed = await _install_tts(conn, state, name, provider, opened)
+            if installed:
+                for _plain_name, leftover in plain:
+                    _stop_provider_soon(leftover)
+                return installed
+        else:
+            for _name, provider in raced:
+                await _dispose_provider(provider)
+
+    for index, (name, provider) in enumerate(plain):
+        try:
+            await provider.open_audio_channels(conn)
+        except Exception as exc:
+            _log(conn, "warning", f"TTS 候选({name})打开音频通道失败: {exc}")
+            await _dispose_provider(provider)
+            continue
+        if not await _probe_candidate(conn, "TTS", provider, name):
+            await _dispose_provider(provider)
+            continue
+        installed = await _install_tts(conn, state, name, provider, True)
+        if installed:
+            for _rest_name, leftover in plain[index + 1 :]:
+                await _dispose_provider(leftover)
+            return installed
+
+    state["tried"] = set()
+    _log(conn, "warning", f"TTS 已配置候选全部连不上: {candidates}")
+    return None
+
+
 async def swap_to_fallback(conn, module_type, expect_active=None):
     """切换到该模块下其他可用 provider，逐个尝试。
 
@@ -591,6 +918,9 @@ async def _swap_locked(conn, module_type, expect_active):
         return None
 
     tried = state.setdefault("tried", set())
+    if module_type == "TTS":
+        return await _swap_tts_candidates(conn, state, candidates, tried)
+
     for name in candidates:
         # 无论实例化/建连成功与否，本轮都算「试过」，避免下一轮又回头试它
         tried.add(name)

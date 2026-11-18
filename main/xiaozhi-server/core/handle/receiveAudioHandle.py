@@ -128,10 +128,12 @@ async def startToChat(conn: "ConnectionHandler", text):
     if onboarding in ("skills", "skills_quiet") and skill_request:
         conn.speak_skill_failure = True
         conn.voice_onboarding = "skills"
+        intent, services = skill_request
         await start_skills_onboarding(
             conn,
-            announce="好的，重新绑定授权技能。" if skill_request == "rebind" else "好的，开始绑定技能。",
-            rebind=skill_request == "rebind",
+            announce="好的，重新绑定授权技能。" if intent == "rebind" else "好的，开始绑定技能。",
+            rebind=intent == "rebind",
+            services=services,
         )
         return
 
@@ -158,10 +160,12 @@ async def startToChat(conn: "ConnectionHandler", text):
 
     # 引导失败或稍后后，用户可主动说「绑定技能」重新进入（接口会校验 onboarding_status）
     if skill_request:
+        intent, services = skill_request
         await start_skills_onboarding(
             conn,
-            announce="好的，重新绑定授权技能。" if skill_request == "rebind" else "好的，开始绑定技能。",
-            rebind=skill_request == "rebind",
+            announce="好的，重新绑定授权技能。" if intent == "rebind" else "好的，开始绑定技能。",
+            rebind=intent == "rebind",
+            services=services,
         )
         return
 

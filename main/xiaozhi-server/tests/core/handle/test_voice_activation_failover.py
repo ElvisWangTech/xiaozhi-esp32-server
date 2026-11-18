@@ -411,6 +411,181 @@ def test_tts_silent_dead_service_is_detected_by_no_audio():
     assert isinstance(healthy_tts.tts_audio_queue, thread_queue.Queue)
 
 
+def test_tts_probe_follows_provider_already_switched_by_worker():
+    """文本线程已经换成备用时，立刻在新实例上重播，不再占用旧的等待窗口。"""
+    import sys
+
+    config = {
+        "TTS": {
+            "DoubaoTTS": {"type": "doubao_stream", "appid": "a1", "access_token": "t1"},
+            "MimoTTS": {"type": "mimo", "api_key": "k1"},
+        },
+        "selected_module": {"TTS": "DoubaoTTS"},
+        "failover_timeout": {"TTS": 0.4},
+    }
+    silent_tts = _FakeTTS(produce_audio=False)
+    conn = _FakeConn(config, _FakeLLM(), tts=silent_tts)
+    healthy = _FakeTTS()
+    swapped = []
+
+    async def rebuild(_conn, _module, name):
+        swapped.append(name)
+        return _FakeTTS()
+
+    async def switch_under_the_probe():
+        await asyncio.sleep(0.15)
+        conn.tts = healthy
+
+    fake_module = _fake_send_audio_module()
+
+    async def _run():
+        asyncio.create_task(switch_under_the_probe())
+        await _session(conn)._say("请告诉我你的手机号")
+
+    with mock.patch.object(pf, "rebuild_provider", rebuild), mock.patch.dict(
+        sys.modules, {"core.handle.sendAudioHandle": fake_module}
+    ):
+        asyncio.run(_run())
+
+    assert swapped == []
+    assert conn.tts is healthy
+    assert healthy.texts and healthy.texts[-1][1] == "请告诉我你的手机号"
+    assert isinstance(healthy.tts_audio_queue, thread_queue.Queue)
+
+
+class _SynthProbeTTS(_FakeTTS):
+    """靠 text_to_speak 出声才算可用。delay 模拟要好几秒才返回音频的 HTTP TTS。"""
+
+    failover_audio_probe = True
+
+    def __init__(self, delay, audio=b"ok", error=None):
+        super().__init__()
+        self.delay = delay
+        self.audio = audio
+        self.synth_error = error
+        self.started = threading.Event()
+        self.finished = threading.Event()
+
+    async def text_to_speak(self, text, output_file):
+        self.started.set()
+        await asyncio.sleep(self.delay)
+        self.finished.set()
+        if self.synth_error is not None:
+            raise self.synth_error
+        return self.audio
+
+
+def test_tts_audio_probes_race_and_stop_when_one_succeeds():
+    """慢 TTS 并行探测：快的一成功，慢的不再继续等。"""
+    import time
+
+    config = {
+        "TTS": {
+            "FishTTS": {"type": "fishspeech", "api_key": "k0", "api_url": "http://127.0.0.1:9/tts"},
+            "SlowTTS": {"type": "mimo", "api_key": "k1"},
+            "FastTTS": {"type": "openai", "api_key": "k2"},
+        },
+        "selected_module": {"TTS": "FishTTS"},
+        "failover_timeout": {"TTS": 3.0},
+    }
+    conn = _FakeConn(config, _FakeLLM(), tts=_FakeTTS(error=RuntimeError("合成失败")))
+    slow = _SynthProbeTTS(delay=5.0)
+    fast = _SynthProbeTTS(delay=0.05)
+
+    async def rebuild(_conn, _module, name):
+        if name == "SlowTTS":
+            return slow
+        if name == "FastTTS":
+            return fast
+        raise AssertionError(name)
+
+    started = time.monotonic()
+    with mock.patch.object(pf, "rebuild_provider", rebuild):
+        asyncio.run(pf.swap_to_fallback(conn, "TTS"))
+    elapsed = time.monotonic() - started
+
+    assert conn.tts is fast
+    assert conn._failover_state["TTS"]["active"] == "FastTTS"
+    assert elapsed < 1.0, elapsed
+    assert slow.started.is_set()
+    assert not slow.finished.is_set()
+    assert fast.finished.is_set()
+    assert not fast.closed
+
+
+def test_tts_fast_probe_failure_does_not_cancel_the_slower_success():
+    """一个候选很快失败时，其他还在探测的候选要继续，直到有人成功或总时间用完。"""
+    import time
+
+    config = {
+        "TTS": {
+            "FishTTS": {"type": "fishspeech", "api_key": "k0", "api_url": "http://127.0.0.1:9/tts"},
+            "BadTTS": {"type": "mimo", "api_key": "k1"},
+            "GoodTTS": {"type": "openai", "api_key": "k2"},
+        },
+        "selected_module": {"TTS": "FishTTS"},
+        "failover_timeout": {"TTS": 2.0},
+    }
+    conn = _FakeConn(config, _FakeLLM(), tts=_FakeTTS(error=RuntimeError("合成失败")))
+    bad = _SynthProbeTTS(delay=0.05, error=RuntimeError("没出声"))
+    good = _SynthProbeTTS(delay=0.3)
+
+    async def rebuild(_conn, _module, name):
+        if name == "BadTTS":
+            return bad
+        if name == "GoodTTS":
+            return good
+        raise AssertionError(name)
+
+    started = time.monotonic()
+    with mock.patch.object(pf, "rebuild_provider", rebuild):
+        asyncio.run(pf.swap_to_fallback(conn, "TTS"))
+    elapsed = time.monotonic() - started
+
+    assert conn.tts is good
+    assert elapsed < 1.0, elapsed
+    assert bad.finished.is_set()
+    assert good.finished.is_set()
+
+
+def test_tts_user_abort_is_not_a_provider_failure():
+    import sys
+
+    config = {
+        "TTS": {
+            "DoubaoTTS": {"type": "doubao_stream", "appid": "a1", "access_token": "t1"},
+            "MimoTTS": {"type": "mimo", "api_key": "k1"},
+        },
+        "selected_module": {"TTS": "DoubaoTTS"},
+        "failover_timeout": {"TTS": 0.5},
+    }
+    silent_tts = _FakeTTS(produce_audio=False)
+    conn = _FakeConn(config, _FakeLLM(), tts=silent_tts)
+    swapped = []
+
+    async def rebuild(_conn, _module, name):
+        swapped.append(name)
+        return _FakeTTS()
+
+    async def abort_soon():
+        await asyncio.sleep(0.05)
+        conn.client_abort = True
+
+    fake_module = _fake_send_audio_module()
+
+    async def _run():
+        asyncio.create_task(abort_soon())
+        await _session(conn)._say("请告诉我你的手机号")
+
+    with mock.patch.object(pf, "rebuild_provider", rebuild), mock.patch.dict(
+        sys.modules, {"core.handle.sendAudioHandle": fake_module}
+    ):
+        asyncio.run(_run())
+
+    assert swapped == []
+    assert conn.tts is silent_tts
+
+
 def _patch_candidates(providers):
     """让刷新走管理端模型候选接口（不真的发 HTTP）。"""
     import config.manage_api_client as mac

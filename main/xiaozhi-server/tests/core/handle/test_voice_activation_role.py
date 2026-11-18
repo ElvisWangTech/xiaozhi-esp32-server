@@ -575,6 +575,7 @@ def test_empty_auth_queue_goes_straight_to_reboot():
     session = VoiceActivationSession(conn, stage="skills", include_auth=True)
     session.auth_queue = []
     session.auth_done = ["瑞幸咖啡"]
+    session.auth_succeeded = ["瑞幸咖啡"]
     finished = []
 
     async def _finish(prefix):
@@ -602,7 +603,9 @@ def test_skill_command_ignores_negation_and_questions():
     assert asyncio.run(resolve_skills_request(_FakeConn('{"intent":"none"}'), "绑定技能是什么意思")) is None
 
     bare = _FakeConn('{"intent":"bind"}')
-    assert asyncio.run(resolve_skills_request(bare, "绑定技能。")) == "bind"
+    assert asyncio.run(resolve_skills_request(bare, "绑定技能。")) == ("bind", [])
+    named = _FakeConn('{"intent":"bind","services":["luckin","tesla","unknown"]}')
+    assert asyncio.run(resolve_skills_request(named, "绑定瑞幸和特斯拉")) == ("bind", ["luckin", "tesla"])
     assert bare.calls
     unrelated = _FakeConn('{"intent":"none"}')
     assert asyncio.run(resolve_skills_request(unrelated, "今天天气不错")) is None

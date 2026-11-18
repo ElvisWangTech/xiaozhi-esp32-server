@@ -242,9 +242,12 @@ _CONFIRM_SYSTEM_PROMPT = (
 _SKILL_REQUEST_PROMPT = (
     "判断用户是不是在要求现在绑定技能。"
     "只输出一个 JSON 对象，不要解释，不要使用 markdown。"
-    '{"intent":"bind"}、{"intent":"rebind"} 或 {"intent":"none"}。\n'
+    '{"intent":"bind","services":[]}、{"intent":"rebind","services":["luckin"]} 或 {"intent":"none","services":[]}。\n'
     "bind：明确要现在绑定、配置或设置技能。\n"
     "rebind：明确要重新绑定、重新开通、再绑一次。\n"
+    "services：用户点名的技能，只允许 luckin、didi、tesla。"
+    "瑞幸或瑞幸咖啡是 luckin，滴滴或滴滴出行是 didi，特斯拉是 tesla。"
+    "没有点名具体技能时 services 为空。点名哪几项就列哪几项。\n"
     "none：提问、否定、闲聊或反问。例如「不要绑定技能」「绑定技能是什么意思」「能不绑定吗」「先别开通」。\n"
     "出现「绑定技能」「重新绑定」不等于要执行。"
 )
@@ -370,10 +373,28 @@ async def resolve_skills_request(conn, text):
         return None
     data = await _ask_llm_json(conn, _SKILL_REQUEST_PROMPT, raw, "技能指令")
     intent = _intent_of(data, {"bind", "rebind", "none"})
-    _log_guide(conn, "info", f"技能指令: {raw} -> {intent or ''}")
+    services = _named_auth_services(data)
+    _log_guide(conn, "info", f"技能指令: {raw} -> {intent or ''} {services}")
     if intent in ("bind", "rebind"):
-        return intent
+        return intent, services
     return None
+
+
+def _named_auth_services(data):
+    raw_services = (data or {}).get("services")
+    if not isinstance(raw_services, list):
+        return []
+    allowed = {service for service, _ in VoiceActivationSession.DIRECT_AUTH}
+    services = []
+    for service in raw_services:
+        if isinstance(service, str) and service in allowed and service not in services:
+            services.append(service)
+    return services
+
+
+def _direct_rebind_announce(pairs):
+    labels = "、".join(label for _, label in pairs)
+    return f"好的，重新绑定{labels}。"
 
 
 async def resolve_skill_retry(conn, text, operation=None):
@@ -726,13 +747,21 @@ def spoken_digits(number):
     return "，".join(list(number))
 
 
-async def start_skills_onboarding(conn, announce=None, rebind=False):
-    """日常对话中主动说「绑定技能」时进入授权绑定。已开通的跳过，除非用户说重新绑定。"""
+async def start_skills_onboarding(conn, announce=None, rebind=False, services=None):
+    """日常对话中主动说「绑定技能」时进入授权绑定。
+
+    没点名时按队列依次开通，已开通的跳过。点名瑞幸、滴滴或特斯拉时只重绑那几项。
+    """
+    named = VoiceActivationSession.named_auth_pairs(services)
+    if named:
+        rebind = True
+        announce = _direct_rebind_announce(named)
     if getattr(conn, "voice_activation_handler", None) is not None:
         handler = conn.voice_activation_handler
         if getattr(handler, "stage", None) == "skills":
             handler.include_auth = True
-            handler.ask_auth_consent = True
+            handler._named_services = [service for service, _ in named] or None
+            handler.ask_auth_consent = not named
             if rebind:
                 handler.rebind_auth = True
             handler._announce_skill_failure = True
@@ -748,8 +777,9 @@ async def start_skills_onboarding(conn, announce=None, rebind=False):
     conn.voice_onboarding = "skills"
     conn.skills_pending = True
     conn.voice_activation_handler = VoiceActivationSession(
-        conn, stage="skills", include_auth=True, rebind_auth=rebind, ask_auth_consent=True
+        conn, stage="skills", include_auth=True, rebind_auth=rebind, ask_auth_consent=not named
     )
+    conn.voice_activation_handler._named_services = [service for service, _ in named] or None
     if announce:
         await conn.voice_activation_handler._say(announce)
     await conn.voice_activation_handler.start()
@@ -815,11 +845,25 @@ class VoiceActivationSession:
 
     # 方案 B：默认依次开通；瑞幸先于滴滴（滴滴常需实名/免密支付），再特斯拉网页授权。
     # 首次引导和用户主动说「绑定技能」都先征求授权同意，可选择、可跳过。
-    AUTH_QUEUE = (
+    # 点名某项时走 DIRECT_AUTH，不限于下面的依次开通队列。
+    DIRECT_AUTH = (
         ("luckin", "瑞幸咖啡"),
         ("didi", "滴滴出行"),
         ("tesla", "特斯拉"),
     )
+    AUTH_QUEUE = (
+        ("luckin", "瑞幸咖啡"),
+        ("didi", "滴滴出行"),
+        # ("tesla", "特斯拉"),  # 暂时屏蔽依次开通入口，恢复时取消注释。
+    )
+
+    @classmethod
+    def named_auth_pairs(cls, services):
+        wanted = []
+        for service in services or []:
+            if isinstance(service, str) and service not in wanted:
+                wanted.append(service)
+        return [pair for pair in cls.DIRECT_AUTH if pair[0] in wanted]
 
     def __init__(self, conn, stage="bind", announce_bind_success=False, include_auth=False, rebind_auth=False, ask_auth_consent=False):
         self.conn = conn
@@ -854,8 +898,11 @@ class VoiceActivationSession:
         self.auth_label = None
         self.auth_task_id = None
         self.auth_done = []
+        self.auth_succeeded = []
         self.auth_failed = []
         self.auth_skipped = []
+        self._named_services = None
+        self._reboot_after_complete = False
         self._completion_prefix = None
         self._auth_status_after_code = None
         self._busy = False
@@ -1582,14 +1629,19 @@ class VoiceActivationSession:
         request = await resolve_skills_request(self.conn, text)
         if not request:
             return False
+        intent, services = request
+        named = self.named_auth_pairs(services)
         self.include_auth = True
-        self.ask_auth_consent = True
-        if request == "rebind":
+        self._named_services = [service for service, _ in named] or None
+        self.ask_auth_consent = not named
+        if named or intent == "rebind":
             self.rebind_auth = True
         self._announce_skill_failure = True
         self.conn.speak_skill_failure = True
         self.conn.voice_onboarding = "skills"
-        await self._say("好的，开始绑定技能。")
+        await self._say(_direct_rebind_announce(named) if named else (
+            "好的，重新绑定授权技能。" if intent == "rebind" else "好的，开始绑定技能。"
+        ))
         if self._skill_bind_inflight:
             return True
         await self._bind_skills()
@@ -1628,26 +1680,39 @@ class VoiceActivationSession:
             return
         self.conn.voice_onboarding = "skills"
         self.conn.skills_pending = True
-        self.auth_queue = list(self.AUTH_QUEUE)
+        named = self.named_auth_pairs(self._named_services)
+        self._named_services = None
+        self.auth_queue = named or list(self.AUTH_QUEUE)
+        if named:
+            self.rebind_auth = True
+            self.ask_auth_consent = False
         self.auth_service = None
         self.auth_label = None
         self.auth_task_id = None
         self.auth_done = []
+        self.auth_succeeded = []
         self.auth_failed = []
         self.auth_skipped = []
         if self.ask_auth_consent:
             self.state = self.ASK_AUTH_CONSENT
             await self._repeat_prompt()
             return
+        if named:
+            await self._run_next_auth()
+            return
         await self._advance_after_skill_prompt("通用技能已绑定。", self._run_next_auth)
 
     async def _on_auth_consent(self, text):
+        queue_ids = "、".join(service for service, _ in self.AUTH_QUEUE)
+        tesla_rule = "" if any(service == "tesla" for service, _ in self.AUTH_QUEUE) else "没有点名特斯拉时不要选 tesla。"
         data = await _ask_turn_json(
             self.conn,
             "用户在选择现在要开通哪些授权技能。只返回 JSON。"
             '只开瑞幸用 {"intent":"accept","services":["luckin"]}，只开滴滴选 didi，'
-            '只开特斯拉选 tesla。明确同意全部开通时列出 luckin、didi 和 tesla。'
-            "结合整句理解否定和改口，只列用户同意开通的服务。"
+            "只开特斯拉选 tesla。"
+            f"明确同意全部依次开通时只列出 {queue_ids}。"
+            f"{tesla_rule}"
+            "点名某一项时只列那一项。结合整句理解否定和改口，只列用户同意开通的服务。"
             '全部暂缓或拒绝用 {"intent":"decline"}。要求重听用 repeat，'
             "只询问用途、未明确选择时用 unclear。",
             text,
@@ -1655,22 +1720,23 @@ class VoiceActivationSession:
         )
         intent = _intent_of(data, {"accept", "decline", "repeat", "unclear"})
         if intent == "accept":
-            services = data.get("services")
-            allowed = {service for service, _ in self.auth_queue}
-            if not isinstance(services, list) or not services or any(
-                not isinstance(service, str) or service not in allowed for service in services
-            ):
+            services = _named_auth_services(data)
+            if not services:
                 await self._repeat_prompt()
                 return
+            chosen = self.named_auth_pairs(services)
+            sequential = [service for service, _ in chosen] == [service for service, _ in self.auth_queue]
+            if not sequential:
+                self.rebind_auth = True
             self.ask_auth_consent = False
             self.auth_skipped.extend(label for service, label in self.auth_queue if service not in services)
-            self.auth_queue = [pair for pair in self.auth_queue if pair[0] in services]
+            self.auth_queue = chosen
             await self._run_next_auth()
         elif intent == "decline":
             self.ask_auth_consent = False
             self.auth_skipped.extend(label for _, label in self.auth_queue)
             self.auth_queue.clear()
-            await self._finish_skills_and_reboot("瑞幸、滴滴和特斯拉可以之后再开通。")
+            await self._finish_skills_without_reboot("瑞幸、滴滴和特斯拉可以之后再开通。")
         else:
             await self._repeat_prompt()
 
@@ -1715,11 +1781,7 @@ class VoiceActivationSession:
 
     async def _run_next_auth(self):
         if not self.auth_queue:
-            if self.auth_failed:
-                self.state = self.RETRY_AUTH_SUMMARY
-                await self._repeat_prompt()
-            else:
-                await self._finish_skills_and_reboot(self._auth_finish_prefix())
+            await self._finish_auth_queue()
             return
         service, label = self.auth_queue.pop(0)
         self.auth_service = service
@@ -1865,7 +1927,15 @@ class VoiceActivationSession:
             self._start_oauth_poll()
             return
 
-        if status in {"done", "already_bound"}:
+        if status == "done":
+            if label not in self.auth_succeeded:
+                self.auth_succeeded.append(label)
+            if label not in self.auth_done:
+                self.auth_done.append(label)
+            await self._advance_after_skill_prompt(f"{label}已开通。", self._run_next_auth)
+            return
+
+        if status == "already_bound":
             if label not in self.auth_done:
                 self.auth_done.append(label)
             await self._advance_after_skill_prompt(f"{label}已开通。", self._run_next_auth)
@@ -2044,7 +2114,7 @@ class VoiceActivationSession:
         )
         intent = _intent_of(data, {"retry", "skip", "repeat", "unclear"})
         if intent == "skip":
-            await self._finish_skills_and_reboot(self._auth_finish_prefix())
+            await self._finish_auth_outcome()
             return
         if intent == "retry":
             services = data.get("services")
@@ -2077,15 +2147,51 @@ class VoiceActivationSession:
         if intent == "retry":
             if self._completion_prefix is None:
                 await self._finish_general_skills()
-            else:
+            elif self._reboot_after_complete:
                 await self._finish_skills_and_reboot(self._completion_prefix)
+            else:
+                await self._finish_skills_without_reboot(self._completion_prefix)
         elif intent == "skip":
             await self._pause("好，配置进度先留在这里。下次唤醒我后可以再试。")
         else:
             await self._repeat_prompt()
 
+    async def _finish_auth_queue(self):
+        if self.auth_failed:
+            self.state = self.RETRY_AUTH_SUMMARY
+            await self._repeat_prompt()
+            return
+        await self._finish_auth_outcome()
+
+    async def _finish_auth_outcome(self):
+        """只有这次新开通成功才重启。失败、跳过或原本已开通都留在对话里。"""
+        prefix = self._auth_finish_prefix()
+        if self.auth_succeeded:
+            await self._finish_skills_and_reboot(prefix)
+            return
+        await self._finish_skills_without_reboot(prefix)
+
+    async def _finish_skills_without_reboot(self, prefix=""):
+        self._reboot_after_complete = False
+        if not await self._complete_skills(prefix):
+            return
+        await self._leave_skills_chat(prefix)
+
+    async def _leave_skills_chat(self, prefix):
+        self.conn.voice_onboarding = None
+        self.conn.skills_pending = False
+        self.conn.voice_activation_handler = None
+        task = self._idle_task
+        if task is not None and not task.done():
+            task.cancel()
+        summary = (prefix or "").strip() or "技能引导已结束。"
+        if not summary.endswith("。"):
+            summary += "。"
+        await self._say(summary + "现在可以开始聊天了。")
+
     async def _finish_skills_and_reboot(self, prefix=""):
         """后台确认完成后，播报并重启设备以加载 MCP 工具。"""
+        self._reboot_after_complete = True
         if not await self._complete_skills(prefix):
             return
         self.conn.voice_onboarding = None
@@ -2367,8 +2473,9 @@ class VoiceActivationSession:
             fields = (
                 "state", "nickname", "owner_title", "persona_name", "persona_templates",
                 "persona_voices", "supplement_parts", "auth_queue", "auth_service", "auth_label",
-                "auth_task_id", "auth_done", "auth_failed", "auth_skipped", "include_auth",
-                "rebind_auth", "ask_auth_consent", "_completion_prefix", "_auth_status_after_code",
+                "auth_task_id", "auth_done", "auth_succeeded", "auth_failed", "auth_skipped",
+                "include_auth", "rebind_auth", "ask_auth_consent", "_named_services",
+                "_reboot_after_complete", "_completion_prefix", "_auth_status_after_code",
             )
             snapshot = {field: getattr(self, field) for field in fields}
             if self.stage == "bind":
@@ -2480,18 +2587,36 @@ class VoiceActivationSession:
             self.conn.logger.bind(tag=TAG).warning(f"发送语音开始失败: {exc}")
         self.conn.client_is_speaking = True
         timeout = _failover_timeout(self.conn, "TTS")
+        seen = set()
         while True:
             tts = getattr(self.conn, "tts", None)
+            if tts is not None:
+                seen.add(id(tts))
             probe = _TTSAudioProbe(tts) if tts is not None else None
             try:
                 await asyncio.wait_for(
                     asyncio.to_thread(speak, self.conn, text), timeout=timeout
                 )
                 # 队列线程会吞掉合成异常，这里以“限定时间内是否产出音频”判活。
-                if probe is not None and not await probe.wait_first_audio(timeout):
-                    raise TimeoutError("TTS 未在限定时间内产出音频")
+                # 线程中途换成另一个实例时，立刻在新实例上重播，不把这次等待再拉长。
+                if probe is not None:
+                    heard = await probe.wait_first_audio(timeout, self.conn)
+                    if heard == "aborted":
+                        return
+                    if heard == "switched":
+                        new_tts = getattr(self.conn, "tts", None)
+                        if new_tts is None or id(new_tts) in seen:
+                            raise TimeoutError("TTS 切换后仍未产出音频")
+                        self.conn.client_abort = False
+                        self.conn.sentence_id = uuid.uuid4().hex
+                        self.conn.client_is_speaking = True
+                        continue
+                    if not heard:
+                        raise TimeoutError("TTS 未在限定时间内产出音频")
                 return
             except Exception as exc:
+                if getattr(self.conn, "client_abort", False):
+                    return
                 _log_guide(
                     self.conn, "warning",
                     f"TTS服务失败({exc})，尝试切换备用provider",
@@ -2500,6 +2625,8 @@ class VoiceActivationSession:
                 if not await _swap_to_fallback(self.conn, "TTS", expect_active=marked):
                     break
                 # 换一个 sentence_id 重播，避免和刚才半失败的队列内容冲突。
+                # 清掉打断标记，否则新实例的文本线程会把重放整段丢掉。
+                self.conn.client_abort = False
                 self.conn.sentence_id = uuid.uuid4().hex
                 self.conn.client_is_speaking = True
             finally:

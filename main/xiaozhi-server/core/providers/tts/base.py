@@ -148,6 +148,7 @@ class TTSProviderBase(ABC):
             return
 
         self._last_opus_drop_reason = None
+        self._produced_audio_frames = getattr(self, "_produced_audio_frames", 0) + 1
         logger.bind(tag=TAG).debug(f"推送数据到队列里面帧数～～ {len(opus_data)}")
         self.tts_audio_queue.put((SentenceType.MIDDLE, opus_data, None, getattr(self, 'current_sentence_id', None)))
 
