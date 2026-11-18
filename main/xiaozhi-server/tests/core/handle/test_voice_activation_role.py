@@ -1233,7 +1233,7 @@ def test_failed_auth_waits_for_prompt_before_next_auth():
 
     asyncio.run(session._handle_auth_result({"status": "failed", "message": "未收到短信"}))
     assert order == [
-        ("say", "瑞幸咖啡暂时没能开通，授权服务没有提供具体原因。"),
+        ("say", "瑞幸咖啡暂时没能开通，请确认这个账号是否在瑞幸小程序下过单。"),
         ("wait", ""),
         ("next", ""),
     ]

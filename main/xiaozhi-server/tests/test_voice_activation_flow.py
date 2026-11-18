@@ -471,8 +471,7 @@ class VoiceActivationFlowTest(unittest.IsolatedAsyncioTestCase):
         session.auth_label = "瑞幸咖啡"
         session._run_next_auth = AsyncMock()
         for error_code, expected in (
-            ("PROVIDER_502", "瑞幸咖啡暂时没能开通，授权服务没有提供具体原因。"
-             "如果这个账号还没在瑞幸小程序下过单，可以先下单，再试一次。"),
+            ("PROVIDER_502", "瑞幸咖啡暂时没能开通，请确认这个账号是否在瑞幸小程序下过单。"),
             ("ORDER_HISTORY_REQUIRED", "瑞幸咖啡暂时没能开通，这个账号需要先在瑞幸小程序下过单。"),
         ):
             session._say.reset_mock()
@@ -480,6 +479,19 @@ class VoiceActivationFlowTest(unittest.IsolatedAsyncioTestCase):
                 "status": "failed", "errorCode": error_code, "message": "HTTP 502 from upstream",
             })
             session._say.assert_awaited_once_with(expected)
+
+    async def test_didi_unknown_failure_prompts_account_requirements(self):
+        session = self.make_session("skills")
+        session.auth_service = "didi"
+        session.auth_label = "滴滴出行"
+        session._run_next_auth = AsyncMock()
+        await session._handle_auth_result({
+            "status": "failed", "errorCode": "PROVIDER_UNKNOWN",
+        })
+        session._say.assert_awaited_once_with(
+            "滴滴出行暂时没能开通，请确认账号是否实名并开通了免密支付。"
+        )
+        session._run_next_auth.assert_awaited_once()
 
     async def test_tesla_oauth_prompts_for_sms_link(self):
         session = self.make_session("skills")
@@ -566,6 +578,18 @@ class VoiceActivationFlowTest(unittest.IsolatedAsyncioTestCase):
             await session._on_auth_summary("再试一下滴滴")
         self.assertEqual(session.auth_queue, [("didi", "滴滴出行")])
         self.assertEqual(session.auth_done, ["瑞幸咖啡"])
+
+    async def test_declining_failed_skill_retry_finishes_onboarding(self):
+        session = self.make_session("skills")
+        session.auth_failed = ["瑞幸咖啡", "滴滴出行"]
+        session._finish_auth_outcome = AsyncMock()
+        with patch.object(
+            voice,
+            "_ask_llm_json",
+            AsyncMock(return_value={"intent": "decline"}),
+        ):
+            await session._on_auth_summary("不试了")
+        session._finish_auth_outcome.assert_awaited_once_with()
 
     async def test_code_uses_only_the_selected_masked_slot(self):
         model = AsyncMock(side_effect=[

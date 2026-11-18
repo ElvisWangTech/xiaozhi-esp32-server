@@ -2068,7 +2068,7 @@ class VoiceActivationSession:
             else:
                 error_code = (result or {}).get("errorCode")
                 self.conn.logger.bind(tag=TAG).warning(f"{label}授权失败: error_code={error_code}")
-                reason = {
+                reasons = {
                     "SCAN_REQUIRED": "这次需要扫码，设备上暂时开通不了",
                     "INVALID_CODE": "验证码没能通过验证",
                     "TASK_EXPIRED": "这次验证已经超时",
@@ -2078,8 +2078,19 @@ class VoiceActivationSession:
                     "REAL_NAME_REQUIRED": "账号还需要实名认证",
                     "PASSWORD_FREE_PAYMENT_REQUIRED": "账号还需要开通免密支付",
                     "ORDER_HISTORY_REQUIRED": "这个账号需要先在瑞幸小程序下过单",
-                }.get(error_code, "授权服务没有提供具体原因")
-                await self._report_auth_failure(label, reason, error_code == "ORDER_HISTORY_REQUIRED")
+                }
+                reason = reasons.get(error_code)
+                used_default_reason = reason is None
+                if used_default_reason:
+                    reason = {
+                        "didi": "请确认账号是否实名并开通了免密支付",
+                        "luckin": "请确认这个账号是否在瑞幸小程序下过单",
+                        "tesla": "请重新打开短信里的授权链接完成登录",
+                    }.get(self.auth_service, "请稍后再试")
+                order_history_confirmed = error_code == "ORDER_HISTORY_REQUIRED" or (
+                    used_default_reason and self.auth_service == "luckin"
+                )
+                await self._report_auth_failure(label, reason, order_history_confirmed)
                 return
             await self._advance_after_skill_prompt(notice, self._run_next_auth)
             return
@@ -2227,12 +2238,14 @@ class VoiceActivationSession:
             '只输出 JSON。明确重试用 {"intent":"retry","services":["didi"]}，'
             "services 只列最终明确要重试的技能。否定或只提及的品牌不选。"
             "只有一个失败项且明确同意重试时，选这一项。全部重试时列出所有失败项。"
-            "明确结束用 skip，重听用 repeat，不明确用 unclear。",
+            '明确表示不重试、结束或以后再说，例如「不试了」「不用了」「算了」，'
+            '返回 {"intent":"skip"}。也允许返回 decline 表示拒绝重试。'
+            "重听用 repeat，不明确用 unclear。",
             text,
             "失败技能重试意图",
         )
-        intent = _intent_of(data, {"retry", "skip", "repeat", "unclear"})
-        if intent == "skip":
+        intent = _intent_of(data, {"retry", "skip", "decline", "repeat", "unclear"})
+        if intent in {"skip", "decline"}:
             await self._finish_auth_outcome()
             return
         if intent == "retry":
