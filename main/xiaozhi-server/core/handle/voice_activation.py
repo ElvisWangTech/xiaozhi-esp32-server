@@ -1736,7 +1736,9 @@ class VoiceActivationSession:
             self.ask_auth_consent = False
             self.auth_skipped.extend(label for _, label in self.auth_queue)
             self.auth_queue.clear()
-            await self._finish_skills_without_reboot("瑞幸、滴滴和特斯拉可以之后再开通。")
+            await self._finish_skills_without_reboot(
+                f"{self._join_skill_names(self._queued_skill_names(), '和')}可以之后再开通。"
+            )
         else:
             await self._repeat_prompt()
 
@@ -1750,7 +1752,41 @@ class VoiceActivationSession:
         task = self._idle_task
         if task is not None and not task.done():
             task.cancel()
-        await self._say("通用技能已绑定。开通瑞幸、滴滴或特斯拉可以说绑定技能。")
+        offer = self._join_skill_names(self._queued_skill_names(), "或")
+        await self._say(f"通用技能已绑定。开通{offer}可以说绑定技能。")
+
+    def _queued_skill_names(self):
+        spoken = {"luckin": "瑞幸", "didi": "滴滴", "tesla": "特斯拉"}
+        return [spoken.get(service, label) for service, label in self.AUTH_QUEUE]
+
+    @staticmethod
+    def _join_skill_names(names, conj):
+        if len(names) <= 1:
+            return "".join(names)
+        if len(names) == 2:
+            return f"{names[0]}{conj}{names[1]}"
+        return "、".join(names[:-1]) + conj + names[-1]
+
+    def _auth_consent_prompt(self):
+        """征求授权时只提当前依次开通队列里的技能。特斯拉被注释掉就不对用户说。"""
+        sms = [label for service, label in self.AUTH_QUEUE if service != "tesla"]
+        has_tesla = any(service == "tesla" for service, _ in self.AUTH_QUEUE)
+        sentence = "通用技能已经绑定好了。"
+        if len(sms) == 1:
+            sentence += f"{sms[0]}需要短信验证"
+        elif len(sms) == 2:
+            sentence += f"{sms[0]}和{sms[1]}需要短信验证"
+        elif sms:
+            sentence += "、".join(sms) + "需要短信验证"
+        if sms and has_tesla:
+            sentence += "，特斯拉授权链接会发到您手机。"
+        elif sms or has_tesla:
+            if has_tesla:
+                sentence += "特斯拉授权链接会发到您手机。"
+            else:
+                sentence += "。"
+        sentence += "你想先开通哪项？都可以开，也可以晚点再开。"
+        return sentence
 
     def _mark_auth_failed(self, label):
         name = label or "技能"
@@ -2354,7 +2390,7 @@ class VoiceActivationSession:
         elif self.state == self.CONFIRM_NICKNAME:
             await self._say(f"我的名字是{self.nickname}，对吗？")
         elif self.state == self.ASK_AUTH_CONSENT:
-            await self._say("通用技能已经绑定好了。瑞幸咖啡和滴滴出行需要短信验证，特斯拉授权链接会发到您手机。你想先开通哪项？都可以开，也可以晚点再开。")
+            await self._say(self._auth_consent_prompt())
         elif self.state == self.ASK_PERSONA:
             if self.persona_templates:
                 await self._say(self._persona_menu())

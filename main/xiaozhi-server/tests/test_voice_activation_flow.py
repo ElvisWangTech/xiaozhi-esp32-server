@@ -117,7 +117,9 @@ class VoiceActivationFlowTest(unittest.IsolatedAsyncioTestCase):
         await session._bind_skills()
         self.assertEqual(session.state, session.ASK_AUTH_CONSENT)
         self.assertEqual(session._post.await_count, 1)
-        self.assertIn("你想先开通哪项", session._say.await_args.args[0])
+        spoken = session._say.await_args.args[0]
+        self.assertIn("你想先开通哪项", spoken)
+        self.assertNotIn("特斯拉", spoken)
 
     async def test_role_resume_uses_saved_owner_without_asking_again(self):
         session = self.make_session("role")
