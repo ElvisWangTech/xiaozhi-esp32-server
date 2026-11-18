@@ -59,8 +59,8 @@ class PromptManager:
         self.base_prompt_template = None
         self.last_update_time = 0
         # 本次连接的基站定位结果。cell_location_text 是注入提示词的「附近」描述，
-        # weather_location 是天气查询用的区县级地名，两者必须分开：
-        # 「上海市浦东新区张江镇附近」适合给大模型当参考，却不适合直接丢给天气 API。
+        # weather_location 是天气查询用的城市名，两者必须分开：
+        # 「上海市浦东新区张江镇附近」适合给大模型当参考，天气默认按城市查。
         # 两者都只随连接存活，不写入手动失效的 LOCATION 缓存，3 小时过期后自然回退 IP。
         self.cell_location_text = ""
         self.weather_location = ""
@@ -154,8 +154,8 @@ class PromptManager:
     def _cell_location_parts(conn) -> tuple:
         """取 (附近描述, 天气用地点, 粒度)。
 
-        基站结果是粗略位置：只消费管理端解析好的 nearby 与 weather_location，
-        经纬度、radius、详细地址、路口方位距离一律不进入提示词与天气查询。
+        基站结果是粗略位置：提示词用 nearby，天气默认用城市名。
+        没有城市时才退回区县。经纬度、radius、详细地址和路口方位距离不进入天气查询。
         管理端旧缓存只有 city 时自动降级为城市级，保证平滑兼容。
         """
         cell_location = getattr(conn, "cell_location", None)
@@ -163,9 +163,9 @@ class PromptManager:
             return "", "", ""
         city = str(cell_location.get("city") or "").strip()
         nearby = str(cell_location.get("nearby") or "").strip()
-        weather = str(cell_location.get("weather_location") or "").strip()
+        district = str(cell_location.get("weather_location") or "").strip()
         if nearby:
-            return nearby, weather or city, str(cell_location.get("granularity") or "-")
+            return nearby, city or district, str(cell_location.get("granularity") or "-")
         return city, city, "city(兼容旧缓存)" if city else ""
 
     def _get_location_info(self, conn, client_ip: str) -> str:
@@ -292,7 +292,7 @@ class PromptManager:
                 and "weather_info" in self.base_prompt_template
                 and local_address
             ):
-                # 天气缓存键用区县级地名，不能把「XX附近（粗略定位）」这段提示词文本
+                # 天气缓存键用城市名，不能把「XX附近（粗略定位）」这段提示词文本
                 # 直接丢给天气 API；基站不可用时 weather_location 等于 IP 定位城市
                 self._get_weather_info(conn, self.weather_location or local_address)
 

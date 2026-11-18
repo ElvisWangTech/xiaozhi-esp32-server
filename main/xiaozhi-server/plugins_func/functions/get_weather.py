@@ -179,21 +179,11 @@ async def get_weather(conn: "ConnectionHandler", location: str = None, lang: str
         if isinstance(cell_location, dict) and cell_location.get("city")
         else ""
     )
-    # 管理端按基站精度解析出的区县级地名；旧缓存只有 city 时会降级为城市级
-    cell_weather_location = (
-        str(cell_location["weather_location"]).strip()
-        if isinstance(cell_location, dict) and cell_location.get("weather_location")
-        else ""
-    )
 
     # 优先使用用户提供的location参数
     if not location:
-        # 基站定位优先：区县级比城市级更贴近设备，但仍是粗略结果；
-        # 经纬度、详细地址与「XX附近」提示词文本都不用于天气查询
-        if cell_weather_location:
-            location = cell_weather_location
-            location_source = "基站定位（粗略/区县级）"
-        elif cell_city:
+        # 未指定地点时按城市查。区县、经纬度、详细地址和「XX附近」提示词文本都不用于天气查询
+        if cell_city:
             location = cell_city
             location_source = "基站定位（粗略/城市级）"
         elif client_ip:
@@ -239,22 +229,6 @@ async def get_weather(conn: "ConnectionHandler", location: str = None, lang: str
 
     # 缓存未命中，获取实时天气数据
     city_info = await fetch_city_info(location, api_key, api_host)
-    if (
-        not city_info
-        and requested_location is None  # 用户显式指定的地点查不到时不能改查设备所在城市
-        and cell_city
-        and location != cell_city
-    ):
-        # 区县级地名可能不在和风 GeoAPI 索引里，退回城市级，避免天气能力整体失效
-        logger.bind(tag=TAG).info(
-            f"天气区县级地名无结果，回退城市级: from={location}, to={cell_city}"
-        )
-        location = cell_city
-        weather_cache_key = f"full_weather_{location}_{lang}"
-        cached_weather_report = cache_manager.get(CacheType.WEATHER, weather_cache_key)
-        if cached_weather_report:
-            return ActionResponse(Action.REQLLM, cached_weather_report, None)
-        city_info = await fetch_city_info(location, api_key, api_host)
     if not city_info:
         return ActionResponse(
             Action.REQLLM, f"未找到相关的城市: {location}，请确认地点是否正确", None

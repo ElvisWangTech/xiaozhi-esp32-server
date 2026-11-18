@@ -2,7 +2,7 @@
 
 覆盖：基站「附近」级结果优先于 IP 定位、旧缓存平滑降级城市级、
 无结果时回退原链路、管理端接口异常静默返回 None、
-提示词与天气分别使用 nearby / weather_location 两条消费路径。
+提示词用 nearby，天气默认用城市。
 """
 import asyncio
 from types import SimpleNamespace
@@ -71,7 +71,7 @@ def test_cell_nearby_takes_priority_without_polluting_ip_cache(prompt_manager):
     assert "上海市浦东新区张江镇徐油车附近" in text
     assert "粗略" in text  # 必须显式标注粗略，避免被当成精确定位
     assert prompt_manager.cell_location_text == text
-    assert prompt_manager.weather_location == "浦东新区"
+    assert prompt_manager.weather_location == "上海市"
     # LOCATION 缓存是手动失效的，写入基站结果会让 3 小时有效期失去意义
     prompt_manager.cache_manager.set.assert_not_called()
 
@@ -103,7 +103,7 @@ def test_enhanced_prompt_falls_back_to_ip_when_cell_result_expires(prompt_manage
     assert "广州市" in prompt_manager.build_enhanced_prompt("hi", "dev-1", "1.2.3.4")
 
 
-def test_weather_cache_key_uses_district_not_prompt_text(prompt_manager):
+def test_weather_cache_key_uses_city_not_prompt_text(prompt_manager):
     prompt_manager.config = {}
     prompt_manager.context_data = ""
     prompt_manager.base_prompt_template = "{{weather_info}}"
@@ -113,14 +113,14 @@ def test_weather_cache_key_uses_district_not_prompt_text(prompt_manager):
     def fake_get(cache_type, key):
         if cache_type == CacheType.WEATHER:
             seen["key"] = key
-            return "浦东天气"
+            return "上海天气"
         return None
 
     prompt_manager.cache_manager.get.side_effect = fake_get
     prompt_manager._get_location_info(_conn(_cell_result()), "1.2.3.4")
     prompt_manager.build_enhanced_prompt("hi", "dev-1", "1.2.3.4")
 
-    assert seen["key"] == "浦东新区"
+    assert seen["key"] == "上海市"
     assert "粗略" not in seen["key"]
 
 
@@ -198,7 +198,7 @@ def _weather_conn(cell_location, client_ip="1.2.3.4"):
     return SimpleNamespace(config={}, client_ip=client_ip, cell_location=cell_location)
 
 
-def test_weather_uses_district_only(monkeypatch):
+def test_weather_uses_city_not_district(monkeypatch):
     from plugins_func.functions.get_weather import get_weather
 
     seen = {}
@@ -214,13 +214,14 @@ def test_weather_uses_district_only(monkeypatch):
     result = asyncio.run(get_weather(_weather_conn(_cell_result())))
 
     assert result.result == "已缓存天气"
-    assert "浦东新区" in seen["key"]
-    # 提示词文本、经纬度、详细地址都不能进入天气查询关键字
+    assert "上海市" in seen["key"]
+    # 区县、提示词文本、经纬度、详细地址都不能进入天气查询关键字
+    assert "浦东新区" not in seen["key"]
     assert "粗略" not in seen["key"] and "徐油车" not in seen["key"]
     assert "31.186959" not in seen["key"]
 
 
-def test_weather_district_lookup_falls_back_to_city(monkeypatch):
+def test_weather_queries_city_once(monkeypatch):
     import importlib
 
     weather_module = importlib.import_module("plugins_func.functions.get_weather")
@@ -239,7 +240,7 @@ def test_weather_district_lookup_falls_back_to_city(monkeypatch):
 
     result = asyncio.run(weather_module.get_weather(_weather_conn(_cell_result())))
 
-    assert calls["locations"] == ["浦东新区", "上海市"]
+    assert calls["locations"] == ["上海市"]
     assert "上海市" in result.result
 
 
