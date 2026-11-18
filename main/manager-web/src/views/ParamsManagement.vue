@@ -443,7 +443,9 @@ export default {
         'server.resilience': 'paramManagement.subgroup.resilience',
         'server.metrics': 'paramManagement.subgroup.metrics',
         'server.tracing': 'paramManagement.subgroup.tracing',
-        'server.cell_location': 'paramManagement.subgroup.cellLocation'
+        'server.cell_location': 'paramManagement.subgroup.cellLocation',
+        'plugins.web_search': 'paramManagement.subgroup.webSearch',
+        'plugins.get_weather': 'paramManagement.subgroup.weather'
       };
       const i18nKey = known[`${top}.${sub}`];
       if (i18nKey) return this.$t(i18nKey);

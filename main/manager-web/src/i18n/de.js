@@ -788,6 +788,8 @@ export default {
   'paramManagement.subgroup.metrics': 'Metriken',
   'paramManagement.subgroup.tracing': 'Tracing',
   'paramManagement.subgroup.plugin': 'Plugin · {name}',
+  'paramManagement.subgroup.webSearch': 'Websuche',
+  'paramManagement.subgroup.weather': 'Wetter',
   'paramManagement.subgroup.cellLocation': 'Funkzellen-Ortung',
   'paramManagement.addParam': 'Parameter hinzufügen',
   'paramManagement.editParam': 'Parameter bearbeiten',

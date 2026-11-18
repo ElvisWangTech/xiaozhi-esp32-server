@@ -788,6 +788,8 @@ export default {
   'paramManagement.subgroup.metrics': 'Metrics',
   'paramManagement.subgroup.tracing': 'Tracing',
   'paramManagement.subgroup.plugin': 'Plugin · {name}',
+  'paramManagement.subgroup.webSearch': 'Web search',
+  'paramManagement.subgroup.weather': 'Weather',
   'paramManagement.subgroup.cellLocation': 'Cell location',
   'paramManagement.addParam': 'Add Parameter',
   'paramManagement.editParam': 'Edit Parameter',

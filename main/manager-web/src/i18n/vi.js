@@ -788,6 +788,8 @@ export default {
   'paramManagement.subgroup.metrics': 'Chỉ số',
   'paramManagement.subgroup.tracing': 'Tracing',
   'paramManagement.subgroup.plugin': 'Plugin · {name}',
+  'paramManagement.subgroup.webSearch': 'Tìm kiếm web',
+  'paramManagement.subgroup.weather': 'Thời tiết',
   'paramManagement.subgroup.cellLocation': 'Định vị trạm gốc',
   'paramManagement.addParam': 'Thêm tham số',
   'paramManagement.editParam': 'Chỉnh sửa tham số',

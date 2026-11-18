@@ -36,12 +36,21 @@
 
 ### 方式1. 使用智控台部署（推荐）
 
-- 登录智控台
-- 进入"配置角色"页面，选择要配置的智能体
-- 点击"编辑功能"按钮，在右侧参数配置区域找到"联网搜索"插件
-- 勾选"联网搜索"
-- 填入搜索源（`metaso`、`tavily`或`serply`），并将对应的`API Key`填入配置项
-- 保存配置，再保存智能体配置
+联网搜索默认开启。搜索源和 API Key 配在系统参数里，每个开启了意图识别的角色都会自动继承，不用再进角色的「编辑功能」单独填写。
+
+1. 登录智控台
+2. 进入「参数管理」
+3. 打开「插件 · 联网搜索」
+4. 确认下面几项后保存：
+   - `plugins.web_search.enabled`：总开关，默认 `true`
+   - `plugins.web_search.provider`：搜索源，填 `metaso`、`tavily` 或 `serply`
+   - `plugins.web_search.api_key`：对应搜索源的 API Key。出厂值 `mk-XXXX` 需要换成可用密钥
+   - `plugins.web_search.max_results`：返回条数，默认 5
+   - `plugins.web_search.description`：告诉模型什么时候调用这个工具，可按需要修改
+
+角色需要使用函数调用或意图大模型。意图识别设为「不使用意图识别」的角色不会加载插件。
+
+设备下次建立对话即生效，不用逐个保存角色。新建角色也会默认勾选联网搜索。某个角色如果在「编辑功能」里填了自己的 API Key，则该角色继续用自己的配置。没填的角色使用系统参数。把 `plugins.web_search.enabled` 改成 `false` 可以关掉这套默认配置。
 
 ### 方式2. 单模块xiaozhi-server部署
 

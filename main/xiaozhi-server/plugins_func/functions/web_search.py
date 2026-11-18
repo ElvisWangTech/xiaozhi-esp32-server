@@ -164,7 +164,7 @@ async def web_search(conn: "ConnectionHandler", query: str = None):
     if not api_key:
         return ActionResponse(
             Action.REQLLM,
-            "联网搜索功能未配置API Key，请在配置文件中填写。",
+            "联网搜索功能未配置API Key，请在系统参数或配置文件中填写。",
             None,
         )
 

@@ -6,8 +6,10 @@ import java.util.Comparator;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
 import java.util.stream.Collectors;
 
 import org.apache.commons.lang3.StringUtils;
@@ -65,6 +67,23 @@ public class ConfigServiceImpl implements ConfigService {
     private final VoiceCloneService cloneVoiceService;
     private final AgentVoicePrintDao agentVoicePrintDao;
     private final CorrectWordFileService correctWordFileService;
+
+    private static final String WEB_SEARCH_PLUGIN = "web_search";
+    private static final String WEB_SEARCH_PARAM_PREFIX = "plugins.web_search.";
+    private static final String WEB_SEARCH_DEFAULT_DESCRIPTION = "联网搜索工具。当用户明确需要联网搜索问题时使用此工具。";
+    private static final Set<String> WEB_SEARCH_PROVIDERS = Set.of("metaso", "tavily", "serply");
+    private static final Set<String> WEB_SEARCH_PLACEHOLDER_KEYS = Set.of("mk-xxxx", "mk-xxx", "你的api key");
+    private static final String WEATHER_PLUGIN = "get_weather";
+    private static final String WEATHER_PARAM_PREFIX = "plugins.get_weather.";
+    private static final String WEATHER_DEFAULT_HOST = "km67cdhc9g.re.qweatherapi.com";
+    private static final String WEATHER_DEFAULT_KEY = "e8c3b5eb33e54c698e7a05012948f7ce";
+    private static final String WEATHER_DEFAULT_LOCATION = "上海";
+    /** 随版本下发过的共用密钥。角色参数仍是这些值时，视为没单独配置，改走系统参数。 */
+    private static final Set<String> WEATHER_SHARED_KEYS = Set.of(
+            "a861d0d5e7bf4ee1a83d9a9e4f96d4da",
+            WEATHER_DEFAULT_KEY,
+            "你的api_key",
+            "你的和风天气api密钥");
 
     @Override
     public Map<String, Object> getConfig(Boolean isCache) {
@@ -255,11 +274,16 @@ public class ConfigServiceImpl implements ConfigService {
         if (!Objects.equals(agent.getIntentModelId(), "Intent_nointent")) {
             String agentId = agent.getId();
             List<AgentPluginMapping> pluginMappings = agentPluginMappingService.agentPluginParamsByAgentId(agentId);
-            if (pluginMappings != null && !pluginMappings.isEmpty()) {
-                Map<String, Object> pluginParams = new HashMap<>();
+            Map<String, Object> pluginParams = new HashMap<>();
+            if (pluginMappings != null) {
                 for (AgentPluginMapping pluginMapping : pluginMappings) {
                     pluginParams.put(pluginMapping.getProviderCode(), pluginMapping.getParamInfo());
                 }
+            }
+            // 系统参数是联网搜索和天气的统一入口。角色没填自己的密钥时，用这份配置自动启用。
+            applyWebSearchDefault(pluginParams);
+            applyWeatherDefault(pluginParams);
+            if (!pluginParams.isEmpty()) {
                 result.put("plugins", pluginParams);
             }
         }
@@ -413,6 +437,187 @@ public class ConfigServiceImpl implements ConfigService {
         }
 
         return config;
+    }
+
+    /**
+     * 把系统参数里的联网搜索配置合并进角色插件。
+     * 默认开启。角色已经填了可用 API Key 时保留角色自己的配置；没配或仍是占位符时改用系统默认。
+     *
+     * @param pluginParams 角色插件参数，值是下发给 xiaozhi-server 的 JSON 字符串
+     */
+    private void applyWebSearchDefault(Map<String, Object> pluginParams) {
+        Map<String, Object> defaults = loadWebSearchDefault();
+        if (defaults == null) {
+            return;
+        }
+        Object existing = pluginParams.get(WEB_SEARCH_PLUGIN);
+        if (existing != null && hasConfiguredApiKey(parsePluginParam(existing).get("api_key"))) {
+            return;
+        }
+        pluginParams.put(WEB_SEARCH_PLUGIN, JsonUtils.toJsonString(defaults));
+    }
+
+    /**
+     * 读取系统参数中的联网搜索默认配置。enabled 缺省或为 true 时启用；明确写成 false 时关闭。
+     *
+     * @return 可下发的插件参数，关闭或搜索源无效时返回 null
+     */
+    private Map<String, Object> loadWebSearchDefault() {
+        if (!webSearchEnabled()) {
+            return null;
+        }
+        String provider = webSearchParam("provider").toLowerCase(Locale.ROOT);
+        if (StringUtils.isBlank(provider)) {
+            provider = "metaso";
+        }
+        if (!WEB_SEARCH_PROVIDERS.contains(provider)) {
+            return null;
+        }
+        String apiKey = webSearchParam("api_key");
+
+        Map<String, Object> defaults = new LinkedHashMap<>();
+        defaults.put("provider", provider);
+        defaults.put("api_key", apiKey);
+        defaults.put("max_results", webSearchMaxResults(webSearchParam("max_results")));
+        String description = webSearchParam("description");
+        defaults.put("description", StringUtils.isBlank(description) ? WEB_SEARCH_DEFAULT_DESCRIPTION : description);
+        return defaults;
+    }
+
+    private boolean webSearchEnabled() {
+        String enabled = webSearchParam("enabled");
+        if (StringUtils.isBlank(enabled)) {
+            return true;
+        }
+        return Boolean.parseBoolean(enabled);
+    }
+
+    private String webSearchParam(String suffix) {
+        String value = sysParamsService.getValue(WEB_SEARCH_PARAM_PREFIX + suffix, true);
+        if (value == null) {
+            return "";
+        }
+        value = value.trim();
+        if ("null".equalsIgnoreCase(value)) {
+            return "";
+        }
+        return value;
+    }
+
+    private int webSearchMaxResults(String raw) {
+        if (StringUtils.isBlank(raw)) {
+            return 5;
+        }
+        try {
+            int value = (int) Double.parseDouble(raw);
+            return value > 0 ? value : 5;
+        } catch (NumberFormatException e) {
+            return 5;
+        }
+    }
+
+    /**
+     * 把系统参数里的天气配置合并进角色插件。
+     * 默认开启。角色没配、或仍用随版本下发的共用密钥时，改用系统参数；
+     * 角色填了自己的密钥时保留角色配置。enabled 设为 false 后，共用配置的角色不再加载天气查询。
+     *
+     * @param pluginParams 角色插件参数，值是下发给 xiaozhi-server 的 JSON 字符串
+     */
+    private void applyWeatherDefault(Map<String, Object> pluginParams) {
+        Object existing = pluginParams.get(WEATHER_PLUGIN);
+        if (hasCustomWeatherKey(existing)) {
+            return;
+        }
+        if (!weatherEnabled()) {
+            pluginParams.remove(WEATHER_PLUGIN);
+            return;
+        }
+        pluginParams.put(WEATHER_PLUGIN, JsonUtils.toJsonString(loadWeatherDefault()));
+    }
+
+    /**
+     * 读取系统参数中的天气默认配置。某项留空时用代码里的默认值，保证开箱即可查天气。
+     *
+     * @return 可下发的插件参数
+     */
+    private Map<String, Object> loadWeatherDefault() {
+        Map<String, Object> defaults = new LinkedHashMap<>();
+        String apiHost = weatherParam("api_host");
+        String apiKey = weatherParam("api_key");
+        String location = weatherParam("default_location");
+        defaults.put("api_host", StringUtils.isBlank(apiHost) ? WEATHER_DEFAULT_HOST : apiHost);
+        defaults.put("api_key", StringUtils.isBlank(apiKey) ? WEATHER_DEFAULT_KEY : apiKey);
+        defaults.put("default_location", StringUtils.isBlank(location) ? WEATHER_DEFAULT_LOCATION : location);
+        return defaults;
+    }
+
+    /**
+     * enabled 缺省或为 true 时启用；明确写成 false 时关闭。
+     */
+    private boolean weatherEnabled() {
+        String enabled = weatherParam("enabled");
+        if (StringUtils.isBlank(enabled)) {
+            return true;
+        }
+        return Boolean.parseBoolean(enabled);
+    }
+
+    private String weatherParam(String suffix) {
+        String value = sysParamsService.getValue(WEATHER_PARAM_PREFIX + suffix, true);
+        if (value == null) {
+            return "";
+        }
+        value = value.trim();
+        if ("null".equalsIgnoreCase(value)) {
+            return "";
+        }
+        return value;
+    }
+
+    /**
+     * 角色天气密钥是否是单独申请的。空值和共用密钥都算没单独配置。
+     */
+    private boolean hasCustomWeatherKey(Object existing) {
+        if (existing == null) {
+            return false;
+        }
+        Object apiKey = parsePluginParam(existing).get("api_key");
+        if (apiKey == null) {
+            return false;
+        }
+        String value = String.valueOf(apiKey).trim();
+        if (value.isEmpty() || "null".equalsIgnoreCase(value)) {
+            return false;
+        }
+        return !WEATHER_SHARED_KEYS.contains(value.toLowerCase(Locale.ROOT));
+    }
+
+    private boolean hasConfiguredApiKey(Object apiKey) {
+        if (apiKey == null) {
+            return false;
+        }
+        String value = String.valueOf(apiKey).trim();
+        if (value.isEmpty() || "null".equalsIgnoreCase(value)) {
+            return false;
+        }
+        return !WEB_SEARCH_PLACEHOLDER_KEYS.contains(value.toLowerCase(Locale.ROOT));
+    }
+
+    private Map<String, Object> parsePluginParam(Object raw) {
+        if (raw instanceof Map<?, ?> map) {
+            Map<String, Object> result = new HashMap<>();
+            map.forEach((key, value) -> result.put(String.valueOf(key), value));
+            return result;
+        }
+        if (raw instanceof String text && StringUtils.isNotBlank(text)) {
+            try {
+                Map<String, Object> parsed = JsonUtils.toStringObjectMap(text);
+                return parsed == null ? new HashMap<>() : parsed;
+            } catch (RuntimeException ignored) {
+                return new HashMap<>();
+            }
+        }
+        return new HashMap<>();
     }
 
     /**
