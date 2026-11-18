@@ -902,6 +902,8 @@ class ConnectionHandler:
         self.voice_activation_handler = VoiceActivationSession(
             self, stage="skills", include_auth=include_auth, ask_auth_consent=include_auth
         )
+        # 引导还没结束，这次配完通用技能后要重启才能加载。
+        self.voice_activation_handler._reboot_after_general = True
         await self.voice_activation_handler.start()
 
     async def complete_voice_bind_setup(self):

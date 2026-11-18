@@ -77,10 +77,11 @@ class VoiceActivationFlowTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(session.state, session.GREET)
         session._post.assert_not_awaited()
 
-    async def test_first_authorization_decline_completes_without_sending_codes(self):
+    async def test_first_authorization_decline_reboots_after_general_skills(self):
         session = self.make_session("skills")
         session.include_auth = True
         session.ask_auth_consent = True
+        session._reboot_after_general = True
         session._reboot_device = AsyncMock()
         await session._bind_skills()
         self.assertEqual(session.state, session.ASK_AUTH_CONSENT)
@@ -90,6 +91,32 @@ class VoiceActivationFlowTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([call.args[0] for call in session._post.await_args_list], [
             "/device/voice-activation/skills", "/device/voice-activation/skills/complete",
         ])
+        self.assertEqual(session.state, session.REBOOTING)
+        session._reboot_device.assert_awaited_once()
+        spoken = session._say.await_args.args[0]
+        self.assertIn("配置完毕，设备即将重启", spoken)
+        self.assertNotIn("现在可以开始聊天了", spoken)
+
+    async def test_first_general_skills_without_auth_still_reboots(self):
+        session = self.make_session("skills")
+        session.include_auth = False
+        session._reboot_after_general = True
+        session._reboot_device = AsyncMock()
+        await session._bind_skills()
+        self.assertEqual(session.state, session.REBOOTING)
+        session._reboot_device.assert_awaited_once()
+        spoken = session._say.await_args.args[0]
+        self.assertIn("通用技能已绑定", spoken)
+        self.assertIn("配置完毕，设备即将重启", spoken)
+
+    async def test_later_authorization_decline_does_not_reboot(self):
+        session = self.make_session("skills")
+        session.include_auth = True
+        session.ask_auth_consent = True
+        session._reboot_device = AsyncMock()
+        await session._bind_skills()
+        with patch.object(voice, "_ask_llm_json", AsyncMock(return_value={"intent": "decline"})):
+            await session._dispatch("以后再说")
         self.assertNotEqual(session.state, session.REBOOTING)
         session._reboot_device.assert_not_awaited()
         self.assertIn("现在可以开始聊天了", session._say.await_args.args[0])

@@ -751,14 +751,18 @@ async def start_skills_onboarding(conn, announce=None, rebind=False, services=No
     """日常对话中主动说「绑定技能」时进入授权绑定。
 
     没点名时按队列依次开通，已开通的跳过。点名瑞幸、滴滴或特斯拉时只重绑那几项。
+    引导还没做完时，配完通用技能仍要重启；已经配过之后只重配授权技能，不因此重启。
     """
     named = VoiceActivationSession.named_auth_pairs(services)
     if named:
         rebind = True
         announce = _direct_rebind_announce(named)
+    first_general = getattr(conn, "voice_onboarding", None) in ("skills", "skills_quiet")
     if getattr(conn, "voice_activation_handler", None) is not None:
         handler = conn.voice_activation_handler
         if getattr(handler, "stage", None) == "skills":
+            if first_general:
+                handler._reboot_after_general = True
             handler.include_auth = True
             handler._named_services = [service for service, _ in named] or None
             handler.ask_auth_consent = not named
@@ -779,6 +783,7 @@ async def start_skills_onboarding(conn, announce=None, rebind=False, services=No
     conn.voice_activation_handler = VoiceActivationSession(
         conn, stage="skills", include_auth=True, rebind_auth=rebind, ask_auth_consent=not named
     )
+    conn.voice_activation_handler._reboot_after_general = first_general
     conn.voice_activation_handler._named_services = [service for service, _ in named] or None
     if announce:
         await conn.voice_activation_handler._say(announce)
@@ -903,6 +908,8 @@ class VoiceActivationSession:
         self.auth_skipped = []
         self._named_services = None
         self._reboot_after_complete = False
+        # 第一次配完通用技能必须重启。之后只重配授权技能时保持关闭。
+        self._reboot_after_general = False
         self._completion_prefix = None
         self._auth_status_after_code = None
         self._busy = False
@@ -1610,6 +1617,7 @@ class VoiceActivationSession:
         self.stage = "skills"
         self.include_auth = True
         self.ask_auth_consent = True
+        self._reboot_after_general = True
         await self._advance_after_skill_prompt("角色设好了。", self._announce_skills)
 
     async def _announce_skills(self):
@@ -1736,14 +1744,21 @@ class VoiceActivationSession:
             self.ask_auth_consent = False
             self.auth_skipped.extend(label for _, label in self.auth_queue)
             self.auth_queue.clear()
-            await self._finish_skills_without_reboot(
-                f"{self._join_skill_names(self._queued_skill_names(), '和')}可以之后再开通。"
-            )
+            prefix = f"{self._join_skill_names(self._queued_skill_names(), '和')}可以之后再开通。"
+            if self._reboot_after_general:
+                await self._finish_skills_and_reboot(prefix)
+            else:
+                await self._finish_skills_without_reboot(prefix)
         else:
             await self._repeat_prompt()
 
     async def _finish_general_skills(self):
-        """通用绑定已完成，但这次不自动开通授权技能。"""
+        """通用绑定已完成，但这次不自动开通授权技能。第一次配完仍要重启。"""
+        offer = self._join_skill_names(self._queued_skill_names(), "或")
+        prefix = f"通用技能已绑定。开通{offer}可以说绑定技能。"
+        if self._reboot_after_general:
+            await self._finish_skills_and_reboot(prefix)
+            return
         if not await self._complete_skills():
             return
         self.conn.voice_onboarding = None
@@ -1752,8 +1767,7 @@ class VoiceActivationSession:
         task = self._idle_task
         if task is not None and not task.done():
             task.cancel()
-        offer = self._join_skill_names(self._queued_skill_names(), "或")
-        await self._say(f"通用技能已绑定。开通{offer}可以说绑定技能。")
+        await self._say(prefix)
 
     def _queued_skill_names(self):
         spoken = {"luckin": "瑞幸", "didi": "滴滴", "tesla": "特斯拉"}
@@ -2200,9 +2214,9 @@ class VoiceActivationSession:
         await self._finish_auth_outcome()
 
     async def _finish_auth_outcome(self):
-        """只有这次新开通成功才重启。失败、跳过或原本已开通都留在对话里。"""
+        """第一次配完通用技能必须重启。之后重配授权技能时，只有新开通成功才重启。"""
         prefix = self._auth_finish_prefix()
-        if self.auth_succeeded:
+        if self.auth_succeeded or self._reboot_after_general:
             await self._finish_skills_and_reboot(prefix)
             return
         await self._finish_skills_without_reboot(prefix)
@@ -2511,7 +2525,8 @@ class VoiceActivationSession:
                 "persona_voices", "supplement_parts", "auth_queue", "auth_service", "auth_label",
                 "auth_task_id", "auth_done", "auth_succeeded", "auth_failed", "auth_skipped",
                 "include_auth", "rebind_auth", "ask_auth_consent", "_named_services",
-                "_reboot_after_complete", "_completion_prefix", "_auth_status_after_code",
+                "_reboot_after_complete", "_reboot_after_general", "_completion_prefix",
+                "_auth_status_after_code",
             )
             snapshot = {field: getattr(self, field) for field in fields}
             if self.stage == "bind":
