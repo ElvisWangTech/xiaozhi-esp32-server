@@ -166,9 +166,9 @@ async def get_weather(conn: "ConnectionHandler", location: str = None, lang: str
     from core.utils.cache.manager import cache_manager, CacheType
 
     weather_config = conn.config.get("plugins", {}).get("get_weather", {})
-    api_host = weather_config.get("api_host", "mj7p3y7naa.re.qweatherapi.com")
-    api_key = weather_config.get("api_key", "a861d0d5e7bf4ee1a83d9a9e4f96d4da")
-    default_location = weather_config.get("default_location", "广州")
+    api_host = weather_config.get("api_host", "km67cdhc9g.re.qweatherapi.com")
+    api_key = weather_config.get("api_key", "e8c3b5eb33e54c698e7a05012948f7ce")
+    default_location = weather_config.get("default_location", "上海")
     client_ip = conn.client_ip
     requested_location = location
     location_source = "调用方传入"
